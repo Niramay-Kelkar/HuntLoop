@@ -1,0 +1,12 @@
+scrapy
+playwright
+requests
+beautifulsoup4
+fastapi
+uvicorn
+sqlalchemy
+asyncpg
+python-dotenv
+python-docx
+scikit-learn
+sendgrid
