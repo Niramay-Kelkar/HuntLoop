@@ -5,6 +5,7 @@ beautifulsoup4
 fastapi
 uvicorn
 sqlalchemy
+alembic==1.19.1
 asyncpg
 python-dotenv
 python-docx
