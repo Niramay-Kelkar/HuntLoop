@@ -1,5 +1,4 @@
 import logging
-import os
 
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
@@ -8,11 +7,7 @@ from huntloop.db_models import Base, Company, JobSource, JobPosting, JobLocation
 
 load_dotenv()
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    raise RuntimeError(
-        "DATABASE_URL is not set. Copy .env.example to .env and fill in your local Postgres credentials."
-    )
+from huntloop.settings import DATABASE_URL
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
