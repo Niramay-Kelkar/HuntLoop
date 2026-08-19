@@ -11,3 +11,4 @@ python-dotenv
 python-docx
 scikit-learn
 sendgrid
+pytest==9.1.1

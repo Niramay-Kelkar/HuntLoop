@@ -1,3 +1,14 @@
+# Manual smoke-test script - NOT part of the automated pytest suite.
+# pytest.ini scopes collection to tests/, so this file (despite its
+# test_ prefix) is never picked up by `pytest`.
+#
+# Run it directly (`python -m huntloop.test_db_insert`) to sanity-check
+# end-to-end connectivity against your real local database, using
+# DATABASE_URL from .env. Unlike tests/test_pipeline.py, which runs
+# against an isolated schema and never touches real data, this script
+# intentionally writes to the real job_postings table - that's the point
+# of keeping it: a quick, no-fixtures way to confirm the actual local DB
+# is reachable and insertable, separate from the automated suite.
 import logging
 
 from dotenv import load_dotenv
