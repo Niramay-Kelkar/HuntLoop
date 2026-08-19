@@ -9,6 +9,7 @@ from sqlalchemy import (
     String,
     Text,
     DateTime,
+    Boolean,
     ForeignKey,
     JSON,
     func,
@@ -27,6 +28,12 @@ class Company(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(255), unique=True, nullable=False)
+    website = Column(String(255), nullable=True)
+    # Kept for now even though real sponsorship data will live in a
+    # separate table later.
+    h1b_sponsorship = Column(Boolean, nullable=True, default=False, server_default="false")
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now())
 
     # Relationships
     jobs = relationship("JobPosting", back_populates="company")
@@ -55,12 +62,15 @@ class JobPosting(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     # gh_job_id = Column(String(100), nullable=True)
-    gh_job_id = Column(String(50), unique=True)
+    gh_job_id = Column(String(50))
     job_title = Column(String(300), nullable=False)
     job_url = Column(String(500), nullable=False)
+    department = Column(String(255), nullable=True)
     job_description = Column(Text, nullable=True)
-    date_posted = Column(String(100), nullable=True)  # stored as string from Greenhouse
+    date_posted = Column(DateTime, nullable=True)
+    is_active = Column(Boolean, nullable=True, default=True, server_default="true")
     scraped_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_checked = Column(DateTime, nullable=True)
 
     # Foreign Keys
     company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"))
@@ -72,8 +82,8 @@ class JobPosting(Base):
     locations = relationship("JobLocation", back_populates="job", cascade="all, delete-orphan")
     skills = relationship("JobSkill", back_populates="job", cascade="all, delete-orphan")
 
-    # Avoid duplicate entries
-    __table_args__ = (UniqueConstraint('company_id', name='_job_company_uc'),)
+    # Avoid duplicate entries. Matches the constraint already enforced live.
+    __table_args__ = (UniqueConstraint('job_url', name='job_postings_job_url_key'),)
 
     def __repr__(self):
         return f"<JobPosting(title={self.title}, company={self.company_id})>"
