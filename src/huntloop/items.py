@@ -14,7 +14,7 @@ class JobPostingItem(scrapy.Item):
     job_title = scrapy.Field()
     job_url = scrapy.Field()
     job_description = scrapy.Field()
-    gh_job_id = scrapy.Field
+    gh_job_id = scrapy.Field()
 
     # These will be mapped to IDs in the pipeline
     name = scrapy.Field()

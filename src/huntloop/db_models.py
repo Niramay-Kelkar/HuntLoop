@@ -86,7 +86,7 @@ class JobPosting(Base):
     __table_args__ = (UniqueConstraint('job_url', name='job_postings_job_url_key'),)
 
     def __repr__(self):
-        return f"<JobPosting(title={self.title}, company={self.company_id})>"
+        return f"<JobPosting(title={self.job_title}, company={self.company_id})>"
 
 
 # ----------------------------------------------------------------------
@@ -102,7 +102,7 @@ class JobLocation(Base):
     job = relationship("JobPosting", back_populates="locations")
 
     def __repr__(self):
-        return f"<JobLocation(location={self.location})>"
+        return f"<JobLocation(location={self.location_name})>"
 
 
 # ----------------------------------------------------------------------

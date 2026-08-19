@@ -40,7 +40,7 @@ class GreenhouseScraper(scrapy.Spider):
         try:
             data = json.loads(response.text)
         except json.JSONDecodeError:
-            self.logger.error(f"Non-JSON response for company {company_token}: {response.text[:200]}")
+            self.logger.error(f"Non-JSON response for company {comp_token}: {response.text[:200]}")
             return
 
         # Validate data format

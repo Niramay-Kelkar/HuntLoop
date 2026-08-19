@@ -9,7 +9,7 @@
 
 import logging
 
-from psycopg2 import IntegrityError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from .db_models import (
     JobPosting,
@@ -124,55 +124,3 @@ class JobDataPipeline:
             session.close()
 
         return item
-
-# class JobDataPipeline:
-#     def __init__(self):
-#         # ✅ Replace with your PostgreSQL credentials
-#         self.engine = create_engine(
-#             "postgresql+psycopg2://postgres:<password>@localhost:5434/jobscraper",
-#             echo=True
-#         )
-#         Base.metadata.create_all(self.engine)
-#         self.Session = sessionmaker(bind=self.engine)
-#
-#     def process_item(self, item, spider):
-#         session = self.Session()
-#
-#         try:
-#             # 1️⃣ Check or create company
-#             company_name = item.get('company_name') or item.get('company_token')
-#             company = session.query(Company).filter_by(name=company_name).first()
-#             if not company:
-#                 company = Company(name=company_name)
-#                 session.add(company)
-#                 session.commit()
-#
-#             # 2️⃣ Create JobPosting
-#             job = JobPosting(
-#                 gh_job_id=item.get("gh_job_id"),
-#                 title=item.get("job_title"),
-#                 url=item.get("job_url"),
-#                 description=item.get("job_description"),
-#                 source_name=item.get("source_name"),
-#                 company_id=company.id,
-#                 date_posted=item.get("date_posted"),
-#             )
-#             session.add(job)
-#             session.commit()
-#
-#             # 3️⃣ Handle locations
-#             for loc in item.get("locations_list", []):
-#                 location = JobLocation(job_id=job.id, location=loc)
-#                 session.add(location)
-#
-#             session.commit()
-#             logger.info(f"✅ Inserted job {job.title} for {company.name}")
-#
-#         except Exception as e:
-#             session.rollback()
-#             logger.error(f"❌ Error inserting item: {e}")
-#
-#         finally:
-#             session.close()
-#
-#         return item
