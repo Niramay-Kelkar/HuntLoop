@@ -14,7 +14,7 @@ import logging
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from huntloop.db_models import Base, Company, JobSource, JobPosting, JobLocation, JobSkill
+from huntloop.db_models import Company, JobSource, JobPosting, JobLocation, JobSkill
 
 load_dotenv()
 
@@ -27,7 +27,6 @@ def main():
     try:
         # Create engine and session
         engine = create_engine(DATABASE_URL, echo=True)  # echo=True logs SQL
-        Base.metadata.create_all(engine)
 
         Session = sessionmaker(bind=engine)
         session = Session()

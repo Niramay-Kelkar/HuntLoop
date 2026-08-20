@@ -17,7 +17,7 @@ from .db_models import (
     JobLocation,
     JobSkill,
     JobSource,
-    Base, JobMetadata,
+    JobMetadata,
 )
 from sqlalchemy import create_engine
 
@@ -27,7 +27,6 @@ class JobDataPipeline:
     def __init__(self, database_url):
         self.database_url = database_url
         self.engine = create_engine(self.database_url, echo=False)
-        Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
 
     @classmethod

@@ -47,6 +47,14 @@ above as planned, not present.
   spinning up a separate instance. See `tests/conftest.py`.
 - **`JobPosting.location` was dropped** in favor of the `job_locations` child
   table, which is the canonical one-to-many representation.
+- **`alembic upgrade head` is the sole source of schema creation.** The
+  pipeline and `test_db_insert.py` used to fall back to
+  `Base.metadata.create_all()`, which could silently create tables outside
+  Alembic's bookkeeping and caused a real `alembic_version` drift incident
+  (see SESSIONS.md). That fallback is gone — don't re-add it. (Exception:
+  `tests/conftest.py` still uses `create_all()`, but only to build tables in
+  pytest's throwaway per-session schema, a separate test-isolation
+  mechanism, not app schema creation.)
 
 ## How to run things
 

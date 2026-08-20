@@ -103,3 +103,28 @@ autogenerate needs Alembic to know the true current revision.
 **Next:** Step 5 will add the employer-name normalization/matching logic
 and populate `employer_name_normalized` + the FK to `companies`. No LCA
 ingestion pipeline exists yet — this step only added the table.
+
+---
+
+## 2026-08-20 — Remove Base.metadata.create_all() fallback
+
+**Did:** Removed the `Base.metadata.create_all(engine)` call (and the now-
+unused `Base` import) from `JobDataPipeline.__init__` in `pipelines.py` and
+from `test_db_insert.py`'s `main()`. `alembic upgrade head` is now the
+single source of truth for schema creation — no other logic in either file
+touched. `tests/conftest.py`'s `create_all()` is untouched; it creates
+tables in pytest's throwaway per-session schema, a separate test-isolation
+mechanism, not an app startup fallback. Verified via a full clean-state
+run: `docker-compose down -v`, `alembic upgrade head` against the fresh
+empty Postgres (all 4 migrations applied), then the scraper end-to-end
+with no `create_all` to fall back on — 44 jobs inserted successfully.
+`pytest` still passes (2/2).
+
+**Decided:** This was the root cause of the `alembic_version` drift found
+in the previous step — the pipeline's `create_all()` fallback could silently
+create tables outside of Alembic's bookkeeping whenever the scraper ran
+before migrations did. Removing it makes that drift structurally
+impossible going forward.
+
+**Next:** Step 5 (employer-name normalization/matching) remains the next
+piece of LCA-related work; no LCA ingestion pipeline exists yet.
