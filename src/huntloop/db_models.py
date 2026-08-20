@@ -8,12 +8,15 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    Date,
     DateTime,
     Boolean,
     ForeignKey,
     JSON,
+    Numeric,
     func,
-    UniqueConstraint
+    UniqueConstraint,
+    Index,
 )
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -133,3 +136,45 @@ class JobMetadata(Base):
 
     def __repr__(self):
         return f"<JobMetadata(job_id={self.job_id})>"
+
+
+# ----------------------------------------------------------------------
+# 7️⃣ LCA Disclosure Table
+# ----------------------------------------------------------------------
+class LcaDisclosure(Base):
+    """
+    One row per DOL LCA disclosure record, as filed. Stands alone for now -
+    no FK to companies until the employer-name normalization/matching logic
+    (Step 5) exists. employer_name_normalized is nullable and left unset
+    until that same step.
+    """
+    __tablename__ = "lca_disclosures"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    case_number = Column(String(50), unique=True, nullable=False)
+    employer_name = Column(String(255), nullable=False, index=True)
+    employer_name_normalized = Column(String(255), nullable=True, index=True)
+    trade_name_dba = Column(String(255), nullable=True)
+    case_status = Column(String(50), nullable=False)
+    job_title = Column(String(300), nullable=False)
+    soc_code = Column(String(20), nullable=True)
+    soc_title = Column(String(255), nullable=True)
+    worksite_city = Column(String(255), nullable=True)
+    worksite_state = Column(String(10), nullable=True)
+    worksite_postal_code = Column(String(20), nullable=True)
+    wage_rate_of_pay_from = Column(Numeric, nullable=True)
+    wage_rate_of_pay_to = Column(Numeric, nullable=True)
+    wage_unit_of_pay = Column(String(20), nullable=True)
+    received_date = Column(Date, nullable=True)
+    decision_date = Column(Date, nullable=True)
+    fiscal_year = Column(Integer, nullable=False, index=True)
+    quarter = Column(Integer, nullable=False)
+    source_file = Column(String(255), nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_lca_disclosures_fiscal_year_quarter", "fiscal_year", "quarter"),
+    )
+
+    def __repr__(self):
+        return f"<LcaDisclosure(case_number={self.case_number}, employer={self.employer_name})>"

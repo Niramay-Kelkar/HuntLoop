@@ -76,3 +76,30 @@ No build/push/deploy/lint steps yet — just test execution.
 branch is `master`.
 
 **Next:** Linting and a build/push step are open, not yet started.
+
+---
+
+## 2026-08-20 — LCA disclosures table
+
+**Did:** Added `LcaDisclosure` model (`lca_disclosures` table) to
+`db_models.py` for DOL LCA disclosure records, based on the real DOL LCA
+schema audited from downloaded sample files (`CASE_NUMBER`, `EMPLOYER_NAME`,
+`CASE_STATUS`, `JOB_TITLE`, `WORKSITE_*`, `WAGE_RATE_OF_PAY_*`, etc.), plus
+`fiscal_year`/`quarter`/`source_file` provenance columns and an
+`employer_name_normalized` column left nullable/unpopulated for now.
+Indexes on `employer_name`, `employer_name_normalized`, `fiscal_year`, and
+`(fiscal_year, quarter)`. Generated via `alembic revision --autogenerate`
+and applied with `alembic upgrade head` — table stands alone, no FK to
+`companies` yet. No parsing/ingestion code, no existing table touched.
+
+**Decided:** The local Docker Postgres volume's schema had drifted from
+Alembic's bookkeeping — a prior session's tables were created via the
+pipeline's `Base.metadata.create_all()` fallback rather than
+`alembic upgrade head`, leaving no `alembic_version` row even though the
+schema matched head. Ran `alembic stamp head` to reconcile that bookkeeping
+(no DDL, no data touched) before generating this migration, since
+autogenerate needs Alembic to know the true current revision.
+
+**Next:** Step 5 will add the employer-name normalization/matching logic
+and populate `employer_name_normalized` + the FK to `companies`. No LCA
+ingestion pipeline exists yet — this step only added the table.

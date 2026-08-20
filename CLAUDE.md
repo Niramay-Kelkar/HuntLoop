@@ -36,9 +36,12 @@ above as planned, not present.
   `gh_job_id` isn't reliably unique and won't generalize to non-Greenhouse
   sources later.
 - **`Company.h1b_sponsorship` is intentionally kept** even though it's a bare
-  boolean today. It will likely be superseded by a dedicated sponsors table
-  once real sponsorship data is modeled properly — don't "fix" it in the
-  meantime by removing or redesigning it unprompted.
+  boolean today. It will likely be superseded by real sponsorship data —
+  `LcaDisclosure` (`lca_disclosures` table) now holds raw DOL LCA disclosure
+  records, but it's standalone with no FK to `companies` yet; that link,
+  plus `employer_name_normalized` population, is a later step (see
+  SESSIONS.md). Don't "fix" `h1b_sponsorship` in the meantime by removing or
+  redesigning it unprompted.
 - **Test isolation uses a throwaway Postgres schema per test session**, not
   `pytest-postgresql`. Reuses the existing local Postgres server rather than
   spinning up a separate instance. See `tests/conftest.py`.
@@ -57,7 +60,12 @@ Phase 0 (repo hygiene / foundations) is done: env config extraction, Alembic
 setup, schema-drift reconciliation, small bug fixes, pytest scaffold,
 README, Docker (app + Postgres via docker-compose), and a minimal CI
 workflow (migrations + pytest against a real Postgres service on every
-push/PR). See SESSIONS.md for the log. Not yet started: broader test
-coverage, scraper parsing/HTTP tests, CI linting/build/deploy steps,
-multi-source aggregation, sponsorship matching — nothing beyond what's
-listed above should be assumed built.
+push/PR). Sponsorship-matching work has started: DOL LCA disclosure sample
+files were audited (real schema, messy employer-name formatting, case
+status values — see SESSIONS.md), and a standalone `lca_disclosures` table
+now exists to hold that data. See SESSIONS.md for the full log. Not yet
+started: broader test coverage, scraper parsing/HTTP tests, CI
+linting/build/deploy steps, multi-source aggregation, any actual LCA
+ingestion pipeline, employer-name normalization/matching, or the FK from
+`lca_disclosures` to `companies` — nothing beyond what's listed above
+should be assumed built.
