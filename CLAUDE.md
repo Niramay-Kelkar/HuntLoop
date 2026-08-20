@@ -29,6 +29,12 @@ above as planned, not present.
   dev-oriented containerized setup. Not hardened for production. CI
   (`.github/workflows/ci.yml`) runs migrations + pytest against a real
   Postgres service container on every push/PR to `master`.
+- One-off scripts live in `scripts/` (not part of the ongoing app pipeline
+  or CI) — e.g. `scripts/ingest_lca_disclosures.py`, run manually. Uses
+  `pandas`/`openpyxl` (in `requirements.txt`) to read DOL's `.xlsx`
+  disclosure files from `data/raw/dol_lca/` (gitignored — see SESSIONS.md's
+  Step 1 audit for how those files are obtained; they're downloaded
+  manually, not fetched by any code in this repo).
 
 ## Key architectural decisions (already made — don't re-litigate)
 
@@ -68,12 +74,13 @@ Phase 0 (repo hygiene / foundations) is done: env config extraction, Alembic
 setup, schema-drift reconciliation, small bug fixes, pytest scaffold,
 README, Docker (app + Postgres via docker-compose), and a minimal CI
 workflow (migrations + pytest against a real Postgres service on every
-push/PR). Sponsorship-matching work has started: DOL LCA disclosure sample
+push/PR). Sponsorship-matching work is underway: DOL LCA disclosure sample
 files were audited (real schema, messy employer-name formatting, case
-status values — see SESSIONS.md), and a standalone `lca_disclosures` table
-now exists to hold that data. See SESSIONS.md for the full log. Not yet
-started: broader test coverage, scraper parsing/HTTP tests, CI
-linting/build/deploy steps, multi-source aggregation, any actual LCA
-ingestion pipeline, employer-name normalization/matching, or the FK from
+status values), the standalone `lca_disclosures` table was added, and one
+quarter (FY2025_Q4, 115,695 approved-status rows) has been loaded into it
+via `scripts/ingest_lca_disclosures.py`. See SESSIONS.md for the full log.
+Not yet started: broader test coverage, scraper parsing/HTTP tests, CI
+linting/build/deploy steps, multi-source aggregation, ingesting the other
+downloaded quarters, employer-name normalization/matching, or the FK from
 `lca_disclosures` to `companies` — nothing beyond what's listed above
 should be assumed built.

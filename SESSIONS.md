@@ -128,3 +128,43 @@ impossible going forward.
 
 **Next:** Step 5 (employer-name normalization/matching) remains the next
 piece of LCA-related work; no LCA ingestion pipeline exists yet.
+
+---
+
+## 2026-08-20 — One-off LCA ingestion script (FY2025_Q4)
+
+**Did:** Added `scripts/ingest_lca_disclosures.py`, a one-off (not part of
+the app's ongoing pipeline) script that loads
+`data/raw/dol_lca/LCA_Disclosure_Data_FY2025_Q4.xlsx` into `lca_disclosures`.
+Reads via pandas/openpyxl, filters to non-null `CASE_NUMBER` (padding-row
+guard) and `CASE_STATUS` in `('Certified', 'Certified - Withdrawn')` (the
+approved-sponsorship statuses per Step 1), maps DOL columns to model
+fields, stamps every row with `fiscal_year=2025`/`quarter=4`/`source_file`,
+leaves `employer_name_normalized` null, and stores `WAGE_UNIT_OF_PAY`
+as-is without attempting to fix the known mismatched-unit rows. Batches
+inserts at 5,000 rows via Postgres `INSERT ... ON CONFLICT (case_number)
+DO NOTHING`, so duplicate `case_number`s are skipped per-row rather than
+aborting the batch. Added `pandas`/`openpyxl` to `requirements.txt`.
+
+Ran against the containerized Postgres (`localhost:5433`, verified via
+`inet_server_port`/`version()` to be the Docker instance, not the real
+local one on 5432): 118,580 real rows in the sheet, 2,885 filtered as
+non-approved, 115,695 inserted in 277s (~420 rows/sec). Row count in the
+DB matches exactly; spot-checked 5 random rows field-by-field against the
+source Excel with an exact match. Re-ran the script a second time: 0
+inserted, all 115,695 correctly skipped as duplicates, no crash, DB count
+unchanged. `pytest` still passes (2/2) with `pandas`/`openpyxl` now in the
+app image.
+
+**Decided:** Chose a batch size of 5,000 (~23 batches for 115K rows) to
+balance round-trip count against blast radius — small enough that one bad
+batch (e.g. a future file with a NOT NULL violation) doesn't lose a huge
+chunk of otherwise-good work, large enough to get real throughput from
+Postgres's multi-row `INSERT ... VALUES`. Used `ON CONFLICT DO NOTHING`
+(Postgres-specific) rather than per-row try/except, since it resolves
+uniqueness conflicts within a single batched statement instead of forcing
+a slow one-row-at-a-time fallback.
+
+**Next:** This script only covers FY2025_Q4. Ingesting the other quarters
+downloaded in Step 1, and Step 5's employer-name normalization/matching +
+FK to `companies`, are both still open.
