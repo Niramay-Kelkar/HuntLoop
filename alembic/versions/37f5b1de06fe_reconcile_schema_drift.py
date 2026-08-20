@@ -50,8 +50,14 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     # --- Schema change -----------------------------------------------
     # job_locations is the canonical one-to-many representation; the
-    # flat column on job_postings is redundant.
-    op.drop_column('job_postings', 'location')
+    # flat column on job_postings is redundant. Guarded because this
+    # migration also needs to run cleanly against a fresh database that
+    # never had the drifted `location` column in the first place.
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    columns = [col['name'] for col in inspector.get_columns('job_postings')]
+    if 'location' in columns:
+        op.drop_column('job_postings', 'location')
 
     # --- Data cleanup (steps 7-8) --------------------------------------
     # 7. Consolidate "greenhouse_api" into the canonical "Greenhouse" row.

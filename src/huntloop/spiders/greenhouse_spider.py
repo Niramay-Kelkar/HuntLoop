@@ -34,6 +34,10 @@ class GreenhouseScraper(scrapy.Spider):
                 meta={'company_token': company_token}
             )
 
+    async def start(self) -> Any:
+        for request in self.start_requests():
+            yield request
+
     def parse(self, response):
         comp_token = response.meta['company_token']
 

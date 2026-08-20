@@ -96,6 +96,30 @@ Tests run against a throwaway Postgres schema created for the test session
 (same server as `DATABASE_URL`, different namespace) — they never read or
 write your real `job_postings` data. See `tests/conftest.py`.
 
+## Run with Docker
+
+Runs the scraper/pipeline and a Postgres 18 database as two containers via
+docker-compose. This is a separate Postgres instance from any local one —
+it's exposed on host port `5433` (not `5432`) so there's no ambiguity about
+which database gets written to, and its data lives in a named volume
+(`pgdata`) that persists across `docker-compose down`/`up`.
+
+```bash
+cp .env.example .env
+# edit .env: fill in DATABASE_URL, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
+# (the containerized app builds its own DATABASE_URL from the POSTGRES_* vars,
+# pointed at the `db` service, so DATABASE_URL itself only matters if you also
+# run things locally against localhost:5432)
+
+docker-compose up --build -d db   # start Postgres and wait for it to be ready
+docker-compose run --rm app alembic upgrade head   # first run only: create the schema
+
+docker-compose up --build   # run the scraper (and keep db running)
+```
+
+`docker-compose down -v` tears everything down, including the `pgdata`
+volume, for a clean slate.
+
 ## Adding a company to scrape
 
 Not yet configurable. Companies are a hardcoded list in
@@ -121,10 +145,11 @@ there's no config file or CLI flag for this yet.
   locations, skills, raw metadata)
 - Alembic migrations, env-based config, a pytest scaffold covering the
   pipeline/DB-insert path
+- A dev-oriented Docker setup (app + Postgres via docker-compose)
 
 **Not built yet:**
 - Scraping more than one hardcoded company, or sources other than Greenhouse
 - Any job matching or sponsorship-based filtering (the `h1b_sponsorship`
   column exists on `companies` but nothing populates or reads it yet)
 - An API or any user-facing interface
-- Deployment/containerization of any kind
+- A containerized test runner/CI, or a production-hardened deploy image
