@@ -25,6 +25,10 @@ above as planned, not present.
 - Migrations: Alembic, config at repo root (`alembic.ini`, `alembic/`).
 - Tests: pytest, config at repo root (`pytest.ini`), tests live in `tests/`.
 - Entrypoint: `python main.py` runs the Greenhouse scraper end-to-end.
+- Docker: `Dockerfile` + `docker-compose.yml` (app + postgres:18) for a
+  dev-oriented containerized setup. Not hardened for production. CI
+  (`.github/workflows/ci.yml`) runs migrations + pytest against a real
+  Postgres service container on every push/PR to `master`.
 
 ## Key architectural decisions (already made — don't re-litigate)
 
@@ -50,7 +54,10 @@ head` (migrations).
 ## Current phase / what's next
 
 Phase 0 (repo hygiene / foundations) is done: env config extraction, Alembic
-setup, schema-drift reconciliation, small bug fixes, pytest scaffold. See
-SESSIONS.md for the log. Phase 1+ (broader test coverage, scraper
-parsing/HTTP tests, multi-source aggregation, sponsorship matching) hasn't
-started — nothing beyond Phase 0 should be assumed built.
+setup, schema-drift reconciliation, small bug fixes, pytest scaffold,
+README, Docker (app + Postgres via docker-compose), and a minimal CI
+workflow (migrations + pytest against a real Postgres service on every
+push/PR). See SESSIONS.md for the log. Not yet started: broader test
+coverage, scraper parsing/HTTP tests, CI linting/build/deploy steps,
+multi-source aggregation, sponsorship matching — nothing beyond what's
+listed above should be assumed built.
