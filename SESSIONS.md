@@ -486,3 +486,64 @@ named module list and touching it wasn't requested.
 
 **Next:** Nothing logging-related outstanding. `test_db_insert.py` still
 has its own ad hoc logging setup if a future session wants to fold it in.
+
+---
+
+## 2026-08-20 — Sponsorship lookup against real companies (Step 7)
+
+**Did:** Added `get_sponsorship_summary()` in
+`src/huntloop/matching/sponsorship.py`, on top of Step 6's
+`find_matching_employers()`. Given a `Company` row, it finds its likely
+`employer_name_normalized` matches and aggregates `lca_disclosures`
+across all of them: total approved LCAs, a per-fiscal-year breakdown,
+distinct job titles sponsored, and distinct worksite states - the
+"does this company sponsor, and how much" question. Deliberately not a
+stored FK from `companies` to `lca_disclosures`: a company can span
+multiple legal entities in the LCA data and match confidence varies row
+to row, so this stays a queryable lookup computed at call time rather
+than a rigid one-to-one link baked into the schema.
+
+Ran it against both currently-scraped companies:
+
+- **checkr**: matched only `CHECKR` (score 100.0). 48 approved LCAs -
+  2021: 11, 2022: 6, 2024: 17, 2025: 14. 38 distinct job titles (Finance,
+  Product, Engineering roles - e.g. "Finance Manager", "Engineering
+  Manager", "Lead Product Manager, International"). 9 distinct worksite
+  states (CA, CO, FL, GA, MA, NC, OR, PA, WA).
+- **duolingo**: matched only `DUOLINGO` (score 100.0). 95 approved LCAs -
+  2021: 8, 2022: 4, 2024: 43, 2025: 40. 40 distinct job titles, several
+  Duolingo-specific (e.g. "Language Assessment Scientist", "AI Research
+  Scientist"). 3 distinct worksite states (NY, PA, WA).
+
+Manually verified both matches are correct, not just "code ran without
+error": for `CHECKR`, the two raw `employer_name` values behind it are
+`CHECKR, INC.` and `Checkr, Inc.` - the real background-check company
+(`checkr.com`), and CA/CO worksite states line up with the "San Francisco"
+/"Denver, Colorado" locations already seen in this company's scraped job
+postings. For `DUOLINGO`, the one raw `employer_name` behind it is
+`Duolingo, Inc.`, and PA (Duolingo is headquartered in Pittsburgh) plus
+the language-education-specific job titles are strong independent
+corroboration. Checked for ambiguity: `find_matching_employers` returned
+exactly one candidate for each query (not several close-scoring
+options to choose between) - e.g. `CLOUDCHECKR` (an unrelated company
+whose normalized name contains "CHECKR" as a substring) scores only 70.6
+against the query "checkr", well below the 88 threshold, so it never
+entered the running.
+
+**Decided:** No `sponsor_name_overrides` entry was added for either
+company - both matches were already unambiguous and independently
+verifiable as correct, so a manual override would have been redundant.
+The override table remains empty; it's still there for the cases fuzzy
+matching alone doesn't resolve cleanly, just not needed for these two.
+
+**Next:** This closes out the core of Phase 1 (sponsorship-matching MVP):
+LCA ingestion (Steps 1-4), mechanical normalization (Step 5), fuzzy
+matching with a manual-override escape hatch (Step 6), and now a working
+company -> sponsorship lookup (Step 7) all exist and are verified against
+real data. Not yet done: broader scraper coverage (only `checkr` and
+`duolingo` are configured - see `company_tokens` in
+`greenhouse_spider.py`), any UI/API surface for `get_sponsorship_summary()`
+(it's a Python function today, not exposed anywhere), curating
+`sponsor_name_overrides` for companies where fuzzy matching doesn't
+resolve cleanly, and the eventual decision on whether/how to persist a
+company<->LCA link beyond the current on-the-fly lookup.

@@ -51,12 +51,20 @@ above as planned, not present.
   boolean today. It will likely be superseded by real sponsorship data —
   `LcaDisclosure` (`lca_disclosures` table) now holds raw DOL LCA disclosure
   records with `employer_name_normalized` populated for every row (see
-  `src/huntloop/matching/normalize.py`), and `find_matching_employers()`
-  (`src/huntloop/matching/fuzzy_match.py`) can rank candidate
-  `employer_name_normalized` values against a raw company name — but
-  neither is wired up to `companies` yet; that link is Step 7 (see
-  SESSIONS.md). Don't "fix" `h1b_sponsorship` in the meantime by removing or
-  redesigning it unprompted.
+  `src/huntloop/matching/normalize.py`), `find_matching_employers()`
+  (`src/huntloop/matching/fuzzy_match.py`) ranks candidate
+  `employer_name_normalized` values against a raw company name, and
+  `get_sponsorship_summary()` (`src/huntloop/matching/sponsorship.py`)
+  applies that to a real `Company` row to answer "does this company
+  sponsor, and how much." Don't "fix" `h1b_sponsorship` in the meantime by
+  removing or redesigning it unprompted.
+- **There is deliberately no FK from `companies` to `lca_disclosures`.**
+  `get_sponsorship_summary()` computes the match at call time via
+  `find_matching_employers()` instead of a stored link — a company can span
+  multiple legal entities in the LCA data, and match confidence varies row
+  to row, so a rigid one-to-one FK would be premature normalization. Don't
+  add that FK unprompted; if it's ever needed, that's a deliberate future
+  decision, not a "fix" for this being "incomplete."
 - **`normalize_employer_name()` (`src/huntloop/matching/normalize.py`) is
   mechanical normalization only** — uppercase, strip periods/commas,
   collapse whitespace, drop a trailing legal-entity suffix
@@ -77,10 +85,10 @@ above as planned, not present.
   not eliminate every collision between unrelated companies sharing a
   generic industry-suffix word (e.g. "... CONSULTANCY SERVICES",
   "... INFOSYSTEMS") — that residual ambiguity is what
-  `sponsor_name_overrides` is for. `sponsor_name_overrides` is not
-  populated with real curated entries yet, and neither table is linked to
-  `companies` yet — don't assume Step 7 (applying this to real scraped
-  companies) is done.
+  `sponsor_name_overrides` is for. `sponsor_name_overrides` is still empty
+  — for both companies checked so far (`checkr`, `duolingo`), fuzzy
+  matching alone was already unambiguous and verified correct, so no
+  override was needed yet; don't assume the table has real entries in it.
 - **Test isolation uses a throwaway Postgres schema per test session**, not
   `pytest-postgresql`. Reuses the existing local Postgres server rather than
   spinning up a separate instance. See `tests/conftest.py`.
@@ -117,24 +125,35 @@ Phase 0 (repo hygiene / foundations) is done: env config extraction, Alembic
 setup, schema-drift reconciliation, small bug fixes, pytest scaffold,
 README, Docker (app + Postgres via docker-compose), and a minimal CI
 workflow (migrations + pytest against a real Postgres service on every
-push/PR). Sponsorship-matching work is underway: DOL LCA disclosure sample
-files were audited (real schema, messy employer-name formatting, case
-status values), the standalone `lca_disclosures` table was added, and
-`scripts/ingest_lca_disclosures.py` now ingests every downloaded modern-
-format quarter (not just one), populating `employer_name_normalized` at
-insert time via `normalize_employer_name()`. As of 2026-08-20, 11
-fiscal-year/quarter files are loaded — FY2021 Q1 & Q4, FY2022 Q4, FY2024
-Q1-Q4, FY2025 Q1-Q4 — 1,431,321 total rows in `lca_disclosures`, all with
-`employer_name_normalized` populated (108,575 distinct normalized values
-vs. 129,295 distinct raw `employer_name` values). Fuzzy matching
-(`find_matching_employers()` in `src/huntloop/matching/fuzzy_match.py`,
-`rapidfuzz`-based, checks the new `sponsor_name_overrides` table first) is
-built and tested but not yet applied to real scraped companies. Logging
-across the scraper, pipeline, and ingestion scripts now goes through a
-single shared config (`src/huntloop/logging_config.py`) with a consistent
-format and a `LOG_LEVEL`-controlled level, instead of each module's own
-ad hoc setup. See SESSIONS.md for the full log. Not yet started: broader
-test coverage, scraper parsing/HTTP tests, CI linting/build/deploy steps,
-multi-source aggregation, curating real `sponsor_name_overrides` entries,
-or the FK from `lca_disclosures`/`sponsor_name_overrides` to `companies`
-— nothing beyond what's listed above should be assumed built.
+push/PR).
+
+Phase 1 (sponsorship-matching MVP) core is now done, as of 2026-08-20:
+DOL LCA disclosure files were audited and ingested (11 fiscal-year/quarter
+files, 1,431,321 rows in `lca_disclosures`, via
+`scripts/ingest_lca_disclosures.py`); every row has a mechanically
+normalized `employer_name_normalized` (`normalize_employer_name()`, 108,575
+distinct values vs. 129,295 distinct raw `employer_name` values); fuzzy
+matching (`find_matching_employers()`, `rapidfuzz`-based, with a
+`sponsor_name_overrides` manual-correction escape hatch) resolves a raw
+company name to likely `employer_name_normalized` candidates; and
+`get_sponsorship_summary()` applies that to a real `Company` row and
+returns an aggregated sponsorship picture (total approved LCAs by fiscal
+year, distinct job titles, distinct worksite states). Verified end-to-end
+against both currently-scraped companies (`checkr`: 48 approved LCAs
+2021-2025; `duolingo`: 95 approved LCAs 2021-2025) — both matches manually
+confirmed correct, no override needed. Shared logging
+(`src/huntloop/logging_config.py`, `LOG_LEVEL`-controlled, console +
+rotating file) is also in place across the scraper, pipeline, and scripts.
+See SESSIONS.md for the full log.
+
+Not yet started / explicitly deferred: broader scraper coverage (only
+`checkr` and `duolingo` are configured), any UI/API surface for
+`get_sponsorship_summary()` (it's a Python function today, called
+directly, not exposed via an endpoint or the scraper pipeline), curating
+`sponsor_name_overrides` for companies fuzzy matching doesn't resolve
+cleanly (table is still empty), broader test coverage, scraper
+parsing/HTTP tests, CI linting/build/deploy steps, multi-source
+aggregation beyond Greenhouse, and any FK from `companies` to
+`lca_disclosures` (deliberately not built — see the architectural
+decisions above). Nothing beyond what's listed above should be assumed
+built.
