@@ -6,23 +6,25 @@ in README.md.
 
 ## Project overview
 
-HuntLoop, today, is a Greenhouse + Lever job-board scraper (Scrapy) that pipes
-postings into a Postgres database via SQLAlchemy. That's the whole built
-system: scrape each platform's public JSON API → normalize into
-`JobPostingItem` → the single, source-agnostic `JobDataPipeline` upserts
-companies/sources/postings/locations/skills. `main.py` (the actual
-entrypoint) still only runs the Greenhouse spider — the Lever spider exists
-and is proven standalone (`src/huntloop/spiders/lever_spider.py`, see
-SESSIONS.md 2026-08-21) but isn't wired into `main.py` yet.
+HuntLoop, today, is a multi-ATS job-board scraper (Scrapy: Greenhouse + Lever
+implemented) that pipes postings into a Postgres database via SQLAlchemy, with
+an ATS-detection layer (`detect_ats()`) driving which spider runs for which
+company. The full loop: `detect_ats()` identifies a company's ATS platform
+from its careers URL → `scripts/detect_and_store_ats.py` stores that in
+`companies.ats_platform`/`ats_token` → `main.py` (the entrypoint) queries
+those rows, groups by platform, and runs `GreenhouseScraper`/`LeverScraper`
+once each with the full token list for their platform → each spider
+normalizes into `JobPostingItem` → the single, source-agnostic
+`JobDataPipeline` upserts companies/sources/postings/locations/skills.
+Platforms without an implemented spider (ashby, workday) or companies with no
+detected platform are skipped with a clear log message, not silently dropped.
 
-Broader vision (not yet built): aggregate job postings across many sources, and
-add sponsorship-aware matching so candidates can filter for companies that
-actually sponsor visas (e.g. H1B). Treat anything beyond the Greenhouse pipeline
-above as planned, not present. One standalone building block toward
-multi-source aggregation exists today: `detect_ats()`
-(`src/huntloop/ats_detection.py`), which identifies which ATS platform a
-company's careers page uses — see the architectural decisions below. It is
-not wired into the scraper or any company list; nothing calls it yet.
+Broader vision (not yet built): aggregate job postings across many sources
+beyond Greenhouse/Lever, and add sponsorship-aware matching so candidates can
+filter for companies that actually sponsor visas (e.g. H1B). Ashby and
+Workday spiders are deliberately not built yet — `detect_ats()` already
+identifies companies on those platforms (see `companies.ats_platform`), but
+nothing scrapes them; treat that as planned, not present.
 
 ## Tech stack and conventions
 
@@ -32,7 +34,13 @@ not wired into the scraper or any company list; nothing calls it yet.
   hardcode credentials — `.env.example` documents the required shape.
 - Migrations: Alembic, config at repo root (`alembic.ini`, `alembic/`).
 - Tests: pytest, config at repo root (`pytest.ini`), tests live in `tests/`.
-- Entrypoint: `python main.py` runs the Greenhouse scraper end-to-end.
+- Entrypoint: `python main.py` runs the multi-ATS orchestrator end-to-end
+  — queries `companies.ats_platform`, groups by platform, and runs
+  `GreenhouseScraper`/`LeverScraper` once each with all tokens for that
+  platform (see the architectural decisions below). `scrapy crawl` is not
+  a supported invocation path — there is no `scrapy.cfg` at the repo
+  root (deliberate, see `05b833c`'s commit message); always run spiders
+  via `main.py` or programmatically (`process.crawl(SpiderClass, ...)`).
 - Docker: `Dockerfile` + `docker-compose.yml` (app + postgres:18) for a
   dev-oriented containerized setup. CI (`.github/workflows/ci.yml`) runs
   migrations + pytest against a real Postgres service container on every
@@ -184,6 +192,48 @@ not wired into the scraper or any company list; nothing calls it yet.
   fixed code. If a third spider is ever added, its own `self.name` will
   get its own distinct row the same way Lever's did automatically — no
   further pipeline or smoke-test changes needed.
+- **`companies.ats_platform`/`ats_token`/`careers_url` (added 2026-08-21,
+  see SESSIONS.md) are nullable and populated only by manually running
+  `scripts/detect_and_store_ats.py`** against a hardcoded curated list -
+  not automatically kept fresh, and not every company row has values yet
+  (e.g. `OpenAI`, from `test_db_insert.py`'s smoke test, has all three
+  `NULL`). Company rows use the same lowercase-token naming convention as
+  spider-created rows (`"checkr"`, not `"Checkr"`) specifically to avoid
+  repeating the `job_sources` naming-drift bug above for `companies`.
+  **`upsert_company_ats()` will not overwrite an existing, previously-
+  successful `ats_platform`/`ats_token` value when the current
+  `detect_ats()` result has `error` set** (2026-08-21 follow-up fix, see
+  SESSIONS.md - a real transient `ReadTimeout` was observed silently
+  blanking a correct `checkr` detection back to `unknown`/`NULL` before
+  this) - it logs a `"detection attempt failed"` warning and leaves the
+  stored value alone instead. A genuine error-free "checked, nothing
+  matched" result still overwrites to `"unknown"` normally; a company
+  with no prior successful value still stores `unknown`/`NULL` on error,
+  since there's nothing to protect. Don't revert this to unconditional
+  overwrite - `tests/test_detect_and_store_ats.py` would catch it (proven
+  to fail against the old behavior).
+- **`GreenhouseScraper`/`LeverScraper` both accept a `companies`
+  constructor/spider argument, consistently (2026-08-21, see
+  SESSIONS.md).** `__init__(self, companies=None, *args, **kwargs)` on
+  both: `None` falls back to the original single-company default
+  (`['checkr']`/`['wealthfront']`) for backward compat; a string is
+  split on commas (the shape `-a companies=...` would arrive as, if
+  `scrapy crawl` were ever wired up); a list/tuple is used directly (what
+  `main.py`'s orchestrator passes). Keep any future spider's constructor
+  consistent with this shape rather than inventing a different one.
+- **`main.py` is the multi-ATS orchestrator, not just "the Greenhouse
+  entrypoint" anymore (2026-08-21, see SESSIONS.md).**
+  `get_companies_by_platform()` queries `companies` for non-NULL
+  `ats_platform` rows (grouped by platform) plus a separate NULL-platform
+  query (logged, not silently excluded). `run_multi_ats_scrape()` routes
+  each platform through `SPIDERS_BY_PLATFORM` (`{"greenhouse":
+  GreenhouseScraper, "lever": LeverScraper}`) - one `process.crawl()` call
+  per platform with its full token list, not one call per company. A
+  platform missing from that dict (`"ashby"`, `"workday"`, and the
+  literal string `"unknown"` all hit the same lookup-miss path - no
+  special-casing needed) gets a `logger.warning()` and is skipped, never
+  a crash or a silent drop. When adding a new spider, add its platform
+  string as a key here - that's the only wiring required.
 
 ## How to run things
 
@@ -245,33 +295,50 @@ embeds the ATS board itself (see the architectural decisions above for
 why that's not a bug). Not wired into the scraper, `company_tokens`, or
 any pipeline — detection only, standalone.
 
-A second working spider, `LeverScraper`
-(`src/huntloop/spiders/lever_spider.py`, 2026-08-21, see SESSIONS.md),
-now exists alongside `GreenhouseScraper`, mirroring its structure and
-`custom_settings` exactly. Hardcoded to one company (`wealthfront`, a
-confirmed real Lever user from the ATS-detection step). Verified
-end-to-end against the real Lever API: 22 jobs scraped and inserted
-(`job_postings` 114 -> 136), 3 spot-checked against live Lever job pages
-(title, URL, and multi-location mapping all correct), and `job_sources`
-confirmed to have gotten its own distinct `'lever_api'` row rather than
-collapsing into either existing Greenhouse row. `JobDataPipeline` needed
-zero changes — confirmed genuinely source-agnostic (see the architectural
-decision above). Not wired into `main.py`, `detect_ats()`'s output, or
-any multi-company config yet — standalone, per the task. The
-`job_sources` naming duplication this surfaced was root-caused and closed
-the same day (see the architectural decisions above) — `job_sources` now
-has exactly one row per real source (`greenhouse_api`, `lever_api`).
+**Phase 2 (multi-ATS scraping) core is now done, as of 2026-08-21** — the
+full loop from detection to real scraped data works end-to-end:
 
-Not yet started / explicitly deferred: broader scraper coverage (only
-`checkr` and `duolingo` are configured for Greenhouse, `wealthfront` for
-Lever), a company-list config that routes a company to the right spider
-based on `detect_ats()`'s output (the natural next step now that two
-spiders are proven), wiring the Lever spider into `main.py`, any UI/API
-surface for `get_sponsorship_summary()` (it's a Python function today,
-called directly, not exposed via an endpoint or the scraper pipeline),
-curating `sponsor_name_overrides` for companies fuzzy matching doesn't
-resolve cleanly (table is still empty), broader test coverage, scraper
-parsing/HTTP tests, CI linting/build/deploy steps, and any FK from
+- `LeverScraper` (`src/huntloop/spiders/lever_spider.py`) exists
+  alongside `GreenhouseScraper`, mirroring its structure and
+  `custom_settings` exactly. `JobDataPipeline` needed zero changes for
+  it — confirmed genuinely source-agnostic (see the architectural
+  decisions above). The `job_sources` naming duplication this first
+  surfaced (`'Greenhouse'` vs. `'greenhouse_api'`) was root-caused and
+  closed the same day — `job_sources` now has exactly one row per real
+  source.
+- `companies.ats_platform`/`ats_token`/`careers_url` columns exist,
+  populated via `scripts/detect_and_store_ats.py` for a 9-company
+  curated list spanning all 5 platforms `detect_ats()` recognizes (2
+  never tested against it before that script — both verified correct
+  independently). A same-day follow-up fixed a transient-failure
+  overwrite bug this surfaced (see the architectural decisions above).
+- Both spiders now accept a `companies` list instead of one hardcoded
+  token, and `main.py` is a real orchestrator: it queries
+  `companies.ats_platform`, routes `greenhouse`/`lever` companies to one
+  `process.crawl()` call each with their full token list, and skips
+  `ashby`/`workday`/`unknown`/NULL companies with a clear log message
+  (see the architectural decisions above). Verified end-to-end for real
+  (`python main.py`, no mocking): `job_postings` 136 -> 616 (+480) across
+  6 companies with implemented spiders (`checkr`/`duolingo`/`figma` via
+  Greenhouse, `kraken`/`palantir`/`wealthfront` via Lever); `ramp`
+  (ashby), `adobe` (workday), `brex` (unknown), and `OpenAI` (NULL) all
+  correctly skipped with distinct log messages, not silently dropped.
+  `figma` and `palantir` (never scraped before this run) spot-checked
+  against the DB and live pages — correct. `kraken` legitimately scraped
+  0 jobs (its real Lever board has 0 open postings right now, confirmed
+  live — not a detection or spider bug).
+
+Not yet started / explicitly deferred: Ashby/Workday spiders (`ramp`,
+`adobe` will keep getting skipped until one exists — deliberately out of
+scope, future work once there's demand), broadening the curated company
+list beyond the current 9, automating the
+`detect_and_store_ats.py` -> `main.py` sequence (currently two separate
+manual steps), broader scraper coverage generally, any UI/API surface for
+`get_sponsorship_summary()` (it's a Python function today, called
+directly, not exposed via an endpoint or the scraper pipeline), curating
+`sponsor_name_overrides` for companies fuzzy matching doesn't resolve
+cleanly (table is still empty), broader test coverage, scraper
+parsing/HTTP tests, CI linting/build/deploy steps, any FK from
 `companies` to `lca_disclosures` (deliberately not built — see the
 architectural decisions above), and an LLM-extraction fallback for career
 pages that resist both static fetch and rendering. Nothing beyond what's

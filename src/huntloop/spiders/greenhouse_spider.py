@@ -19,14 +19,26 @@ class GreenhouseScraper(scrapy.Spider):
         "RETRY_TIMES": 3
     }
 
-    company_tokens = [
-        'checkr'
-    ]
-    # company_tokens = [
-    #     'duolingo', 'nextdoor', 'checkr', 'paveakatroveinformationtechnologies'
-    # ]
+    # Default when no `companies` argument is given (e.g.
+    # `process.crawl(GreenhouseScraper)` with no kwargs) - preserves the
+    # single-company behavior this spider had before it accepted a list,
+    # for backward compatibility.
+    DEFAULT_COMPANY_TOKENS = ['checkr']
 
     base_url = 'https://api.greenhouse.io/v1/boards/{company_token}/jobs?content=true'
+
+    def __init__(self, companies=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if companies is None:
+            self.company_tokens = list(self.DEFAULT_COMPANY_TOKENS)
+        elif isinstance(companies, str):
+            # Scrapy CLI spider arguments (-a companies=...) always arrive
+            # as a string, so accept a comma-separated one.
+            self.company_tokens = [token.strip() for token in companies.split(',') if token.strip()]
+        else:
+            # Programmatic invocation (e.g. process.crawl(GreenhouseScraper,
+            # companies=[...])) can pass a real list/tuple directly.
+            self.company_tokens = list(companies)
 
     def start_requests(self) -> Iterable[Any]:
         for company_token in self.company_tokens:

@@ -35,6 +35,11 @@ class Company(Base):
     # Kept for now even though real sponsorship data will live in a
     # separate table later.
     h1b_sponsorship = Column(Boolean, nullable=True, default=False, server_default="false")
+    # ATS-detection result (see detect_ats(), huntloop.ats_detection).
+    # Nullable - not every company has a detected value yet.
+    ats_platform = Column(String(50), nullable=True)
+    ats_token = Column(String(255), nullable=True)
+    careers_url = Column(String(500), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now())
 

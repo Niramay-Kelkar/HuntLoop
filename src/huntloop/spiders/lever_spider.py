@@ -20,14 +20,26 @@ class LeverScraper(scrapy.Spider):
         "RETRY_TIMES": 3
     }
 
-    # Hardcoded to a single company for this step - see Step 3's ATS
-    # detection results (SESSIONS.md) for confirmed real Lever users.
-    # Multi-company config is a separate next step.
-    company_tokens = [
-        'wealthfront'
-    ]
+    # Default when no `companies` argument is given (e.g.
+    # `process.crawl(LeverScraper)` with no kwargs) - preserves the
+    # single-company behavior this spider had before it accepted a list,
+    # for backward compatibility.
+    DEFAULT_COMPANY_TOKENS = ['wealthfront']
 
     base_url = 'https://api.lever.co/v0/postings/{company_token}?mode=json'
+
+    def __init__(self, companies=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if companies is None:
+            self.company_tokens = list(self.DEFAULT_COMPANY_TOKENS)
+        elif isinstance(companies, str):
+            # Scrapy CLI spider arguments (-a companies=...) always arrive
+            # as a string, so accept a comma-separated one.
+            self.company_tokens = [token.strip() for token in companies.split(',') if token.strip()]
+        else:
+            # Programmatic invocation (e.g. process.crawl(LeverScraper,
+            # companies=[...])) can pass a real list/tuple directly.
+            self.company_tokens = list(companies)
 
     def start_requests(self) -> Iterable[Any]:
         for company_token in self.company_tokens:

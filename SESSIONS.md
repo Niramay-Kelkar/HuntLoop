@@ -1011,3 +1011,269 @@ task said not to touch anything else.
 added later, its `self.name` will automatically get its own distinct
 `job_sources` row the same way Lever's did - no further pipeline or
 smoke-test changes needed, by construction.
+
+---
+
+## 2026-08-21 — ATS-platform schema + curated detect-and-store script
+
+**Did:** Added three nullable columns to `companies` via Alembic
+(`alembic/versions/7fbc4b9c6976_add_ats_platform_columns_to_companies.py`):
+`ats_platform`, `ats_token`, `careers_url` - the stored result of running
+`detect_ats()` (`src/huntloop/ats_detection.py`) against a company.
+`db_models.py`'s `Company` model updated to match. Wrote
+`scripts/detect_and_store_ats.py` (manual, not part of the ongoing
+pipeline/CI, same convention as `scripts/ingest_lca_disclosures.py`):
+runs a hardcoded list of 9 real `(company_name, careers_url)` pairs
+through `detect_ats()` and upserts the result into `companies`, creating
+the row if it doesn't exist yet or updating it in place if it does. Pure
+detect-then-store - no spider run, no jobs scraped, nothing wired into
+`main.py` or any dispatch logic. Company names deliberately use the same
+lowercase-token convention the real spiders use for
+`JobPostingItem.company_name` (e.g. `"checkr"`, not `"Checkr"`) -
+learned directly from the `job_sources` duplication bug two entries up in
+this log: reusing the real naming convention here means this script
+updates the *same* row a spider would, rather than creating a second,
+differently-cased row for the same company.
+
+**Curated list (7 previously-confirmed + 2 never tested against
+`detect_ats()` before this script, to check it isn't cherry-picked) and
+real, live results:**
+
+| Company | Careers URL | Detected |
+|---|---|---|
+| checkr | job-boards.greenhouse.io/checkr | greenhouse / `checkr` |
+| duolingo | job-boards.greenhouse.io/duolingo | greenhouse / `duolingo` |
+| kraken | jobs.lever.co/kraken | lever / `kraken` |
+| palantir | jobs.lever.co/palantir | lever / `palantir` |
+| wealthfront | jobs.lever.co/wealthfront | lever / `wealthfront` |
+| ramp | jobs.ashbyhq.com/ramp | ashby / `ramp` |
+| adobe | adobe.wd5.myworkdayjobs.com/... | workday / `adobe` |
+| **brex** (new) | brex.com/careers | **unknown** |
+| **figma** (new) | figma.com/careers/ | **greenhouse / `figma`** |
+
+Both new companies manually verified independently of the script's own
+output, not just trusted: **figma** - fetched the live page directly and
+found real `greenhouse.io/figma/jobs/...` links in the static HTML
+(`grep -io "greenhouse[a-z0-9./_-]*"` returned 5+ real job URLs) -
+`detect_ats()`'s result is correct. **brex** - rendered the page directly
+with Playwright by hand (735,993 chars of rendered HTML) and grepped for
+all 5 known platform signatures; zero matches for any of them - `brex.com`
+genuinely doesn't expose any of the 5 known ATS platforms' signatures,
+rendered or not (likely a custom/different ATS, or an embed shape none of
+the 5 patterns cover). `unknown` is the correct, honest result here, not
+a detection failure - useful data point that the function still declines
+to guess on real companies outside its original test set rather than
+false-positiving onto the wrong platform.
+
+**Confirmed via `psql`, all 9 rows correctly populated** (see the table
+above for platform/token; `careers_url` matches what was passed in for
+every row). Pre-existing rows (`checkr`, `duolingo`, `wealthfront`,
+created earlier by the real spiders) were updated in place, not
+duplicated - `companies` id numbering shows no gap-filling new rows for
+those three.
+
+**Idempotency, run 3 times total:** company count held at 10 (9 curated +
+the pre-existing unrelated `OpenAI` smoke-test row) across all three
+runs - the second and third runs logged "Updating existing company row"
+for all 9, never "Creating new company row." One honest wrinkle caught
+along the way, not fixed (out of scope, script does exactly what was
+asked - unconditional upsert on every run, no more): the second run hit a
+transient `ReadTimeout` against `job-boards.greenhouse.io` for `checkr`
+(real network flakiness, not a code bug - confirmed by a clean third run
+resolving it correctly again), and because the script always overwrites
+on every run rather than only on success, that transient failure
+correctly-per-design but conspicuously downgraded `checkr`'s stored
+result to `unknown`/`NULL` until the next successful run. Flagging this
+as a real characteristic of "detect fresh every run, always overwrite" -
+not something asked to be handled here (e.g. "don't overwrite a known
+result with unknown on failure" would be a reasonable follow-up, but
+that's a design decision for whoever wires this into a recurring job, not
+this one-off script).
+
+**Verified:** Full suite still 37 tests, all passing - the new nullable
+columns didn't break `tests/conftest.py`'s `Base.metadata.create_all()`
+schema-isolation setup or anything else.
+
+**Next:** Not wired into `main.py` or any multi-spider dispatch - per the
+task, that's the next step now that `companies.ats_platform` exists to
+route on. The curated list is hardcoded in the script, not read from
+anywhere dynamic yet.
+
+---
+
+## 2026-08-21 — Fixed the transient-failure overwrite bug (Step 4 follow-up)
+
+**Did:** Fixed the exact wrinkle flagged (not fixed) at the end of the
+previous entry: `scripts/detect_and_store_ats.py`'s `upsert_company_ats()`
+used to overwrite `ats_platform`/`ats_token` unconditionally on every run,
+so a transient `detect_ats()` fetch error (network timeout, DNS failure,
+etc. - anything landing in its `error` field) silently blanked a
+previously-successful detection back to `unknown`/`NULL`, even though
+nothing about the company's real ATS had changed. Now: if the current
+result has `error` set *and* the company already has a non-NULL
+`ats_platform` (a previously-successful detection worth protecting), the
+overwrite is skipped and a `logger.warning()` explains exactly what
+happened and that the stored value was left unchanged. A genuine
+error-free "checked successfully, no pattern matched" result (`error is
+None`, `ats == "unknown"`) still overwrites normally - this is
+specifically about not confusing "couldn't check" with "checked and found
+nothing." If a company has never been successfully detected before
+(`ats_platform` still `NULL`) and the current attempt also errors, it
+still stores `unknown`/`NULL` - nothing prior to protect in that case.
+
+**Regression tests:** `tests/test_detect_and_store_ats.py`, 3 tests
+(imports the script directly - `scripts/` isn't on the pytest path, added
+via `sys.path.insert` same as running the script standalone would need):
+- `test_fetch_error_does_not_overwrite_existing_successful_value` -
+  reproduces the exact bug: seeds a company with `ats_platform=
+  "greenhouse"`, runs `upsert_company_ats()` with an error result shaped
+  like the real `ReadTimeout` observed live, asserts the stored value is
+  unchanged and a `"detection attempt failed"` warning was logged.
+- `test_genuine_no_match_result_still_overwrites_to_unknown` - an
+  error-free "unknown" result must still overwrite an existing value
+  (e.g. a company migrated ATS platforms, or an earlier detection turns
+  out wrong).
+- `test_error_on_never_before_detected_company_stores_unknown` - a
+  company with no prior successful value, plus an error result, still
+  correctly lands on `unknown`/`NULL`.
+
+**Proved the first test actually catches the bug**, same standard as the
+`job_sources` fix: temporarily reverted `upsert_company_ats()` back to
+its old unconditional-overwrite form and re-ran -
+`test_fetch_error_does_not_overwrite_existing_successful_value` failed
+with `AssertionError: assert 'unknown' == 'greenhouse'`, exactly
+reproducing the live bug; the other two tests still passed unchanged
+(they don't depend on the fix - the old code already stored `unknown`
+correctly in both of those cases, so they're not false-negatives).
+Restored the fix (verified byte-identical via `diff`) and re-ran - all 3
+pass.
+
+**Ran the real curated-company script again for real**, no mocking:
+```
+checkr: ats=greenhouse identifier=checkr ... error=None
+duolingo: ats=greenhouse identifier=duolingo ... error=None
+kraken: ats=lever identifier=kraken ... error=None
+palantir: ats=lever identifier=palantir ... error=None
+wealthfront: ats=lever identifier=wealthfront ... error=None
+ramp: ats=ashby identifier=ramp ... error=None
+adobe: ats=workday identifier=adobe ... error=None
+brex: ats=unknown identifier=None ... error=None
+figma: ats=greenhouse identifier=figma ... error=None
+```
+No transient failures this run (no warnings logged), so nothing exercised
+the new skip-on-error path live this time - but `companies` was confirmed
+unchanged and correct afterward (`psql`: same 10 rows, same
+platform/token values as before the run), confirming normal successful
+detections still update exactly as before. The skip-on-error behavior
+itself is proven by the regression test above, which is precisely why
+that test exists - a transient network failure can't be reliably
+reproduced on demand against the real API.
+
+**Verified:** Full suite now 40 tests (up from 37), all passing.
+
+**Next:** Nothing outstanding on this specific bug. Company-list dispatch
+logic (the next real step per Step 4) can now trust
+`companies.ats_platform` won't have been spuriously blanked by an
+unrelated transient failure on some later re-run of this script.
+
+---
+
+## 2026-08-21 — Multi-ATS orchestrator: wired detect_ats() into a real scrape (Phase 2 core)
+
+**Did:** Closed the loop from ATS detection all the way to real scraped
+data. Generalized both `GreenhouseScraper` and `LeverScraper` to accept a
+`companies` constructor/spider argument instead of a single hardcoded
+token, consistently: `__init__(self, companies=None, *args, **kwargs)` on
+both - `None` falls back to each spider's original single-company default
+(`['checkr']`/`['wealthfront']`, backward compat), a string is
+split on commas (the shape Scrapy's `-a companies=...` CLI argument
+always arrives as), a list/tuple is used directly (the shape
+`process.crawl(SpiderClass, companies=[...])` passes programmatically).
+
+Rewrote `main.py` into the orchestrator itself (rather than a separate
+script, since `main.py` was already documented as "the entrypoint" and
+this is its natural evolution): `get_companies_by_platform()` queries
+`companies` for rows with a non-NULL `ats_platform` and groups tokens by
+platform, plus a separate query for `ats_platform IS NULL` rows so they
+can be logged rather than silently excluded. `run_multi_ats_scrape()`
+routes each platform with an implemented spider
+(`SPIDERS_BY_PLATFORM = {"greenhouse": GreenhouseScraper, "lever":
+LeverScraper}`) to one `process.crawl(spider_class, companies=tokens)`
+call for its full token list; any platform without an entry in that dict
+- including the literal string `"unknown"`, which naturally falls out of
+the same lookup-miss code path as `"ashby"`/`"workday"` rather than
+needing special-case handling - gets one clear `logger.warning()` and is
+skipped, never silently dropped or a crash.
+
+**Ran the real orchestrator end-to-end** (`python main.py`), no mocking,
+against the current `companies` table (10 rows: `checkr`/`duolingo` ->
+greenhouse, `kraken`/`palantir`/`wealthfront` -> lever, `ramp` -> ashby,
+`adobe` -> workday, `brex` -> unknown, `OpenAI` -> NULL, plus `figma` ->
+greenhouse added in the ATS-detection step). Log lines confirm every
+skip case fired correctly, not silently:
+```
+[WARNING] __main__: Skipping 1 companies with no detected ATS platform (ats_platform is NULL): ['OpenAI']
+[WARNING] __main__: No spider implemented for platform 'ashby', skipping 1 companies: ['ramp']
+[INFO] __main__: Running greenhouse_api for 3 companies: ['duolingo', 'figma', 'checkr']
+[INFO] __main__: Running lever_api for 3 companies: ['kraken', 'palantir', 'wealthfront']
+[WARNING] __main__: No spider implemented for platform 'unknown', skipping 1 companies: ['brex']
+[WARNING] __main__: No spider implemented for platform 'workday', skipping 1 companies: ['adobe']
+```
+Both spiders ran, one `process.crawl()` call each with all 3 tokens for
+their platform - `greenhouse_api` scraped 274 items, `lever_api` scraped
+330 items (Scrapy stats, both runs `finish_reason: finished`).
+
+**Row-count delta** (`psql`, before -> after): `job_postings` 136 -> 616
+(+480). Per-company: `checkr` 46 -> 47 (+1, one new posting since the
+last scrape), `duolingo` 67 -> 76 (+9), `wealthfront` 22 -> 22 (+0, all
+22 already scraped in the earlier Lever-spider step, correctly
+deduplicated via the `gh_job_id` pre-check), `figma` 0 -> 162 (new
+company, first scrape), `palantir` 0 -> 308 (new company, first scrape).
+**`kraken` 0 -> 0** - not a bug: confirmed live by re-querying
+`api.lever.co/v0/postings/kraken?mode=json` directly, which returns an
+empty array right now (0 open postings on Kraken's board at scrape time,
+real-world data changed since the earlier ATS-detection testing session -
+not the same as a detection or spider failure).
+
+**Spot-checked figma and palantir** (both never scraped before this
+step) against the DB and the live pages:
+- `figma`/`greenhouse_api` row "Account Executive, Emerging Enterprise
+  (Berlin, Germany)", URL `boards.greenhouse.io/figma/jobs/5364702004` -
+  fetched that URL directly, page `<title>` is "Job Application for
+  Account Executive, Emerging Enterprise (Berlin, Germany) at Figma" -
+  matches.
+- `palantir`/`lever_api` rows (e.g. "Administrative Business Partner",
+  `jobs.lever.co/palantir/ac978161-...`) - correct `company_id`/`source_id`
+  attribution confirmed via join (`companies.name='palantir'`,
+  `job_sources.name='lever_api'`), consistent with the Lever field-mapping
+  already verified in the Lever-spider session.
+
+**Backward compatibility:** `scrapy crawl greenhouse_api` was never a
+supported invocation path in this repo - confirmed (again) there is no
+`scrapy.cfg` at the repo root, and `main.py`'s own comment history
+(`05b833c`) already documents deliberately bypassing `scrapy.cfg`
+directory-walking in favor of `SCRAPY_SETTINGS_MODULE` + `sys.path`. What
+*is* a real backward-compat path - direct programmatic instantiation with
+no `companies` kwarg, e.g. `GreenhouseScraper()` - was verified directly:
+`GreenhouseScraper().company_tokens == ['checkr']` and
+`LeverScraper().company_tokens == ['wealthfront']`, both unchanged from
+before this step.
+
+**Verified:** Full suite still 40 tests, all passing - no test suite
+changes were needed for this step (the spider constructor changes and
+orchestrator logic were verified via the real end-to-end run above, per
+the task's own verification standard, not new unit tests).
+
+**Decided:** No Ashby or Workday spider was implemented - out of scope
+per the task, future work once there's demand. `ramp` and `adobe` will
+keep getting the "no spider implemented" skip message on every future
+orchestrator run until one exists.
+
+**Next:** This closes out the core of Phase 2 (multi-ATS scraping
+capability) - detect (Step 3), store (Step 4, with the transient-failure
+fix), and now actually scrape (this step) all connect end-to-end for
+Greenhouse and Lever. Remaining Phase 2 work: Ashby/Workday spiders (if
+ever prioritized), broadening the curated company list beyond the current
+9, and deciding whether/how `detect_and_store_ats.py` and `main.py`'s
+orchestrator run gets automated (currently both are separate manual
+steps - `python scripts/detect_and_store_ats.py` then `python main.py`).
