@@ -5,6 +5,9 @@ import scrapy
 from scrapy.http import Response
 from ..items import JobPostingItem
 
+logger = logging.getLogger(__name__)
+
+
 class GreenhouseScraper(scrapy.Spider):
     name = 'greenhouse_api'
     allowed_domains = ["api.greenhouse.io"]
@@ -54,7 +57,7 @@ class GreenhouseScraper(scrapy.Spider):
 
         for job in data["jobs"]:
             if not isinstance(job, dict):
-                logging.warning(f"Skipping malformed job entry for {company_token}: {job}")
+                logger.warning(f"Skipping malformed job entry for {company_token}: {job}")
                 continue
             item = JobPostingItem()
             #print(job)
@@ -92,7 +95,7 @@ class GreenhouseScraper(scrapy.Spider):
                     elif 'skills' in name or 'requirements' in name:
                         item['skills_list'] = [s.strip() for s in value.split(',') if s.strip()]
 
-            self.logger.info(f"🧩 Yielding job item: {item['job_title']} for {comp_token}")
+            self.logger.info(f"Yielding job item: {item['job_title']} for {comp_token}")
             yield item
 
 

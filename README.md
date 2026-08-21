@@ -62,18 +62,34 @@ Expect Scrapy's standard crawl log, plus pipeline log lines for each item,
 e.g.:
 
 ```
-2026-08-19 12:55:04 [huntloop.pipelines] WARNING: 🚀 [PIPELINE TRIGGERED] Processing item: Chief of Staff
-2026-08-19 12:55:04 [huntloop.pipelines] INFO: 🟡 Skipping reposted job 7913718
+2026-08-19 12:55:04,123 [WARNING] huntloop.pipelines: [PIPELINE TRIGGERED] Processing item: Chief of Staff
+2026-08-19 12:55:04,150 [INFO] huntloop.pipelines: Skipping reposted job 7913718
 ```
 
 (`Skipping reposted job` means that `gh_job_id` was already in the database —
 expected on any run after the first. On a genuinely new posting you'll instead
-see `✅ Inserted job: <title> for <company>`.) The run ends with Scrapy's stats
+see `Inserted job: <title> for <company>`.) The run ends with Scrapy's stats
 dump (`item_scraped_count`, `finish_reason: finished`, etc.) and:
 
 ```
-2026-08-19 12:54:46 [huntloop.pipelines] INFO: 🛑 JobDataPipeline closed
-2026-08-19 12:54:46 [scrapy.core.engine] INFO: Spider closed (finished)
+2026-08-19 12:54:46,001 [INFO] huntloop.pipelines: JobDataPipeline closed
+2026-08-19 12:54:46,002 [INFO] scrapy.core.engine: Spider closed (finished)
+```
+
+## Logging
+
+All logging (the scraper, the pipeline, and the one-off scripts in
+`scripts/`) goes through a shared setup in `huntloop/logging_config.py`:
+consistent format (timestamp, level, module name, message), written to both
+the console and a rotating log file at `logs/huntloop.log` (gitignored —
+it's a runtime artifact, not source; capped at 5MB per file, 3 backups
+kept).
+
+The log level defaults to `INFO`. Override it with the `LOG_LEVEL`
+environment variable, e.g.:
+
+```bash
+LOG_LEVEL=WARNING python main.py
 ```
 
 ## Running tests

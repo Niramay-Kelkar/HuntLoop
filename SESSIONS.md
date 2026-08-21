@@ -412,3 +412,77 @@ fixing it wasn't part of this task so it was deliberately left alone.
 scraped `companies` table and curating real `sponsor_name_overrides`
 entries. No FK from `lca_disclosures`/`sponsor_name_overrides` to
 `companies` exists yet.
+
+---
+
+## 2026-08-20 — Shared logging configuration
+
+**Did:** Added `src/huntloop/logging_config.py`: a single `setup_logging()`
+that configures the root logger once (idempotent - later calls no-op) with
+a consistent format (`timestamp [LEVEL] module.name: message`), a level
+read from the `LOG_LEVEL` environment variable (default `INFO`), and two
+handlers - console (`StreamHandler`) and a rotating file
+(`logs/huntloop.log`, 5MB per file, 3 backups). Added `logs/` to
+`.gitignore` (runtime artifact, not source, same treatment as
+`data/raw/`).
+
+Wired it into every module that previously did its own ad hoc logging
+setup:
+- `huntloop/settings.py` now calls `setup_logging()` at import time (before
+  anything else, since `settings.py` is the first thing Scrapy imports)
+  and sets `LOG_ENABLED = False` so Scrapy doesn't also configure its own
+  competing root-logger handlers - without that, every scraper log line
+  would print twice (once via Scrapy's own handler, once via ours) since
+  both attach to the root logger. The old hardcoded `LOG_LEVEL = "DEBUG"`
+  Scrapy setting is gone; level is controlled by the `LOG_LEVEL` env var
+  read in `logging_config.py` instead.
+- `huntloop/pipelines.py` and `huntloop/middlewares.py` already used
+  `logging.getLogger(__name__)` with no setup of their own, so they
+  needed no code change beyond emoji cleanup (below) - they pick up the
+  shared config automatically once `settings.py` has run.
+- `huntloop/spiders/greenhouse_spider.py`: added a module-level
+  `logger = logging.getLogger(__name__)` and switched the one stray
+  `logging.warning(...)` call (previously calling the logging module
+  directly instead of a named logger) to use it. `self.logger` calls
+  (Scrapy's built-in per-spider logger) were left as-is - idiomatic Scrapy,
+  and they still propagate to the root logger our config controls.
+- `scripts/ingest_lca_disclosures.py` and
+  `scripts/backfill_employer_name_normalized.py`: replaced their own
+  `logging.basicConfig(...)` calls with `setup_logging()` from the shared
+  module.
+- `src/huntloop/matching/normalize.py` and `fuzzy_match.py` do no logging
+  today, so nothing needed changing there - noted since the task
+  description named them explicitly.
+
+Removed emoji prefixes from log messages in `pipelines.py`
+(`✅ Inserted job`, `❌ Integrity error`, `❌ Unexpected error`,
+`🚀 [DEBUG] ...`, `🚀 [PIPELINE TRIGGERED] ...`, `⚠️ Skipping item`,
+`🟡 Skipping reposted job`, `🛑 JobDataPipeline closed`) and
+`greenhouse_spider.py` (`🧩 Yielding job item`), leaving the text and log
+level of each call otherwise untouched - purely a formatting change, not a
+logic change. Left `src/huntloop/test_db_insert.py` (a manual, non-pytest
+smoke-test script) and inert emoji in code comments (not log messages)
+alone - not part of what the task named, and out of scope.
+
+Verified: ran `python main.py` (scraper) and
+`scripts/backfill_employer_name_normalized.py` (ingestion-family script) -
+both produced the same consistent format from different loggers
+(`huntloop.pipelines`, `scrapy.core.engine`, `__main__`), and both were
+also written to `logs/huntloop.log`. Confirmed `LOG_LEVEL=WARNING`
+suppresses INFO-level output (demonstrated directly against
+`logging_config.setup_logging()`: default level logs both an INFO and a
+WARNING line; with `LOG_LEVEL=WARNING` set, only the WARNING line appears,
+in both console and file). Full pytest suite (17 tests) still passes
+unchanged.
+
+**Decided:** Setting `LOG_ENABLED = False` in Scrapy's settings was
+necessary, not optional - it's the only way to let one shared config own
+all logging (Scrapy's own internal log lines included, since they're
+standard Python loggers that still propagate to the root logger we
+configure) without doubled output. Chose not to touch
+`test_db_insert.py` even though it has the same ad hoc
+`logging.basicConfig()` + emoji pattern, since it wasn't in the task's
+named module list and touching it wasn't requested.
+
+**Next:** Nothing logging-related outstanding. `test_db_insert.py` still
+has its own ad hoc logging setup if a future session wants to fold it in.

@@ -36,20 +36,20 @@ class JobDataPipeline:
         return cls(database_url)
 
     def open_spider(self, spider):
-        logger.warning("🚀 [DEBUG] JobDataPipeline successfully initialized.")
+        logger.warning("[DEBUG] JobDataPipeline successfully initialized.")
 
     def close_spider(self, spider):
-        logger.info("🛑 JobDataPipeline closed")
+        logger.info("JobDataPipeline closed")
 
     def process_item(self, item, spider):
-        logger.warning(f"🚀 [PIPELINE TRIGGERED] Processing item: {item.get('job_title')}")
+        logger.warning(f"[PIPELINE TRIGGERED] Processing item: {item.get('job_title')}")
         session = self.Session()
 
         try:
             # 1️⃣ Company
             company_name = item.get("company_name", "").strip()
             if not company_name:
-                logger.warning("⚠️ Skipping item — no company name found")
+                logger.warning("Skipping item — no company name found")
                 return item
 
             company = session.query(Company).filter_by(name=company_name).first()
@@ -80,7 +80,7 @@ class JobDataPipeline:
 
             existing_job = session.query(JobPosting).filter_by(gh_job_id=str(item["job_id"])).first()
             if existing_job:
-                logger.info(f"🟡 Skipping reposted job {item['job_id']}")
+                logger.info(f"Skipping reposted job {item['job_id']}")
                 return item
 
             # 4️⃣ Create JobPosting entry
@@ -112,13 +112,13 @@ class JobDataPipeline:
             session.add(job_meta)
             session.commit()
 
-            logger.info(f"✅ Inserted job: {item['job_title']} for {company_name}")
+            logger.info(f"Inserted job: {item['job_title']} for {company_name}")
         except IntegrityError as e:
             session.rollback()
-            logger.error(f"❌ Integrity error: {str(e)}")
+            logger.error(f"Integrity error: {str(e)}")
         except Exception as e:
             session.rollback()
-            logger.error(f"❌ Unexpected error inserting item: {e}", exc_info=True)
+            logger.error(f"Unexpected error inserting item: {e}", exc_info=True)
         finally:
             session.close()
 

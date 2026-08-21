@@ -35,6 +35,12 @@ above as planned, not present.
   disclosure files from `data/raw/dol_lca/` (gitignored — see SESSIONS.md's
   Step 1 audit for how those files are obtained; they're downloaded
   manually, not fetched by any code in this repo).
+- Logging: `src/huntloop/logging_config.py`'s `setup_logging()` is the
+  single source of logging configuration (format, level, console + rotating
+  `logs/huntloop.log` file handler) — every module gets its logger via
+  plain `logging.getLogger(__name__)` and relies on this having already
+  run. Level is controlled by the `LOG_LEVEL` env var (default `INFO`), not
+  hardcoded per-module. `logs/` is gitignored (runtime artifact).
 
 ## Key architectural decisions (already made — don't re-litigate)
 
@@ -88,6 +94,16 @@ above as planned, not present.
   `tests/conftest.py` still uses `create_all()`, but only to build tables in
   pytest's throwaway per-session schema, a separate test-isolation
   mechanism, not app schema creation.)
+- **Scrapy's own logging is intentionally disabled** (`LOG_ENABLED = False`
+  in `settings.py`) so `huntloop.logging_config.setup_logging()` is the only
+  thing configuring the root logger — Scrapy's internal log lines (e.g.
+  `scrapy.core.engine`) still show up, just formatted by our handlers
+  instead of Scrapy's own. Don't re-enable `LOG_ENABLED` or set a Scrapy
+  `LOG_LEVEL` — that would produce duplicate log lines (Scrapy's handler
+  plus ours, both attached to root). `src/huntloop/test_db_insert.py` still
+  has its own separate `logging.basicConfig()` + emoji-prefixed messages —
+  intentionally left alone (it's a manual smoke-test script, not part of
+  the shared-logging migration).
 
 ## How to run things
 
@@ -113,9 +129,12 @@ Q1-Q4, FY2025 Q1-Q4 — 1,431,321 total rows in `lca_disclosures`, all with
 vs. 129,295 distinct raw `employer_name` values). Fuzzy matching
 (`find_matching_employers()` in `src/huntloop/matching/fuzzy_match.py`,
 `rapidfuzz`-based, checks the new `sponsor_name_overrides` table first) is
-built and tested but not yet applied to real scraped companies. See
-SESSIONS.md for the full log. Not yet started: broader test coverage,
-scraper parsing/HTTP tests, CI linting/build/deploy steps, multi-source
-aggregation, curating real `sponsor_name_overrides` entries, or the FK
-from `lca_disclosures`/`sponsor_name_overrides` to `companies` — nothing
-beyond what's listed above should be assumed built.
+built and tested but not yet applied to real scraped companies. Logging
+across the scraper, pipeline, and ingestion scripts now goes through a
+single shared config (`src/huntloop/logging_config.py`) with a consistent
+format and a `LOG_LEVEL`-controlled level, instead of each module's own
+ad hoc setup. See SESSIONS.md for the full log. Not yet started: broader
+test coverage, scraper parsing/HTTP tests, CI linting/build/deploy steps,
+multi-source aggregation, curating real `sponsor_name_overrides` entries,
+or the FK from `lca_disclosures`/`sponsor_name_overrides` to `companies`
+— nothing beyond what's listed above should be assumed built.

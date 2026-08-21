@@ -30,8 +30,9 @@ load_dotenv()
 from huntloop.settings import DATABASE_URL  # noqa: E402
 from huntloop.db_models import LcaDisclosure  # noqa: E402
 from huntloop.matching.normalize import normalize_employer_name  # noqa: E402
+from huntloop.logging_config import setup_logging  # noqa: E402
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+setup_logging()
 logger = logging.getLogger(__name__)
 
 # Same reasoning as the ingestion script's batch size: enough rows per

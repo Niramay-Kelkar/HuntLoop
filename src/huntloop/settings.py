@@ -12,6 +12,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from huntloop.logging_config import setup_logging
+
+# Configure logging before Scrapy (or anything else) gets a chance to -
+# LOG_ENABLED = False below stops Scrapy from also configuring the root
+# logger itself, so this shared setup is the only one in effect.
+setup_logging()
+
 BOT_NAME = "huntloop"
 
 SPIDER_MODULES = ["huntloop.spiders"]
@@ -73,7 +80,12 @@ if not DATABASE_URL:
         "DATABASE_URL is not set. Copy .env.example to .env and fill in your local Postgres credentials."
     )
 
-LOG_LEVEL = "DEBUG"
+# Logging is handled entirely by huntloop.logging_config (see setup_logging()
+# call above) - level is set via the LOG_LEVEL environment variable there,
+# not here. LOG_ENABLED = False stops Scrapy from configuring its own
+# separate (and here, redundant/conflicting) root logging handlers.
+LOG_ENABLED = False
+
 # Enable and configure the AutoThrottle extension (disabled by default)
 # See https://docs.scrapy.org/en/latest/topics/autothrottle.html
 #AUTOTHROTTLE_ENABLED = True
