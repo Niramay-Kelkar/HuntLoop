@@ -29,8 +29,10 @@ Known data-quality quirks handled here (see the Step 1 audit in SESSIONS.md):
     row (e.g. a annual-sized figure tagged "Week"). Not "fixed" here - the
     raw value is stored as-is; this is left for a later cleaning step.
 
-employer_name_normalized is intentionally left NULL - populated in a later
-normalization/matching step, not here.
+employer_name_normalized is populated at insert time via
+huntloop.matching.normalize.normalize_employer_name - mechanical
+normalization only (uppercase, strip periods/commas/whitespace, drop a
+trailing legal-entity suffix), not full entity resolution.
 
 case_number has a unique constraint, so re-running this script (whether on
 an already-ingested file or across the whole directory) is idempotent -
@@ -58,6 +60,7 @@ load_dotenv()
 
 from huntloop.settings import DATABASE_URL  # noqa: E402
 from huntloop.db_models import LcaDisclosure  # noqa: E402
+from huntloop.matching.normalize import normalize_employer_name  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -157,10 +160,13 @@ def _enforce_column_max_lengths(kwargs, source_file):
 
 def row_to_model_kwargs(row, fiscal_year, quarter, source_file):
     """Map one DOL column-named row to LcaDisclosure model field names."""
+    employer_name = _clean_str(row["EMPLOYER_NAME"])
     kwargs = {
         "case_number": _clean_str(row["CASE_NUMBER"]),
-        "employer_name": _clean_str(row["EMPLOYER_NAME"]),
-        "employer_name_normalized": None,  # populated in a later step
+        "employer_name": employer_name,
+        "employer_name_normalized": (
+            normalize_employer_name(employer_name) if employer_name is not None else None
+        ),
         "trade_name_dba": _clean_str(row["TRADE_NAME_DBA"]),
         "case_status": _clean_str(row["CASE_STATUS"]),
         "job_title": _clean_str(row["JOB_TITLE"]),

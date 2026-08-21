@@ -178,3 +178,29 @@ class LcaDisclosure(Base):
 
     def __repr__(self):
         return f"<LcaDisclosure(case_number={self.case_number}, employer={self.employer_name})>"
+
+
+# ----------------------------------------------------------------------
+# 8️⃣ Sponsor Name Override Table
+# ----------------------------------------------------------------------
+class SponsorNameOverride(Base):
+    """
+    Manual correction layer for company-name -> employer_name_normalized
+    matching. Not populated with curated entries yet - this table is just
+    the mechanism (see find_matching_employers in
+    huntloop.matching.fuzzy_match), which checks this table first and
+    short-circuits to it before falling back to fuzzy matching against
+    lca_disclosures.employer_name_normalized.
+    """
+    __tablename__ = "sponsor_name_overrides"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    raw_company_name = Column(String(255), unique=True, nullable=False, index=True)
+    employer_name_normalized = Column(String(255), nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+    def __repr__(self):
+        return (
+            f"<SponsorNameOverride(raw_company_name={self.raw_company_name}, "
+            f"employer_name_normalized={self.employer_name_normalized})>"
+        )

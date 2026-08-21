@@ -268,3 +268,147 @@ and should not be conflated when reporting.
 
 **Next:** Unchanged — Step 5 (employer-name normalization/matching + FK to
 `companies`) is next.
+
+---
+
+## 2026-08-20 — Employer-name normalization + backfill
+
+**Did:** Added `normalize_employer_name()` in
+`src/huntloop/matching/normalize.py`: uppercases, strips periods/commas,
+collapses repeated whitespace, and drops a trailing legal-entity suffix
+(`INC`, `LLC`, `LLP`, `LP`, `CORP`, `CO`, `LTD`, `PLLC`, `PC` — punctuated
+variants like `L.L.C.` collapse to `LLC` once punctuation is stripped, so
+they match without special-casing). Suffixes are only stripped when
+trailing — a suffix word appearing mid-name is left alone. This is
+mechanical normalization only, not full entity resolution; it's
+deliberately conservative about not merging unrelated companies. 8 unit
+tests in `tests/test_normalize.py`, using real raw `EMPLOYER_NAME` values
+pulled from the ingested data (not invented examples) — including the
+6-variant `AMAZON DEVELOPMENT CENTER U.S./US` group, the 5-variant
+`AMAZON.COM SERVICES LLC` group, and the `A&A INFOSYSTEMS, INC` vs.
+`INFOSYS LIMITED` false-positive-risk check. All pass.
+
+Wired `normalize_employer_name()` into `scripts/ingest_lca_disclosures.py`
+so `employer_name_normalized` is populated at insert time for any future
+file, not left `NULL`. Added a new one-off script,
+`scripts/backfill_employer_name_normalized.py`, to backfill the
+1,431,321 rows that predated this — selects only rows where
+`employer_name_normalized IS NULL` (safe to interrupt/re-run), batches the
+`UPDATE`s at 5,000 rows (same round-trip-vs-blast-radius reasoning as the
+ingestion script's insert batches), using a Core-level (not ORM-bulk)
+parameterized `UPDATE ... WHERE id = :id` executed per batch via
+`session.execute(stmt, list_of_dicts)` — SQLAlchemy's ORM-level bulk
+`update()` rejected this pattern (`InvalidRequestError`) since it expects
+either full ORM object tracking or `synchronize_session=None` plus
+primary-key-bearing mappings; using the plain `Table` object side-steps
+that entirely, which is simpler than fighting the ORM bulk-update API.
+
+Backfill ran against the live `lca_disclosures` table: 1,431,321 rows
+updated in 368.2s (~6.1 min), 0 errors. Verified `SELECT COUNT(*) FROM
+lca_disclosures WHERE employer_name_normalized IS NULL` = 0 afterward.
+Distinct `employer_name` count before: 129,295; distinct
+`employer_name_normalized` count after: 108,575 — 20,720 fewer distinct
+values (~16% consolidation). Spot-checked Amazon specifically: 54 distinct
+raw `employer_name` values collapse into 22 distinct
+`employer_name_normalized` values; the two example groups from the tests
+collapse exactly as expected, and one intentionally-distinct case
+(`Amazon.com Services LLC (Hong Kong Branch)`) correctly stays separate
+since parenthetical branch text isn't stripped.
+
+**Decided:** Suffix list is limited to the abbreviations explicitly
+requested (`INC`/`LLC`/`LLP`/`LP`/`CORP`/`CO`/`LTD`/`PLLC`/`PC`) — no
+full-word variants like `LIMITED` or `CORPORATION` were added, since
+that wasn't asked for and would risk exactly the over-merging the
+false-positive-risk test guards against (`INFOSYS LIMITED` must not
+collapse toward something else). Chose to truncate/log nothing extra here
+since `employer_name_normalized` shares `employer_name`'s 255-char column
+width and normalization only ever shortens a name.
+
+**Next:** Step 5's remaining piece — the FK from `lca_disclosures` to
+`companies` — is still open. `employer_name_normalized` is now populated
+for all rows and at insert time going forward, but no matching/linking
+logic against `companies` exists yet.
+
+---
+
+## 2026-08-20 — Fuzzy company-name matching (Step 6)
+
+**Did:** Added `find_matching_employers()` in
+`src/huntloop/matching/fuzzy_match.py`, on top of Step 5's
+`normalize_employer_name()`. Given a raw company name, it first checks the
+new `sponsor_name_overrides` table for an exact (case-insensitive) match on
+`raw_company_name` and short-circuits to that confirmed
+`employer_name_normalized` mapping without running fuzzy matching at all;
+otherwise it normalizes the query the same way LCA employer names are
+normalized and fuzzy-matches it against the distinct
+`employer_name_normalized` values in `lca_disclosures` via `rapidfuzz`
+(added to `requirements.txt`), returning `EmployerMatch(employer_name_normalized,
+score, source)` ranked by score. Added the `sponsor_name_overrides` table
+(`raw_company_name` unique + `employer_name_normalized`) via
+`alembic revision --autogenerate` + `alembic upgrade head`, same workflow
+as the `lca_disclosures` migration — not linked to `companies` and not
+populated with real curated entries yet, per scope; this step is only the
+matching mechanism. Note: autogenerate also picked up unrelated
+pre-existing schema drift between this DB and `db_models.py`
+(`job_postings`/`job_skills`/`job_sources` column type/nullability/FK
+changes) that predates this work; that drift was left out of the
+generated migration file by hand rather than applied, since it's not part
+of this change.
+
+Tried `rapidfuzz.fuzz.WRatio` first and rejected it: its partial-ratio
+component activates whenever one string is much shorter than the other,
+and it scores "INFOSYS" vs. "A&A INFOSYSTEMS" at 90 - indistinguishable
+from a true match, and exactly the false-positive risk the Step 1 audit
+flagged. Switched to `token_set_ratio`, which still tolerates reordering
+and extra legal-entity words (so "Amazon" matches "AMAZON WEB SERVICES"
+and "AMAZON DEVELOPMENT CENTER US" at 100) but treats "INFOSYS" and
+"INFOSYSTEMS" as different tokens, scoring "INFOSYS" vs. "A&A INFOSYSTEMS"
+at only 63.6.
+
+Chose `DEFAULT_THRESHOLD = 88` empirically, against real data pulled live
+from the 1,431,321-row `lca_disclosures` table (not synthetic examples):
+true company variants consistently score 100 once normalized (all of
+Amazon's and Google's subsidiary/division names in the data); the audit's
+flagged false positive ("INFOSYS" vs. "A&A INFOSYSTEMS") scores 63.6, ~24
+points below threshold; the tightest real near-miss found while tuning -
+two unrelated small companies sharing only a generic industry-suffix word
+("Nous Infosystems" vs. "VNS Infosystems", sharing just "INFOSYSTEMS") -
+tops out at 90.3. 88 sits in the gap between that near-miss cluster and
+the 100-scoring true positives. It does not eliminate every
+generic-suffix collision (e.g. querying "Tata Consultancy Services" also
+returns several unrelated "... CONSULTANCY SERVICES" companies scoring
+88.9-95.8, below the true match's 100 but still above threshold) - that
+residual ambiguity for common industry-generic phrases is an accepted
+limitation, not something a single global threshold should be tuned to
+eliminate entirely; `sponsor_name_overrides` exists specifically to
+correct cases like that by hand.
+
+12 unit tests total: 8 in `tests/test_normalize.py` (unchanged from Step
+5) and a new `tests/test_fuzzy_match.py` (7 tests, seeded against a
+throwaway-schema `db_session`, not the real table) covering true-variant
+ranking for Amazon and Google, the "INFOSYS" vs. "A&A INFOSYSTEMS"
+false-positive-risk case, override short-circuiting (including
+case-insensitive lookup), fallback-to-fuzzy when no override exists, and
+an unrelated query returning no matches. All 17 project tests pass
+(`test_normalize.py`, `test_fuzzy_match.py`, `test_pipeline.py`).
+
+Live-verified against the real `lca_disclosures` table: `find_matching_employers`
+for "Amazon" and "Google" returns only true subsidiary/division names, all
+at 100.0; for "Infosys", all 10 top results score 100.0 and
+`A&A INFOSYSTEMS` is confirmed absent from the results; for "Tata
+Consultancy Services" (the messier/smaller real example), the two true
+variants (`TATA CONSULTANCY SERVICES LIMITED` and a leading-digit OCR/typo
+variant `1 TATA CONSULTANCY SERVICES LIMITED`) rank at 100.0, correctly
+above every unrelated result.
+
+**Decided:** Also discovered while autogenerating the migration: this same
+local Postgres DB still has the `job_postings`/`job_skills`/`job_sources`
+column drift noted above, present but not yet reconciled in a migration -
+flagging it here since it'll surface again in any future
+`alembic revision --autogenerate` until it's addressed on purpose, but
+fixing it wasn't part of this task so it was deliberately left alone.
+
+**Next:** Step 7 is applying `find_matching_employers()` to the actual
+scraped `companies` table and curating real `sponsor_name_overrides`
+entries. No FK from `lca_disclosures`/`sponsor_name_overrides` to
+`companies` exists yet.

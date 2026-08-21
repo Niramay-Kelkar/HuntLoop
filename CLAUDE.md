@@ -44,10 +44,37 @@ above as planned, not present.
 - **`Company.h1b_sponsorship` is intentionally kept** even though it's a bare
   boolean today. It will likely be superseded by real sponsorship data —
   `LcaDisclosure` (`lca_disclosures` table) now holds raw DOL LCA disclosure
-  records, but it's standalone with no FK to `companies` yet; that link,
-  plus `employer_name_normalized` population, is a later step (see
+  records with `employer_name_normalized` populated for every row (see
+  `src/huntloop/matching/normalize.py`), and `find_matching_employers()`
+  (`src/huntloop/matching/fuzzy_match.py`) can rank candidate
+  `employer_name_normalized` values against a raw company name — but
+  neither is wired up to `companies` yet; that link is Step 7 (see
   SESSIONS.md). Don't "fix" `h1b_sponsorship` in the meantime by removing or
   redesigning it unprompted.
+- **`normalize_employer_name()` (`src/huntloop/matching/normalize.py`) is
+  mechanical normalization only** — uppercase, strip periods/commas,
+  collapse whitespace, drop a trailing legal-entity suffix
+  (`INC`/`LLC`/`LLP`/`LP`/`CORP`/`CO`/`LTD`/`PLLC`/`PC`). It is not full
+  entity resolution and deliberately does not merge companies beyond that
+  (e.g. it won't collapse `LIMITED`-suffixed names or handle abbreviation/
+  alias matching). Don't expand its suffix list or scope unprompted — see
+  the false-positive-risk test in `tests/test_normalize.py` for why it
+  stays conservative.
+- **`find_matching_employers()` (`src/huntloop/matching/fuzzy_match.py`)
+  checks `sponsor_name_overrides` before fuzzy matching, and short-circuits
+  if a confirmed mapping exists.** Fuzzy matching uses `rapidfuzz`'s
+  `token_set_ratio` (not `WRatio` — `WRatio`'s partial-ratio component
+  scores the audit's flagged false positive, "INFOSYS" vs.
+  "A&A INFOSYSTEMS", at 90, indistinguishable from a true match) at a
+  default threshold of 88, chosen empirically against real
+  `lca_disclosures` data (see SESSIONS.md for the concrete scores). It does
+  not eliminate every collision between unrelated companies sharing a
+  generic industry-suffix word (e.g. "... CONSULTANCY SERVICES",
+  "... INFOSYSTEMS") — that residual ambiguity is what
+  `sponsor_name_overrides` is for. `sponsor_name_overrides` is not
+  populated with real curated entries yet, and neither table is linked to
+  `companies` yet — don't assume Step 7 (applying this to real scraped
+  companies) is done.
 - **Test isolation uses a throwaway Postgres schema per test session**, not
   `pytest-postgresql`. Reuses the existing local Postgres server rather than
   spinning up a separate instance. See `tests/conftest.py`.
@@ -78,10 +105,17 @@ push/PR). Sponsorship-matching work is underway: DOL LCA disclosure sample
 files were audited (real schema, messy employer-name formatting, case
 status values), the standalone `lca_disclosures` table was added, and
 `scripts/ingest_lca_disclosures.py` now ingests every downloaded modern-
-format quarter (not just one). As of 2026-08-20, 11 fiscal-year/quarter
-files are loaded — FY2021 Q1 & Q4, FY2022 Q4, FY2024 Q1-Q4, FY2025 Q1-Q4 —
-1,431,321 total rows in `lca_disclosures`. See SESSIONS.md for the full
-log. Not yet started: broader test coverage, scraper parsing/HTTP tests,
-CI linting/build/deploy steps, multi-source aggregation, employer-name
-normalization/matching, or the FK from `lca_disclosures` to `companies` —
-nothing beyond what's listed above should be assumed built.
+format quarter (not just one), populating `employer_name_normalized` at
+insert time via `normalize_employer_name()`. As of 2026-08-20, 11
+fiscal-year/quarter files are loaded — FY2021 Q1 & Q4, FY2022 Q4, FY2024
+Q1-Q4, FY2025 Q1-Q4 — 1,431,321 total rows in `lca_disclosures`, all with
+`employer_name_normalized` populated (108,575 distinct normalized values
+vs. 129,295 distinct raw `employer_name` values). Fuzzy matching
+(`find_matching_employers()` in `src/huntloop/matching/fuzzy_match.py`,
+`rapidfuzz`-based, checks the new `sponsor_name_overrides` table first) is
+built and tested but not yet applied to real scraped companies. See
+SESSIONS.md for the full log. Not yet started: broader test coverage,
+scraper parsing/HTTP tests, CI linting/build/deploy steps, multi-source
+aggregation, curating real `sponsor_name_overrides` entries, or the FK
+from `lca_disclosures`/`sponsor_name_overrides` to `companies` — nothing
+beyond what's listed above should be assumed built.
