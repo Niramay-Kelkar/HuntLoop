@@ -547,3 +547,54 @@ real data. Not yet done: broader scraper coverage (only `checkr` and
 `sponsor_name_overrides` for companies where fuzzy matching doesn't
 resolve cleanly, and the eventual decision on whether/how to persist a
 company<->LCA link beyond the current on-the-fly lookup.
+
+---
+
+## 2026-08-21 — Security audit + fixed the two medium findings
+
+**Did:** Ran a security audit against the repo: `pip-audit` against
+`requirements.txt` (0 CVEs across 60 resolved packages), `bandit` against
+`src/` (0 issues, 636 LOC), `gitleaks` across full git history (0 leaks,
+16 commits) plus a manual trace confirming the pre-Phase-0 hardcoded
+Postgres password never actually entered git history (`src/scrapers/`
+was never tracked at all — the repo's first real commit already has
+`src/huntloop/settings.py` reading `DATABASE_URL` from the environment).
+Also checked Docker hygiene, `.gitignore`/`.dockerignore` completeness,
+CI secrets handling, and dependency pinning.
+
+Fixed the two medium-severity findings:
+- Added `data/raw/` and `logs/` to `.dockerignore` (previously only in
+  `.gitignore`) — real DOL LCA files and log output were being included
+  in the Docker build context and would have been baked into an image
+  layer via `COPY . .`.
+- Added a non-root `USER` directive to the `Dockerfile` — created a
+  dedicated `huntloop` system user/group, `chown -R`'d `/app` to it
+  before switching, so `logs/` (created at runtime by
+  `logging_config.setup_logging()`) is writable by that user.
+
+**Verified:** Rebuilt the image with `docker compose build --no-cache`,
+extracted every layer blob from `docker save` and grepped each for
+`data/raw`/`dol_lca`/`logs`/`huntloop.log` paths — none present (sanity
+checked the scan itself by confirming it *does* find `app/main.py` in the
+same blobs). Confirmed the running container is non-root via `docker
+compose run --rm app id` → `uid=999(huntloop) gid=999(huntloop)`. Ran
+`alembic upgrade head` to a fresh throwaway Postgres, then `python
+main.py` end-to-end inside the rebuilt container: scraper finished
+cleanly (43 items scraped), and confirmed via `psql` that 45 rows landed
+in `job_postings` (not just that Scrapy logged a count). Confirmed
+`/app/logs/huntloop.log` was created at runtime and is owned by
+`huntloop:huntloop`, proving the chown actually made the path writable
+by the non-root user rather than just not crashing. Full pytest suite
+(17 tests) passed inside the same rebuilt container.
+
+**Decided:** Left the Low/Info findings from the audit open by choice,
+not as oversights: unpinned dependencies (15 of 18 direct deps have no
+`==` pin), `.idea/` being tracked in git despite being in `.gitignore`
+(committed before the ignore rule existed in the same commit — no
+secrets found inside it, just IDE UI state), and no automated
+`pip-audit`/`bandit` step in CI. These are deliberate separate follow-ups.
+
+**Next:** If/when the Low/Info findings are picked up: pin
+`requirements.txt` (or add a lockfile), decide whether to `git rm
+--cached` the `.idea/` files now that the directory is gitignored, and
+wire `pip-audit`/`bandit` into `.github/workflows/ci.yml`.

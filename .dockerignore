@@ -12,3 +12,5 @@ dist/
 .vscode/
 .git/
 .env
+data/raw/
+logs/

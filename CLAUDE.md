@@ -26,9 +26,13 @@ above as planned, not present.
 - Tests: pytest, config at repo root (`pytest.ini`), tests live in `tests/`.
 - Entrypoint: `python main.py` runs the Greenhouse scraper end-to-end.
 - Docker: `Dockerfile` + `docker-compose.yml` (app + postgres:18) for a
-  dev-oriented containerized setup. Not hardened for production. CI
-  (`.github/workflows/ci.yml`) runs migrations + pytest against a real
-  Postgres service container on every push/PR to `master`.
+  dev-oriented containerized setup. CI (`.github/workflows/ci.yml`) runs
+  migrations + pytest against a real Postgres service container on every
+  push/PR to `master`. The app container runs as a dedicated non-root
+  `huntloop` user (not root) — see the security audit entry in
+  SESSIONS.md (2026-08-21). `.dockerignore` excludes `data/raw/` and
+  `logs/` (mirroring `.gitignore`) so real LCA data and log output never
+  get baked into an image layer.
 - One-off scripts live in `scripts/` (not part of the ongoing app pipeline
   or CI) — e.g. `scripts/ingest_lca_disclosures.py`, run manually. Uses
   `pandas`/`openpyxl` (in `requirements.txt`) to read DOL's `.xlsx`
@@ -145,6 +149,18 @@ confirmed correct, no override needed. Shared logging
 (`src/huntloop/logging_config.py`, `LOG_LEVEL`-controlled, console +
 rotating file) is also in place across the scraper, pipeline, and scripts.
 See SESSIONS.md for the full log.
+
+A security audit (2026-08-21, see SESSIONS.md) found the repo clean on
+`pip-audit`/`bandit`/`gitleaks` (including full git history — the
+pre-Phase-0 hardcoded Postgres password never actually entered git
+history). The two medium-severity findings (Docker running as root,
+`data/raw/`/`logs/` missing from `.dockerignore`) are fixed — see the
+Docker bullet above. Left open by deliberate choice, not oversight:
+`requirements.txt` is mostly unpinned (3 of 18 direct deps have an `==`
+pin), `.idea/` is tracked in git despite being in `.gitignore` (committed
+before the ignore rule existed), and there's no automated
+`pip-audit`/`bandit` step in CI. Don't "fix" these unprompted — they're
+tracked follow-ups, not bugs.
 
 Not yet started / explicitly deferred: broader scraper coverage (only
 `checkr` and `duolingo` are configured), any UI/API surface for
