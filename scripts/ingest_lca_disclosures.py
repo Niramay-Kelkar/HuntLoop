@@ -1,19 +1,28 @@
 """
-One-off ingestion script: loads a single DOL LCA disclosure quarterly file
-into the lca_disclosures table.
+Ingestion script: loads every modern-format DOL LCA disclosure quarterly
+file in data/raw/dol_lca/ into the lca_disclosures table.
 
-Not part of the app's ongoing pipeline - run manually, once per quarter file,
-via:
+Not part of the app's ongoing pipeline - run manually via:
 
     python scripts/ingest_lca_disclosures.py
 
-Expects the source file at data/raw/dol_lca/<SOURCE_FILE> (see .gitignore -
-these raw files aren't committed) and DATABASE_URL configured via .env, same
-as the rest of the app. Assumes the lca_disclosures table already exists
-(via `alembic upgrade head` - see db_models.py / Step 2's migration).
+Expects source files at data/raw/dol_lca/<file> (see .gitignore - these raw
+files aren't committed) and DATABASE_URL configured via .env, same as the
+rest of the app. Assumes the lca_disclosures table already exists (via
+`alembic upgrade head` - see db_models.py / Step 2's migration).
+
+Only files matching the modern naming convention are ingested:
+
+    LCA_Disclosure_Data_FY<YYYY>_Q<N>.xlsx
+
+fiscal_year and quarter are parsed from the filename itself, not hardcoded.
+Explicitly skipped (out of scope):
+  - H-1B_Disclosure_Data_FY* - legacy pre-2021 format, different schema.
+  - LCA_Appendix_A_* - separate cap-exemption file, not disclosure data.
+  - Anything else in the directory (e.g. record-layout docs).
 
 Known data-quality quirks handled here (see the Step 1 audit in SESSIONS.md):
-  - The sheet reports far more rows than actually exist (sheet.max_row is
+  - Each sheet reports far more rows than actually exist (sheet.max_row is
     padded with thousands of fully-blank trailing rows) - filtered out by
     keeping only rows with a non-null CASE_NUMBER.
   - WAGE_UNIT_OF_PAY occasionally doesn't match the wage magnitude for that
@@ -22,15 +31,21 @@ Known data-quality quirks handled here (see the Step 1 audit in SESSIONS.md):
 
 employer_name_normalized is intentionally left NULL - populated in a later
 normalization/matching step, not here.
+
+case_number has a unique constraint, so re-running this script (whether on
+an already-ingested file or across the whole directory) is idempotent -
+existing rows are skipped via ON CONFLICT DO NOTHING, not duplicated or
+errored on.
 """
 
 import logging
 import os
+import re
 import sys
 import time
 
 import pandas as pd
-from sqlalchemy import create_engine
+from sqlalchemy import String, create_engine
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import sessionmaker
 
@@ -48,10 +63,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SOURCE_FILE = "LCA_Disclosure_Data_FY2025_Q4.xlsx"
-SOURCE_PATH = os.path.join(REPO_ROOT, "data", "raw", "dol_lca", SOURCE_FILE)
-FISCAL_YEAR = 2025
-QUARTER = 4
+DATA_DIR = os.path.join(REPO_ROOT, "data", "raw", "dol_lca")
+
+FILENAME_PATTERN = re.compile(r"^LCA_Disclosure_Data_FY(\d{4})_Q(\d)\.xlsx$")
 
 # Only these two CASE_STATUS values represent an actually-approved
 # sponsorship (see Step 1's audit) - Denied/Withdrawn are excluded.
@@ -82,6 +96,33 @@ DOL_COLUMNS = [
 ]
 
 
+# DOL's sheets occasionally have a value that overruns its column's declared
+# width (e.g. a SOC_CODE cell with the SOC_TITLE accidentally appended in
+# FY2024_Q3 - "15-1253 Software Quality Assurance" is 34 chars into a
+# VARCHAR(20)). Per the same "store as-is, don't fix" approach already used
+# for the WAGE_UNIT_OF_PAY quirk, oversized values are truncated to fit
+# rather than dropping the row - but each truncation is logged so it stays
+# visible rather than silently losing data.
+STRING_COLUMN_MAX_LENGTHS = {
+    col.name: col.type.length
+    for col in LcaDisclosure.__table__.columns
+    if isinstance(col.type, String)
+}
+
+
+def discover_source_files(data_dir):
+    """Find modern-format LCA disclosure files, sorted oldest-fiscal-quarter first."""
+    matches = []
+    for filename in os.listdir(data_dir):
+        m = FILENAME_PATTERN.match(filename)
+        if not m:
+            continue
+        fiscal_year, quarter = int(m.group(1)), int(m.group(2))
+        matches.append((fiscal_year, quarter, filename))
+    matches.sort()
+    return matches
+
+
 def _clean_str(value):
     if pd.isna(value):
         return None
@@ -100,9 +141,23 @@ def _clean_number(value):
     return float(value)
 
 
-def row_to_model_kwargs(row):
+def _enforce_column_max_lengths(kwargs, source_file):
+    """Truncate any string field that overruns its column's declared width,
+    logging each occurrence. See STRING_COLUMN_MAX_LENGTHS above."""
+    for field, max_length in STRING_COLUMN_MAX_LENGTHS.items():
+        value = kwargs.get(field)
+        if value is not None and max_length is not None and len(value) > max_length:
+            logger.warning(
+                f"[{source_file}] case {kwargs.get('case_number')}: {field} value "
+                f"{value!r} ({len(value)} chars) exceeds column max {max_length}; truncating."
+            )
+            kwargs[field] = value[:max_length]
+    return kwargs
+
+
+def row_to_model_kwargs(row, fiscal_year, quarter, source_file):
     """Map one DOL column-named row to LcaDisclosure model field names."""
-    return {
+    kwargs = {
         "case_number": _clean_str(row["CASE_NUMBER"]),
         "employer_name": _clean_str(row["EMPLOYER_NAME"]),
         "employer_name_normalized": None,  # populated in a later step
@@ -121,87 +176,129 @@ def row_to_model_kwargs(row):
         "wage_unit_of_pay": _clean_str(row["WAGE_UNIT_OF_PAY"]),
         "received_date": _clean_date(row["RECEIVED_DATE"]),
         "decision_date": _clean_date(row["DECISION_DATE"]),
-        "fiscal_year": FISCAL_YEAR,
-        "quarter": QUARTER,
-        "source_file": SOURCE_FILE,
+        "fiscal_year": fiscal_year,
+        "quarter": quarter,
+        "source_file": source_file,
     }
+    return _enforce_column_max_lengths(kwargs, source_file)
 
 
-def main():
-    t0 = time.perf_counter()
+def flush_batch(session, batch):
+    if not batch:
+        return 0, 0
+    stmt = pg_insert(LcaDisclosure).values(batch).on_conflict_do_nothing(
+        index_elements=["case_number"]
+    )
+    result = session.execute(stmt)
+    session.commit()
+    inserted = result.rowcount
+    skipped = len(batch) - inserted
+    return inserted, skipped
 
-    logger.info(f"Reading {SOURCE_PATH} ...")
-    df = pd.read_excel(SOURCE_PATH, usecols=DOL_COLUMNS, engine="openpyxl")
+
+def ingest_file(session, source_path, fiscal_year, quarter, source_file):
+    """Ingest one quarterly LCA disclosure file. Returns a summary dict."""
+    logger.info(f"Reading {source_path} ...")
+    df = pd.read_excel(source_path, usecols=DOL_COLUMNS, engine="openpyxl")
     total_raw_rows = len(df)
-    logger.info(f"Sheet reported {total_raw_rows} rows (includes blank padding rows).")
+    logger.info(f"[{source_file}] Sheet reported {total_raw_rows} rows (includes blank padding rows).")
 
     # Filter out the blank padding rows - do not trust sheet.max_row.
     df = df[df["CASE_NUMBER"].notna()]
     real_rows = len(df)
     padding_filtered = total_raw_rows - real_rows
-    logger.info(f"{real_rows} real rows after dropping {padding_filtered} blank padding rows.")
 
     # Filter to only approved-sponsorship statuses.
     df = df[df["CASE_STATUS"].isin(APPROVED_STATUSES)]
     approved_rows = len(df)
     non_approved_filtered = real_rows - approved_rows
     logger.info(
-        f"{approved_rows} rows with CASE_STATUS in {sorted(APPROVED_STATUSES)} "
-        f"({non_approved_filtered} non-approved rows filtered out)."
+        f"[{source_file}] {approved_rows} approved rows considered "
+        f"({padding_filtered} blank padding rows and {non_approved_filtered} "
+        f"non-approved rows filtered out)."
     )
-
-    engine = create_engine(DATABASE_URL, echo=False)
-    Session = sessionmaker(bind=engine)
-    session = Session()
 
     inserted_count = 0
     duplicate_count = 0
     batch = []
 
-    def flush_batch(batch):
-        if not batch:
-            return 0, 0
-        stmt = pg_insert(LcaDisclosure).values(batch).on_conflict_do_nothing(
-            index_elements=["case_number"]
-        )
-        result = session.execute(stmt)
-        session.commit()
-        inserted = result.rowcount
-        skipped = len(batch) - inserted
-        return inserted, skipped
+    for _, row in df.iterrows():
+        batch.append(row_to_model_kwargs(row, fiscal_year, quarter, source_file))
+        if len(batch) >= BATCH_SIZE:
+            ins, dup = flush_batch(session, batch)
+            inserted_count += ins
+            duplicate_count += dup
+            logger.info(
+                f"[{source_file}] Batch flushed: +{ins} inserted, {dup} duplicate(s) skipped "
+                f"(running total: {inserted_count} inserted, {duplicate_count} skipped)."
+            )
+            batch = []
 
+    ins, dup = flush_batch(session, batch)
+    inserted_count += ins
+    duplicate_count += dup
+    if ins or dup:
+        logger.info(f"[{source_file}] Final batch flushed: +{ins} inserted, {dup} duplicate(s) skipped.")
+
+    return {
+        "source_file": source_file,
+        "fiscal_year": fiscal_year,
+        "quarter": quarter,
+        "sheet_reported_rows": total_raw_rows,
+        "padding_filtered": padding_filtered,
+        "non_approved_filtered": non_approved_filtered,
+        "approved_rows": approved_rows,
+        "inserted": inserted_count,
+        "skipped": duplicate_count,
+    }
+
+
+def main():
+    t0 = time.perf_counter()
+
+    source_files = discover_source_files(DATA_DIR)
+    if not source_files:
+        logger.warning(f"No modern-format LCA disclosure files found in {DATA_DIR}.")
+        return
+
+    logger.info(f"Found {len(source_files)} file(s) to ingest, oldest fiscal year/quarter first:")
+    for fiscal_year, quarter, filename in source_files:
+        logger.info(f"  - {filename} (FY{fiscal_year} Q{quarter})")
+
+    engine = create_engine(DATABASE_URL, echo=False)
+    Session = sessionmaker(bind=engine)
+    session = Session()
+
+    summaries = []
     try:
-        for _, row in df.iterrows():
-            batch.append(row_to_model_kwargs(row))
-            if len(batch) >= BATCH_SIZE:
-                ins, dup = flush_batch(batch)
-                inserted_count += ins
-                duplicate_count += dup
-                logger.info(
-                    f"Batch flushed: +{ins} inserted, {dup} duplicate(s) skipped "
-                    f"(running total: {inserted_count} inserted, {duplicate_count} skipped)."
-                )
-                batch = []
-
-        ins, dup = flush_batch(batch)
-        inserted_count += ins
-        duplicate_count += dup
-        if ins or dup:
-            logger.info(f"Final batch flushed: +{ins} inserted, {dup} duplicate(s) skipped.")
+        for fiscal_year, quarter, filename in source_files:
+            source_path = os.path.join(DATA_DIR, filename)
+            summary = ingest_file(session, source_path, fiscal_year, quarter, filename)
+            summaries.append(summary)
     finally:
         session.close()
 
     elapsed = time.perf_counter() - t0
-    logger.info("=" * 60)
-    logger.info(f"Source file:               {SOURCE_FILE}")
-    logger.info(f"Sheet-reported rows:        {total_raw_rows}")
-    logger.info(f"Blank padding rows dropped: {padding_filtered}")
-    logger.info(f"Non-approved rows dropped:  {non_approved_filtered}")
-    logger.info(f"Approved rows considered:   {approved_rows}")
-    logger.info(f"Rows inserted:              {inserted_count}")
-    logger.info(f"Rows skipped as duplicates: {duplicate_count}")
-    logger.info(f"Elapsed time:               {elapsed:.1f}s")
-    logger.info("=" * 60)
+
+    total_inserted = sum(s["inserted"] for s in summaries)
+    total_skipped = sum(s["skipped"] for s in summaries)
+    total_approved = sum(s["approved_rows"] for s in summaries)
+
+    logger.info("=" * 70)
+    logger.info("Per-file summary:")
+    for s in summaries:
+        logger.info(
+            f"  {s['source_file']} (FY{s['fiscal_year']} Q{s['quarter']}): "
+            f"{s['approved_rows']} approved rows considered, "
+            f"{s['inserted']} inserted, {s['skipped']} skipped as duplicates."
+        )
+    logger.info("-" * 70)
+    logger.info(f"Files processed:            {len(summaries)}")
+    logger.info(f"Total approved rows:         {total_approved}")
+    logger.info(f"Total rows inserted:         {total_inserted}")
+    logger.info(f"Total rows skipped (dupes):  {total_skipped}")
+    logger.info(f"Elapsed time:                {elapsed:.1f}s")
+    logger.info("=" * 70)
 
 
 if __name__ == "__main__":

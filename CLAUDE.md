@@ -76,11 +76,12 @@ README, Docker (app + Postgres via docker-compose), and a minimal CI
 workflow (migrations + pytest against a real Postgres service on every
 push/PR). Sponsorship-matching work is underway: DOL LCA disclosure sample
 files were audited (real schema, messy employer-name formatting, case
-status values), the standalone `lca_disclosures` table was added, and one
-quarter (FY2025_Q4, 115,695 approved-status rows) has been loaded into it
-via `scripts/ingest_lca_disclosures.py`. See SESSIONS.md for the full log.
-Not yet started: broader test coverage, scraper parsing/HTTP tests, CI
-linting/build/deploy steps, multi-source aggregation, ingesting the other
-downloaded quarters, employer-name normalization/matching, or the FK from
-`lca_disclosures` to `companies` — nothing beyond what's listed above
-should be assumed built.
+status values), the standalone `lca_disclosures` table was added, and
+`scripts/ingest_lca_disclosures.py` now ingests every downloaded modern-
+format quarter (not just one). As of 2026-08-20, 11 fiscal-year/quarter
+files are loaded — FY2021 Q1 & Q4, FY2022 Q4, FY2024 Q1-Q4, FY2025 Q1-Q4 —
+1,431,321 total rows in `lca_disclosures`. See SESSIONS.md for the full
+log. Not yet started: broader test coverage, scraper parsing/HTTP tests,
+CI linting/build/deploy steps, multi-source aggregation, employer-name
+normalization/matching, or the FK from `lca_disclosures` to `companies` —
+nothing beyond what's listed above should be assumed built.

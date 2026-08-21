@@ -168,3 +168,103 @@ a slow one-row-at-a-time fallback.
 **Next:** This script only covers FY2025_Q4. Ingesting the other quarters
 downloaded in Step 1, and Step 5's employer-name normalization/matching +
 FK to `companies`, are both still open.
+
+---
+
+## 2026-08-20 — Generalized LCA ingestion to all downloaded quarters
+
+**Did:** Generalized `scripts/ingest_lca_disclosures.py` from a single
+hardcoded FY2025_Q4 run to scan `data/raw/dol_lca/` for every file matching
+`LCA_Disclosure_Data_FY<YYYY>_Q<N>.xlsx` (11 matched), parsing
+`fiscal_year`/`quarter` from each filename instead of hardcoding them.
+Explicitly skips `H-1B_Disclosure_Data_FY*` (legacy pre-2021 format) and
+`LCA_Appendix_A_*` (cap-exemption file, separate schema) via the filename
+pattern. The per-file filtering/batching/`ON CONFLICT DO NOTHING` logic
+from the FY2025_Q4-only version was refactored into a shared
+`ingest_file()` function, called once per file in oldest-fiscal-year/
+quarter-first order, with per-file progress logging (rows read, filtered,
+inserted, skipped).
+
+Hit one new issue generalizing beyond a single quarter: FY2024_Q3 has at
+least one row with a malformed `SOC_CODE` cell (`"15-1253 Software Quality
+Assurance"`, 34 chars — the SOC title looks accidentally appended to the
+code) that overflowed the `VARCHAR(20)` column and crashed the run
+mid-file with `psycopg2.errors.StringDataRightTruncation`. Fixed by adding
+a generic truncate-and-log guard (`STRING_COLUMN_MAX_LENGTHS`, sourced from
+the `LcaDisclosure` model's own column widths, not hardcoded) that trims
+any oversized string field to fit before insert and logs a warning with the
+case number and full original value — same "store as-is, don't silently
+lose it" philosophy already used for the `WAGE_UNIT_OF_PAY` quirk. Thanks
+to per-batch commits, the partial progress from the crashed run wasn't
+lost; the ON CONFLICT dedup logic picked back up cleanly on re-run.
+
+Verified end-to-end: ran the full script against all 11 files (1,448,680
+approved rows considered total, 844,539 newly inserted given the
+already-present FY2025_Q4 data, wall time ~44min for the fully-fresh
+portions); grand total row count (1,431,321) matches `SELECT COUNT(*) FROM
+lca_disclosures` exactly; spot-checked that every `source_file` in the DB
+maps 1:1 to the `fiscal_year`/`quarter` parsed from its filename, across
+all 11 files, not just 2; ran the whole script a second time end-to-end
+(exit code 0, ~46min) and confirmed 0 new inserts, all 1,448,680 approved
+rows correctly skipped as duplicates — full-run idempotency holds, not
+just single-file. Also discovered and fixed unrelated local-Postgres
+issues blocking this work: `companies`/`job_locations`/`job_skills` were
+owned by `postgres` instead of `job_scraper` (fixed via `ALTER TABLE ...
+OWNER TO`), and `alembic_version` was stuck one revision behind
+(`37f5b1de06fe`) despite the DB schema already fully matching
+`7c464378b3de` — fixed via `alembic stamp 7c464378b3de` (bookkeeping only,
+no DDL) then `alembic upgrade head`, which then only needed to run the
+`lca_disclosures` `CREATE TABLE`.
+
+**Decided:** Truncate-and-log rather than drop the row or widen the
+column for the oversized `SOC_CODE` value — dropping would silently lose
+an otherwise-valid disclosure record over one malformed field, and
+widening the schema wasn't asked for and risks masking future data-quality
+regressions in a column that should stay short. Logging the full original
+value alongside the truncation keeps it inspectable without blocking the
+run.
+
+**Next:** 11 fiscal-year/quarter files are now loaded (FY2021 Q1 & Q4,
+FY2022 Q4, FY2024 Q1-Q4, FY2025 Q1-Q4; the legacy pre-2021 H-1B format and
+the FY2026 Q3 Appendix A file remain out of scope), 1,431,321 total rows
+in `lca_disclosures`. Step 5 (employer-name normalization/matching + FK to
+`companies`) remains the next piece of LCA-related work.
+
+---
+
+## 2026-08-20 — Reconciled a reported-totals discrepancy (no bug found)
+
+**Did:** The write-up above cited two different totals for the same run —
+1,431,321 ("DB total") and 1,448,680 (from the idempotency re-run's "Total
+approved rows" line) — a 17,359-row gap that needed explaining. Verified
+`SELECT COUNT(*) FROM lca_disclosures` fresh: **1,431,321**, matching
+`SELECT COUNT(DISTINCT case_number)` exactly (zero duplicate rows in the
+table) and matching the sum of `SELECT source_file, COUNT(*) ... GROUP BY
+source_file` across all 11 files.
+
+Traced the gap to a reporting mismatch, not a data or script bug: the
+script's "Total approved rows" line sums rows that passed the
+`CASE_NUMBER`/`CASE_STATUS` filter *before* `ON CONFLICT (case_number) DO
+NOTHING` collapses duplicates — it was never meant to equal the stored row
+count, but the earlier summary juxtaposed the two numbers in a way that
+implied they should match. Confirmed the actual mechanism with direct
+evidence rather than assuming: `LCA_Disclosure_Data_FY2021_Q4.xlsx` has
+123,716 approved rows, all with distinct `CASE_NUMBER`s within that file
+(checked directly — 0 intra-file duplicates), yet only 123,314 of them are
+attributed to `FY2021_Q4` in the DB; the other 402 case numbers are
+attributed to `FY2021_Q1`, because those same LCA case numbers appear in
+*both* the Q1 and Q4 DOL disclosure exports (a real DOL data quirk — a
+case can reappear across adjacent quarterly files), and since files
+process oldest-first, `ON CONFLICT` correctly kept the Q1 copy and skipped
+Q4's. Per-file (approved-rows-considered minus DB count) diffs sum to
+exactly 17,359, confirming this fully accounts for the gap with no other
+contributing bug.
+
+**Decided:** No fix needed — ingestion, batching, and dedup logic are all
+correct. `1,431,321` is the verified, trustworthy total. Going forward,
+"approved rows considered" (pre-dedup, sum-of-filtered-rows-across-files)
+and the actual stored row count are two legitimately different metrics
+and should not be conflated when reporting.
+
+**Next:** Unchanged — Step 5 (employer-name normalization/matching + FK to
+`companies`) is next.
