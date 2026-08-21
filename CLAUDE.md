@@ -6,15 +6,23 @@ in README.md.
 
 ## Project overview
 
-HuntLoop, today, is a Greenhouse job-board scraper (Scrapy) that pipes postings
-into a Postgres database via SQLAlchemy. That's the whole built system: scrape
-Greenhouse's public API → normalize into `JobPostingItem` → `JobDataPipeline`
-upserts companies/sources/postings/locations/skills.
+HuntLoop, today, is a Greenhouse + Lever job-board scraper (Scrapy) that pipes
+postings into a Postgres database via SQLAlchemy. That's the whole built
+system: scrape each platform's public JSON API → normalize into
+`JobPostingItem` → the single, source-agnostic `JobDataPipeline` upserts
+companies/sources/postings/locations/skills. `main.py` (the actual
+entrypoint) still only runs the Greenhouse spider — the Lever spider exists
+and is proven standalone (`src/huntloop/spiders/lever_spider.py`, see
+SESSIONS.md 2026-08-21) but isn't wired into `main.py` yet.
 
 Broader vision (not yet built): aggregate job postings across many sources, and
 add sponsorship-aware matching so candidates can filter for companies that
 actually sponsor visas (e.g. H1B). Treat anything beyond the Greenhouse pipeline
-above as planned, not present.
+above as planned, not present. One standalone building block toward
+multi-source aggregation exists today: `detect_ats()`
+(`src/huntloop/ats_detection.py`), which identifies which ATS platform a
+company's careers page uses — see the architectural decisions below. It is
+not wired into the scraper or any company list; nothing calls it yet.
 
 ## Tech stack and conventions
 
@@ -117,6 +125,66 @@ above as planned, not present.
   intentionally left alone (it's a manual smoke-test script, not part of
   the shared-logging migration).
 
+- **`detect_ats()` (`src/huntloop/ats_detection.py`) is static-fetch-first,
+  render-as-fallback — it renders with Playwright only when the plain HTTP
+  fetch matches nothing, never by default.** Rendering costs ~4-8s vs.
+  <1-3s for a static hit (measured, see SESSIONS.md 2026-08-21) — an
+  order of magnitude slower — so don't change this to render
+  unconditionally "to be more thorough"; that trade-off is deliberate and
+  documented. `playwright` in `requirements.txt` is a real, used
+  dependency now (was previously unused) — the Chromium browser binary
+  must be present locally (`playwright install chromium`; not yet wired
+  into CI or documented in README.md, since nothing calls `detect_ats()`
+  from the app yet). Even with rendering, `detect_ats()` only sees
+  whatever URL it's given — it doesn't crawl a site to find the actual
+  careers sub-page. `checkr.com/company/careers` (the bare marketing
+  landing page) correctly stays `unknown` even after rendering, because
+  that specific page never embeds the ATS board itself — it only links to
+  `checkr.com/company/careers/open-careers`, which does, and which *does*
+  now correctly resolve to Greenhouse via the render fallback. Workday
+  tenant slugs (the `{tenant}.wd\d+.myworkdayjobs.com` subdomain) aren't
+  derivable from a company name — they were found by manual probing
+  during testing, not a lookup this function does or could do. Playwright
+  failures (navigation timeout, browser launch failure, page crash) are
+  all caught and degrade to `ats="unknown"` with `error` set — never an
+  unhandled exception; a `wait_for_load_state("networkidle")` timeout
+  specifically is treated as non-fatal (real sites often keep a
+  tracking/analytics connection open indefinitely and never go truly
+  idle even once their content has rendered).
+
+- **`JobDataPipeline` (`src/huntloop/pipelines.py`) is genuinely
+  source-agnostic — confirmed, not assumed, when the Lever spider was
+  added (2026-08-21, see SESSIONS.md).** It keys off `item["name"]`
+  (the spider's `self.name`, e.g. `"greenhouse_api"`/`"lever_api"`) and
+  generic item fields, not anything Greenhouse-specific. The `gh_job_id`
+  column name is a cosmetic wart, not a functional coupling — it's a
+  plain string column that holds whatever `item["job_id"]` is for any
+  source (a Greenhouse integer or a Lever UUID, both fine). Don't rename
+  it unprompted; see `job_url` as the actual canonical unique key, above.
+  A new spider for a new ATS platform should need zero pipeline changes,
+  same as Lever did.
+- **The `job_sources` duplication (`'Greenhouse'` vs. `'greenhouse_api'`)
+  is root-caused and closed, not just cleaned up again — 2026-08-21, see
+  SESSIONS.md.** Phase 0 Step 4 consolidated the duplicate once via a
+  data-only migration, but `test_db_insert.py` kept hardcoding the
+  literal `"Greenhouse"`, separate from `GreenhouseScraper.name`
+  (`"greenhouse_api"`) that the real pipeline actually uses, so a manual
+  smoke-test run silently recreated the duplicate. `test_db_insert.py`
+  now imports and reuses `GreenhouseScraper.name` directly instead of a
+  separate literal — it can't drift from the real convention again by
+  construction. The live duplicate was re-consolidated (this time merging
+  *into* `"greenhouse_api"`, the opposite direction from Phase 0, since
+  that's now the name the fixed code will always produce) via
+  `alembic/versions/3620e2fbbd47_consolidate_duplicate_greenhouse_job_.py`.
+  A real regression test
+  (`tests/test_db_insert_smoke_script.py`) runs the actual smoke-test
+  script against pytest's isolated schema and asserts it reuses the
+  pipeline's existing source row rather than creating a second one —
+  confirmed to fail against the pre-fix code, not just pass against the
+  fixed code. If a third spider is ever added, its own `self.name` will
+  get its own distinct row the same way Lever's did automatically — no
+  further pipeline or smoke-test changes needed.
+
 ## How to run things
 
 See README.md for full detail (setup, running the scraper, migrations, tests).
@@ -162,14 +230,49 @@ before the ignore rule existed), and there's no automated
 `pip-audit`/`bandit` step in CI. Don't "fix" these unprompted — they're
 tracked follow-ups, not bugs.
 
+A standalone ATS-detection function (`detect_ats()`,
+`src/huntloop/ats_detection.py`, 2026-08-21, see SESSIONS.md) also exists
+now: given a company's careers URL, it identifies Greenhouse/Lever/
+Ashby/Workday/SmartRecruiters from static HTML first, falling back to a
+Playwright-rendered fetch (added same day, see SESSIONS.md) only when the
+static fetch matches nothing, or `unknown` if neither does. Manually
+verified against the same 13 real, live URLs from the first pass plus the
+`checkr.com/company/careers/open-careers` case the render fallback was
+built to fix — 12/13 now correctly detected (up from 11/13 static-only);
+the 13th (`checkr.com/company/careers`, the bare landing page) correctly
+stays `unknown` even after rendering, because that exact page never
+embeds the ATS board itself (see the architectural decisions above for
+why that's not a bug). Not wired into the scraper, `company_tokens`, or
+any pipeline — detection only, standalone.
+
+A second working spider, `LeverScraper`
+(`src/huntloop/spiders/lever_spider.py`, 2026-08-21, see SESSIONS.md),
+now exists alongside `GreenhouseScraper`, mirroring its structure and
+`custom_settings` exactly. Hardcoded to one company (`wealthfront`, a
+confirmed real Lever user from the ATS-detection step). Verified
+end-to-end against the real Lever API: 22 jobs scraped and inserted
+(`job_postings` 114 -> 136), 3 spot-checked against live Lever job pages
+(title, URL, and multi-location mapping all correct), and `job_sources`
+confirmed to have gotten its own distinct `'lever_api'` row rather than
+collapsing into either existing Greenhouse row. `JobDataPipeline` needed
+zero changes — confirmed genuinely source-agnostic (see the architectural
+decision above). Not wired into `main.py`, `detect_ats()`'s output, or
+any multi-company config yet — standalone, per the task. The
+`job_sources` naming duplication this surfaced was root-caused and closed
+the same day (see the architectural decisions above) — `job_sources` now
+has exactly one row per real source (`greenhouse_api`, `lever_api`).
+
 Not yet started / explicitly deferred: broader scraper coverage (only
-`checkr` and `duolingo` are configured), any UI/API surface for
-`get_sponsorship_summary()` (it's a Python function today, called
-directly, not exposed via an endpoint or the scraper pipeline), curating
-`sponsor_name_overrides` for companies fuzzy matching doesn't resolve
-cleanly (table is still empty), broader test coverage, scraper
-parsing/HTTP tests, CI linting/build/deploy steps, multi-source
-aggregation beyond Greenhouse, and any FK from `companies` to
-`lca_disclosures` (deliberately not built — see the architectural
-decisions above). Nothing beyond what's listed above should be assumed
-built.
+`checkr` and `duolingo` are configured for Greenhouse, `wealthfront` for
+Lever), a company-list config that routes a company to the right spider
+based on `detect_ats()`'s output (the natural next step now that two
+spiders are proven), wiring the Lever spider into `main.py`, any UI/API
+surface for `get_sponsorship_summary()` (it's a Python function today,
+called directly, not exposed via an endpoint or the scraper pipeline),
+curating `sponsor_name_overrides` for companies fuzzy matching doesn't
+resolve cleanly (table is still empty), broader test coverage, scraper
+parsing/HTTP tests, CI linting/build/deploy steps, and any FK from
+`companies` to `lca_disclosures` (deliberately not built — see the
+architectural decisions above), and an LLM-extraction fallback for career
+pages that resist both static fetch and rendering. Nothing beyond what's
+listed above should be assumed built.

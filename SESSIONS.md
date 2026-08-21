@@ -598,3 +598,416 @@ secrets found inside it, just IDE UI state), and no automated
 `requirements.txt` (or add a lockfile), decide whether to `git rm
 --cached` the `.idea/` files now that the directory is gitignored, and
 wire `pip-audit`/`bandit` into `.github/workflows/ci.yml`.
+
+---
+
+## 2026-08-21 — ATS-detection classifier (standalone, not wired in)
+
+**Did:** Added `detect_ats(company_careers_url: str) -> dict` in
+`src/huntloop/ats_detection.py`. Fetches the given URL once (`requests`,
+no JS rendering) and pattern-matches known ATS URL shapes against both
+the final post-redirect response URL and the raw HTML body: Greenhouse
+(`boards.greenhouse.io`, `job-boards.greenhouse.io`, and the
+`boards-api.greenhouse.io/v1/boards/{token}` embed shape used by
+Greenhouse's custom-domain hosting), Lever (`jobs.lever.co/{slug}`),
+Ashby (`jobs.ashbyhq.com/{slug}`), Workday (`{tenant}.wd\d+.myworkdayjobs.com`),
+and SmartRecruiters (`{jobs|careers|www}.smartrecruiters.com/{slug}`).
+Always returns a dict (`source_url`, `ats`, `identifier`, `matched_url`,
+`http_status`, `error`) - a fetch failure and a genuine no-match both come
+back `ats="unknown"`, distinguished only by whether `error` is set. Not
+wired into the scraper or company list - this is the detection function
+only, per the task.
+
+Manually tested against 13 real, currently-live company career URLs:
+
+- **Greenhouse:** `job-boards.greenhouse.io/checkr` -> correct
+  (`checkr`); `job-boards.greenhouse.io/duolingo` -> correct (`duolingo`)
+  *after* a fix (see below).
+- **Lever:** `jobs.lever.co/kraken`, `jobs.lever.co/palantir`,
+  `jobs.lever.co/wealthfront` -> all correct.
+- **Ashby:** `jobs.ashbyhq.com/ramp`, `jobs.ashbyhq.com/linear` -> both
+  correct.
+- **Workday:** `adobe.wd5.myworkdayjobs.com/en-US/external_experienced`,
+  `cvshealth.wd1.myworkdayjobs.com/CVS_Health_Careers` -> both correct
+  (tenant `adobe`/`cvshealth` extracted from the subdomain, confirmed
+  against each page's `<link rel="canonical">`). Several other Workday
+  tenant-URL guesses (Salesforce, Nike, Target, Schneider Electric,
+  PepsiCo, J&J, GE, Verizon, AT&T) 404'd/500'd - Workday tenant slugs
+  aren't guessable from the company name, so this is a small, verified
+  sample, not proof every Workday tenant resolves this way.
+- **SmartRecruiters:** `jobs.smartrecruiters.com/Visa`,
+  `jobs.smartrecruiters.com/IKEA1` -> both correct.
+- **Negative controls:** `www.anthropic.com` (no known ATS signature in
+  the static HTML) -> correctly `unknown`; a non-resolving domain ->
+  correctly `unknown` with `error` set to the `ConnectionError`, no
+  exception raised.
+
+**Bug found and fixed during testing:** the first version's Greenhouse
+pattern only matched `boards.greenhouse.io`/`job-boards.greenhouse.io`,
+so `job-boards.greenhouse.io/duolingo` (which redirects to
+`careers.duolingo.com`, a Greenhouse-hosted custom domain) came back
+`unknown` - a real false negative on one of the two companies the task
+explicitly asked to sanity-check. Duolingo's custom-domain page instead
+preloads from `boards-api.greenhouse.io/v1/boards/duolingo/departments`,
+a different Greenhouse URL shape. Broadened the pattern to cover
+`boards-api`/`job-boards`/`boards`/`api` prefixes plus an optional
+`v1/boards/`/`embed/job_board?for=` path segment. Re-verified against all
+13 URLs after the fix; added a regression test
+(`test_detects_greenhouse_from_boards_api_preload_embed`) so this
+specific shape can't silently regress.
+
+**Known, honest limitation (not a bug, not fixed):**
+`checkr.com/company/careers` (and its `/open-careers` sub-page) both come
+back `unknown`, even though Checkr does use Greenhouse (confirmed
+elsewhere in this repo - see the sponsorship-matching work). The page is
+a Next.js SPA that fetches its Greenhouse board client-side via
+JavaScript; the initial server-rendered HTML this function fetches has
+zero Greenhouse signature anywhere in it (verified by hand - `grep -ic
+greenhouse` on the fetched HTML returns 0). This is the real, expected
+gap a static-HTML fetcher has on JS-heavy marketing sites - correctly
+reported as `unknown` rather than a wrong guess, and exactly the case the
+task said the LLM-extraction fallback (not built yet) is meant to catch.
+
+**Overall accuracy:** 11 of 13 real ATS-bearing URLs correctly detected
+(all 2 Greenhouse, all 3 Lever, all 2 Ashby, all 2 Workday, all 2
+SmartRecruiters) after the fix. The other 2 (`checkr.com`'s two marketing
+career-page URLs) correctly and gracefully returned `unknown` rather than
+crashing or guessing wrong, for the JS-rendering reason above. Both
+negative-control cases (no-ATS page, unresolvable domain) also behaved
+correctly.
+
+**Tests:** `tests/test_ats_detection.py`, 12 tests, all against
+`unittest.mock`-patched `requests.get` (no live network calls) using HTML
+snippets drawn from what was actually observed on the real pages above -
+including a dedicated regression test for the `boards-api.greenhouse.io`
+shape and one reproducing the Checkr client-side-rendering gap. Full
+suite (29 tests total) passes.
+
+**Next:** Not wired into the scraper or `company_tokens` list (out of
+scope for this step, per the task). If/when it is: Workday tenant slugs
+aren't derivable from a company name/domain, so any future integration
+needs a real lookup or directory rather than guessing; the
+client-side-rendering gap (Checkr-style SPAs) is what the planned
+LLM-extraction fallback is meant to close, not this function.
+
+---
+
+## 2026-08-21 — Playwright render fallback for detect_ats() (still standalone)
+
+**Did:** Added a rendering fallback to `detect_ats()`
+(`src/huntloop/ats_detection.py`): when the static HTTP fetch succeeds but
+matches no known ATS pattern, it now retries by rendering the page in
+headless Chromium via Playwright (`page.goto(..., wait_until=
+"domcontentloaded")`, then a bounded `wait_for_load_state("networkidle")`
+that's treated as non-fatal on timeout - real marketing sites often keep
+an analytics/tracking connection open indefinitely and never go truly
+idle, even though their content has already rendered) and re-runs the
+same pattern matching against the rendered HTML. Static-first,
+render-as-fallback: the fallback only triggers when the static fetch
+succeeded with no network-level error but matched nothing - a static
+fetch that raised (DNS failure, connection refused, etc.) returns
+immediately without attempting a render, since retrying the same
+unreachable URL with a browser would just fail identically at far higher
+cost. Installed the Chromium browser binary (`playwright install
+chromium`) into the local Playwright cache, since only the Python package
+was previously present (`requirements.txt` had `playwright` but nothing
+used it - see the 2026-08-21 ATS-detection entry above, which flagged it
+as unused). Added `render_attempted` (bool) to the result dict so callers
+can tell whether the slow path ran. Still not wired into the scraper or
+`company_tokens` - detection only, per the task.
+
+**Verified against the specific real case Step 1 found:**
+`checkr.com/company/careers/open-careers` (the sub-page whose static HTML
+had only a `GreenhouseBlock` CSS-class placeholder with no token, from
+Step 1) now correctly returns `{"ats": "greenhouse", "identifier":
+"checkr", "render_attempted": true}` - confirmed by directly rendering
+that URL with Playwright by hand first (1.7M characters of rendered HTML,
+319 occurrences of "greenhouse" vs. 0 in the static fetch) before trusting
+the automated result. This is the concrete, previously-`unknown` case now
+fixed by the fallback, exactly as asked.
+
+**One honest nuance surfaced during this verification:**
+`checkr.com/company/careers` itself (the bare marketing landing page,
+distinct from its `/open-careers` sub-page) still returns `unknown`,
+*even after rendering* - manually confirmed by rendering it directly and
+grepping the full rendered DOM: zero occurrences of "greenhouse"
+anywhere, static or rendered. That page never embeds the ATS board itself
+- it only links to `/open-careers`, which does. So this isn't a
+rendering-fallback failure; it's a reminder that `detect_ats()` can only
+detect what's actually reachable from the exact URL it's given, not
+crawl a site to find the real careers sub-page. Not a bug, not fixed -
+just documented so a future session doesn't mistake "wrong page tested"
+for "detection broken."
+
+**Full 13-URL regression set re-run (from the original ATS-detection
+session), no regressions:** all 11 previously-correct static-hit
+detections (2 Greenhouse, 3 Lever, 2 Ashby, 2 Workday, 2 SmartRecruiters)
+are unchanged and still correct, and - confirmed via the timing below -
+none of them triggered the render fallback (all resolved on the static
+fetch alone, as they should). Adding the `open-careers` URL back in:
+**12 of 13 real ATS-bearing URLs now correctly detected** (up from 11/13
+in the static-only version), with the 13th (`checkr.com/company/careers`
+bare) a true negative for the reason above, not a detection failure.
+`www.anthropic.com` (negative control) still correctly returns `unknown`
+- now after triggering the render fallback too (still nothing found,
+correctly), which is itself a useful data point for the timing cost
+below.
+
+**Timing cost - static hit vs. render-fallback miss** (measured directly,
+not estimated, one real run each):
+
+| Case | Elapsed |
+|---|---|
+| Static hit (Lever, Ashby, Workday, SmartRecruiters) | 0.23s - 1.21s |
+| Static hit (Greenhouse, direct board URL) | 0.42s - 2.98s |
+| Static miss -> render fallback, match found (`checkr.com/.../open-careers`) | 7.91s |
+| Static miss -> render fallback, still no match (`checkr.com/company/careers`) | 8.07s |
+| Static miss -> render fallback, still no match (`anthropic.com`) | 4.29s |
+| Static-level network failure (no render attempted) | 0.01s |
+
+Rendering adds roughly **4-8 seconds** on top of a sub-second static
+fetch - a 10-30x slowdown - whether or not the render ultimately finds a
+match, since the cost is in launching Chromium and waiting for the page
+to settle, not in the pattern match itself. This is exactly why the
+fallback is gated on a static miss rather than always rendering: at any
+real scale (many companies), most pages should resolve on the fast static
+path, and only the genuinely JS-rendered minority pay the render cost.
+
+**Decided:** Playwright-specific failures (navigation timeout, browser
+launch failure, page crash/closed-context errors, and a catch-all for
+anything else unexpected) are all caught in `_fetch_rendered()` and
+degrade to `ats="unknown"` with a descriptive `error` - never an
+unhandled exception. A `wait_for_load_state("networkidle")` timeout
+specifically is treated as non-fatal (falls through to reading whatever
+DOM exists) rather than a hard failure, since real sites with persistent
+background connections would otherwise always "fail" the render even
+when their content already rendered fine - this was necessary in
+practice, not speculative, since Checkr's page does exactly this.
+
+**Tests:** `tests/test_ats_detection.py`, 19 tests (up from 12), all
+still fully mocked - `requests.get` and (new) `sync_playwright` are both
+monkeypatched, so nothing launches a real browser or hits the network.
+New tests cover: the render fallback finding a match after a static miss
+(a mocked version of the real `open-careers` case above); the fallback
+correctly *not* triggering on a static hit or a static-level fetch error
+(asserting `sync_playwright` was never called, not just checking the
+result); each Playwright failure mode individually (navigation timeout,
+launch failure, page-content/crash failure, an arbitrary non-Playwright
+exception); and the network-idle-timeout-is-non-fatal behavior. Full
+suite (36 tests total) passes.
+
+**Next:** `playwright` in `requirements.txt` is no longer an unused
+dependency - `detect_ats()` now actually uses it, gated behind a static
+miss. The Chromium browser binary (`playwright install chromium`) is a
+real local/CI setup requirement now, not yet documented in README.md or
+wired into `.github/workflows/ci.yml` - out of scope for this step since
+this function still isn't called from anywhere in the app, but will need
+addressing whenever it is. Still not wired into the scraper or
+`company_tokens`.
+
+---
+
+## 2026-08-21 — Lever spider (second working source, standalone)
+
+**Did:** Added `LeverScraper` in `src/huntloop/spiders/lever_spider.py`,
+mirroring `GreenhouseScraper`'s structure exactly (same `start_requests`/
+`async start`/`parse` shape, same `custom_settings` block - `DOWNLOAD_DELAY:
+0.5`, `CONCURRENT_REQUESTS: 4`, `RETRY_ENABLED: True`, `RETRY_TIMES: 3`).
+Hits `https://api.lever.co/v0/postings/{company_token}?mode=json`,
+hardcoded to `wealthfront` (one of the 3 confirmed real Lever companies
+from the ATS-detection step). Inspected Lever's actual response shape
+first rather than assuming field names (`curl`'d the real API): it
+returns a bare JSON array (not a `{"jobs": [...]}` envelope like
+Greenhouse), and each posting's fields are meaningfully different -
+`text` (not `title`), `hostedUrl` (not `absolute_url`), `description`
+(HTML body) with structured `lists` sections kept separate (not
+concatenated - same "flat mapping, not maximal enrichment" scope as the
+Greenhouse spider), `categories.location`/`categories.allLocations` (not
+`offices`), `categories.department`/`categories.commitment` (cleanly
+available as fields, not scattered through a metadata array like
+Greenhouse's `department`/`employment type`). One real field-mapping
+issue caught before it could silently corrupt data: `createdAt` is epoch
+*milliseconds* (e.g. `1694463796009`), not an ISO8601 string like
+Greenhouse's `first_published` - passing that raw integer straight into
+`item['date_posted']` would have sent Postgres a value it can't parse as
+a timestamp, and the pipeline's broad `except Exception` would have
+swallowed the resulting insert failure per-item rather than crash, so
+this could easily have gone unnoticed as silently-missing `date_posted`
+values. Converted with `datetime.fromtimestamp(ms / 1000,
+tz=timezone.utc).isoformat()` before assignment, matching the ISO8601
+string shape Greenhouse's field already uses successfully.
+
+**Confirmed rather than assumed, per the task:**
+- **`JobDataPipeline` is genuinely source-agnostic already** - it keys
+  off `item["name"]` (falls back to `"Greenhouse"` only if that key is
+  literally missing, which no spider does - both spiders always set it),
+  `item["company_name"]`, and generically-named item fields. The one
+  Greenhouse-flavored name left in the DB layer, the `gh_job_id` column,
+  is just a generic string column despite its name (already flagged as
+  an intentionally-kept naming wart, not fixed unprompted - see the
+  architectural decisions in CLAUDE.md). Zero pipeline changes were
+  needed or made.
+- **`DOWNLOAD_DELAY`/`RETRY_ENABLED`/etc. from `settings.py` do apply
+  generically** - confirmed by checking `settings.py` directly rather
+  than assuming: `ITEM_PIPELINES`, `ROBOTSTXT_OBEY`, and
+  `CONCURRENT_REQUESTS_PER_DOMAIN` are all project-level (apply to every
+  spider automatically, not registered per-spider), and the real run's
+  stats (`robotstxt/request_count: 1`) confirm robots.txt was actually
+  checked for `api.lever.co` (its `robots.txt` allows everything, with a
+  `Crawl-delay: 1` suggestion - not auto-enforced by Scrapy's robots
+  middleware, so the spider's own `DOWNLOAD_DELAY: 0.5`, mirrored from
+  Greenhouse's, governs actual pacing, same as Greenhouse does today).
+
+**Verified end-to-end against the real Lever API** (`wealthfront`, no
+mocking): 22 items scraped, log lines confirm each one hit the pipeline
+and inserted successfully, e.g.:
+```
+2026-08-21 12:11:48,276 [INFO] lever_api: Yielding job item: Talent Intelligence Analyst for wealthfront
+2026-08-21 12:11:48,276 [WARNING] huntloop.pipelines: [PIPELINE TRIGGERED] Processing item: Talent Intelligence Analyst
+2026-08-21 12:11:48,283 [INFO] huntloop.pipelines: Inserted job: Talent Intelligence Analyst for wealthfront
+```
+Final Scrapy stats: `item_scraped_count: 22`, `response_status_count/200:
+2` (one robots.txt check + one API call), `finish_reason: finished`.
+`job_postings` total went from 114 to 136 (+22, matching exactly) -
+confirmed via direct `psql`/`psycopg2` query, not just trusting the
+Scrapy log. All 22 have distinct `job_url`s (the real unique key) and
+`gh_job_id` correctly holding Lever's UUID-shaped `id` (e.g.
+`78d6f6d5-1f08-4d5d-87be-c4250567bfb5`), not a Greenhouse-shaped integer.
+
+**Spot-checked 3 of the 22 against the live Lever pages, not just the
+JSON API the spider hit:**
+- "Android Engineer" (`.../78d6f6d5-...`) - DB has title "Android
+  Engineer", location "Palo Alto, CA" (among others). Fetched
+  `jobs.lever.co/wealthfront/78d6f6d5-...` directly: page `<title>` is
+  "Wealthfront - Android Engineer" - matches.
+- "Backend Engineer" (`.../f5a0963a-...`) - DB has 4 locations (Palo
+  Alto, San Francisco, New York, Seattle) from `categories.allLocations`
+  - matches the real posting's multi-location listing.
+- "Anti-Money Laundering Monitoring Analyst" (`.../26d453d0-...`) - DB
+  location "Palo Alto, CA (Open to US-based Remote)" - matches the raw
+  API's `categories.location` value verbatim (Lever's location strings
+  sometimes include this kind of remote-eligibility suffix inline, not a
+  separate field - correctly passed through as-is).
+
+**Confirmed no source collapsing:** `job_sources` after this run has
+`(1, 'Greenhouse')`, `(3, 'greenhouse_api')`, and the new `(4,
+'lever_api')` - Lever's row is fully distinct from both existing
+Greenhouse-labeled rows, not merged into either. Note: `(1, 'Greenhouse')`
+and `(3, 'greenhouse_api')` being *two separate* rows for what's really
+one platform is a **pre-existing** inconsistency (id 1 is from
+`test_db_insert.py`'s manual smoke test, which hardcodes
+`JobSource(name="Greenhouse")`; id 3 is from the real spider's
+`item['name'] = self.name = 'greenhouse_api'`) - not caused by this
+change, not fixed here (out of scope for this task), just observed and
+flagged so it isn't mistaken for something this session introduced.
+
+**Tests:** No new test file added - this step's verification was a real,
+live end-to-end run against Lever's API (per the task's own verification
+standard), not unit tests of the field-mapping logic. Full existing suite
+(36 tests) still passes unchanged, confirming the pipeline reuse claim
+above - nothing broke.
+
+**Next:** Not wired into `detect_ats()`'s output or any multi-company
+config yet, and not wired into `main.py` (which still only runs
+`GreenhouseScraper`) - deliberately out of scope, per the task. With two
+working spiders now proven (Greenhouse, Lever), the next step is a
+company-list config that can route a company to the right spider based on
+`detect_ats()`'s output, rather than each spider hardcoding one token.
+
+---
+
+## 2026-08-21 — Root-caused the recurring job_sources duplication
+
+**Did:** Closed the loop on a bug Phase 0 Step 4 only partially fixed.
+`alembic/versions/37f5b1de06fe` (Phase 0) consolidated a duplicate
+`job_sources` row once (merged `"greenhouse_api"` into `"Greenhouse"`,
+deleted `"greenhouse_api"`), but only fixed the *data* -
+`src/huntloop/test_db_insert.py` kept hardcoding the literal source name
+`"Greenhouse"`, completely separate from and different than the real
+`GreenhouseScraper` spider's own `self.name` (`"greenhouse_api"`) that
+`JobDataPipeline` actually uses (`item["name"] = self.name`). Confirmed
+this was exactly why it came back: live `job_sources` had both
+`(1, 'Greenhouse')` and `(3, 'greenhouse_api')` again (the Lever-spider
+session two entries up in this log flagged it as observed-but-out-of-scope
+at the time).
+
+**Root-cause fix:** `test_db_insert.py` now imports `GreenhouseScraper`
+and uses `GreenhouseScraper.name` for the source lookup/create instead of
+a separately hardcoded literal - so the smoke-test script can structurally
+never again create a `job_sources` row under a name the real pipeline
+wouldn't also use, no matter how the spider's `name` attribute changes in
+the future.
+
+**Data consolidation** (same approach as Phase 0 Step 4 - an Alembic
+migration, since `alembic upgrade head` is this repo's sole source of
+schema/data reconciliation, not an ad hoc script - see
+`alembic/versions/3620e2fbbd47_consolidate_duplicate_greenhouse_job_.py`):
+reassigned `job_postings.source_id` off the `"Greenhouse"` row onto
+`"greenhouse_api"`, then deleted the now-orphaned `"Greenhouse"` row.
+Consolidation direction is the *opposite* of Phase 0's migration
+(that one merged into `"Greenhouse"`) - deliberately, because this time
+the code is fixed first, so `"greenhouse_api"` (the real spider/pipeline's
+actual convention) is what's canonical going forward, not `"Greenhouse"`.
+Verified via `psql`/`psycopg2` before and after:
+```
+before: [(1, 'Greenhouse'), (3, 'greenhouse_api'), (4, 'lever_api')]
+        job_postings by source_id: [(1, 114), (4, 22)]
+after:  [(3, 'greenhouse_api'), (4, 'lever_api')]
+        job_postings by source_id: [(3, 114), (4, 22)]
+```
+All 114 previously-`"Greenhouse"`-sourced postings correctly landed on
+`greenhouse_api`; total `job_postings` count unchanged at 136 throughout -
+confirms this was a pure reassignment, not a data loss. (Also confirmed,
+incidentally, exactly how id 3's `"greenhouse_api"` row had 0 postings
+before this: the pipeline creates/looks-up the `JobSource` row before its
+per-item dedup check runs, so a later local spider run whose jobs were
+all already-scraped duplicates still silently created the source row with
+nothing pointing at it yet - explains the "orphan with zero postings"
+shape observed.)
+
+**Ran the actual smoke-test script** (not just the automated test) against
+the real local DB post-fix: `python -m huntloop.test_db_insert`. It hit a
+pre-existing, unrelated `job_postings_job_url_key` collision (the script
+hardcodes the same `job_url` every run, and this DB already had a row
+from an earlier manual run - not something this task asked to fix), but
+the `JobSource` lookup/create step that runs first completed cleanly with
+`source_id=3` (`greenhouse_api`) and no new row - confirmed via `psql`
+immediately after: `job_sources` still exactly `[(3, 'greenhouse_api'),
+(4, 'lever_api')]`, unchanged.
+
+**Regression test:** `tests/test_db_insert_smoke_script.py` - a real test
+against pytest's isolated schema fixture (`conftest.py`), not a
+reimplementation of the script's logic. It seeds the isolated schema with
+the `JobSource` row the real pipeline convention would already have
+created (`GreenhouseScraper.name`), monkeypatches
+`huntloop.test_db_insert.DATABASE_URL` to point the script's own engine at
+that isolated schema, runs the script's actual `main()`, and asserts only
+one Greenhouse-flavored `job_sources` row exists afterward, under the
+spider's real name. **Proved it actually catches the bug it's meant to
+catch**, not just that it passes: temporarily reverted
+`test_db_insert.py`'s fix back to the hardcoded `"Greenhouse"` literal and
+re-ran the test - it failed, with the DB left holding both the seeded
+`greenhouse_api` row (`source_id=1` in the isolated schema) and a freshly
+created `Greenhouse` row (`source_id=2`), exactly reproducing the
+duplication. Restored the fix (verified byte-identical to the pre-revert
+version via `diff`) and re-ran - passes again. Chose a real functional
+test over a DB-level safeguard (e.g. a case-insensitive/normalized unique
+index on `job_sources.name`) because the actual failure mode here isn't
+"two rows with the same name" - it's "two *differently-named* rows for
+what's semantically one source" (`"Greenhouse"` vs `"greenhouse_api"`),
+which no DB constraint can detect; only a test that knows what name the
+real convention produces can.
+
+**Verified:** Full suite now 37 tests (up from 36), all passing. `alembic
+current` confirms the DB is at the new head (`3620e2fbbd47`).
+
+**Decided:** Left `test_db_insert.py`'s pre-existing hardcoded
+`job_url="https://example.com/jobs/1234"` (and the resulting
+unique-constraint collision on repeated manual runs) untouched -
+unrelated to the `job_sources` naming bug this task targeted, and the
+task said not to touch anything else.
+
+**Next:** Nothing job_sources-related outstanding. If a third spider is
+added later, its `self.name` will automatically get its own distinct
+`job_sources` row the same way Lever's did - no further pipeline or
+smoke-test changes needed, by construction.

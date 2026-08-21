@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from huntloop.db_models import Company, JobSource, JobPosting, JobLocation, JobSkill
+from huntloop.spiders.greenhouse_spider import GreenhouseScraper
 
 load_dotenv()
 
@@ -42,13 +43,19 @@ def main():
             session.commit()
             logger.info(f"Created new company: {company_name}")
 
-        # 🌐 Create or find a Job Source
-        source = session.query(JobSource).filter_by(name="Greenhouse").first()
+        # 🌐 Create or find a Job Source - reuse the real spider's own
+        # `name` (e.g. "greenhouse_api") rather than a separately
+        # hardcoded label, so this smoke test can never create a
+        # job_sources row the real pipeline wouldn't also create. See
+        # SESSIONS.md (2026-08-21) for the recurring duplication this
+        # was previously causing.
+        source_name = GreenhouseScraper.name
+        source = session.query(JobSource).filter_by(name=source_name).first()
         if not source:
-            source = JobSource(name="Greenhouse")
+            source = JobSource(name=source_name)
             session.add(source)
             session.commit()
-            logger.info("Created Job Source: Greenhouse")
+            logger.info(f"Created Job Source: {source_name}")
 
         # 💼 Create a Job Posting
         job = JobPosting(
