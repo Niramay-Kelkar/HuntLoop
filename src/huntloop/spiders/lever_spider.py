@@ -5,6 +5,7 @@ import logging
 import scrapy
 from scrapy.http import Response
 from ..items import JobPostingItem
+from .. import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -60,12 +61,14 @@ class LeverScraper(scrapy.Spider):
         try:
             data = json.loads(response.text)
         except json.JSONDecodeError:
+            metrics.scrape_errors_total.labels(company=comp_token, source=self.name).inc()
             self.logger.error(f"Non-JSON response for company {comp_token}: {response.text[:200]}")
             return
 
         # Lever's postings endpoint returns a bare JSON array, not an
         # {"jobs": [...]} envelope like Greenhouse's.
         if not isinstance(data, list):
+            metrics.scrape_errors_total.labels(company=comp_token, source=self.name).inc()
             self.logger.warning(f"No jobs found or invalid format for {comp_token}: {type(data)}")
             return
 

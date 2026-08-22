@@ -1,0 +1,14 @@
+# Pre-provisions Grafana's Prometheus datasource on container start, so a
+# fresh `docker-compose --profile observability up` needs no manual
+# "add datasource" step in the UI. See
+# https://grafana.com/docs/grafana/latest/administration/provisioning/#datasources
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

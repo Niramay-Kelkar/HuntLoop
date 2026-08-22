@@ -1,0 +1,16 @@
+# Tells Grafana to auto-load dashboard JSON files from this same directory
+# on container start, so a fresh `docker-compose --profile observability
+# up` has the dashboard present without a manual import. See
+# https://grafana.com/docs/grafana/latest/administration/provisioning/#dashboards
+apiVersion: 1
+
+providers:
+  - name: HuntLoop
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards

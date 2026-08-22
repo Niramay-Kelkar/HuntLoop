@@ -207,6 +207,67 @@ docker-compose up --build   # run the scraper (and keep db running)
 `docker-compose down -v` tears everything down, including the `pgdata`
 volume, for a clean slate.
 
+## Observability stack (optional, opt-in)
+
+Prometheus + Pushgateway + Grafana, for local metrics on scraping
+activity. `main.py`'s orchestrator (`huntloop.metrics`) pushes real
+per-run metrics to the Pushgateway once, as a batch, at the end of each
+run — jobs scraped/inserted/skipped-as-duplicate/errored (all labeled by
+company and source) plus the run's wall-clock duration. A pre-provisioned
+Grafana dashboard visualizes them. Metrics are observability, not a hard
+dependency: if the Pushgateway is unreachable, `main.py` logs one warning
+and the actual scrape/DB-insert run completes normally regardless.
+
+These three services live behind the `observability` Compose profile, so
+a plain `docker-compose up` (regular dev work) never starts them:
+
+```bash
+docker-compose --profile observability up -d prometheus pushgateway grafana
+```
+
+- **Prometheus** — http://localhost:9090. Config at
+  `observability/prometheus/prometheus.yml`; scrapes the Pushgateway
+  (`pushgateway:9091`) every 15s, not the app directly — `main.py` is a
+  run-to-completion batch job, not a long-lived process Prometheus could
+  poll on its own schedule. Check a scrape target's health at
+  http://localhost:9090/api/v1/targets or Status → Targets in the UI.
+- **Pushgateway** — http://localhost:9091. Where `main.py` pushes each
+  run's metrics before exiting (`huntloop_jobs_scraped_total`,
+  `huntloop_jobs_inserted_total`, `huntloop_jobs_skipped_duplicate_total`,
+  `huntloop_scrape_errors_total`, `huntloop_run_duration_seconds`). Try it
+  manually with any metric name:
+  ```bash
+  echo 'huntloop_smoke_test_value 42' | curl --data-binary @- \
+    http://localhost:9091/metrics/job/smoke_test
+  ```
+  then, after Prometheus's next 15s scrape, query
+  http://localhost:9090/graph?g0.expr=huntloop_smoke_test_value for `42`.
+- **Grafana** — http://localhost:3000 (login `admin` / `admin` by
+  default — override with `GRAFANA_ADMIN_PASSWORD` in `.env`, local dev
+  only, not a real secret). Both its Prometheus datasource
+  (`observability/grafana/provisioning/datasources/datasource.yml`) and
+  the **"HuntLoop Scraping Activity" dashboard**
+  (`observability/grafana/provisioning/dashboards/huntloop-scraping.json`,
+  loaded via the file provider at
+  `observability/grafana/provisioning/dashboards/dashboards.yml`) are
+  pre-provisioned on container start — no manual "Add data source" or
+  "Import dashboard" click-through needed on a fresh bring-up. The
+  dashboard has 4 panels: jobs scraped over time (by company), jobs
+  inserted vs. skipped-as-duplicate (by company), scrape error count, and
+  run duration trend — all querying the metrics above directly, no new
+  ones. Verify the datasource is connected via the API rather than just
+  the UI:
+  ```bash
+  curl -u admin:admin http://localhost:3000/api/datasources
+  # then, using the "uid" from that response:
+  curl -u admin:admin http://localhost:3000/api/datasources/uid/<uid>/health
+  ```
+
+Tear down with `docker-compose --profile observability down` (add `-v` to
+also drop the `prometheus_data`/`grafana_data` volumes). This doesn't
+touch `db`/`app` or their `pgdata` volume — the two stacks are
+independent.
+
 ## Adding a company to scrape
 
 Not yet configurable. Companies are a hardcoded list in

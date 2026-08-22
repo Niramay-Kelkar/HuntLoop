@@ -21,6 +21,8 @@ from .db_models import (
 )
 from sqlalchemy import create_engine
 
+from . import metrics
+
 logger = logging.getLogger(__name__)
 
 class JobDataPipeline:
@@ -43,13 +45,21 @@ class JobDataPipeline:
 
     def process_item(self, item, spider):
         logger.warning(f"[PIPELINE TRIGGERED] Processing item: {item.get('job_title')}")
+
+        # Computed up front (not just inside the try) so every metrics
+        # label below - including the error-path ones - has a company/
+        # source to attach to, not just the happy path.
+        company_name = (item.get("company_name") or "").strip()
+        source_name = item.get("name") or "Greenhouse"
+        metrics.jobs_scraped_total.labels(company=company_name or "unknown", source=source_name).inc()
+
         session = self.Session()
 
         try:
             # 1️⃣ Company
-            company_name = item.get("company_name", "").strip()
             if not company_name:
                 logger.warning("Skipping item — no company name found")
+                metrics.scrape_errors_total.labels(company="unknown", source=source_name).inc()
                 return item
 
             company = session.query(Company).filter_by(name=company_name).first()
@@ -59,7 +69,6 @@ class JobDataPipeline:
                 session.commit()
 
             # 2️⃣ Source (Greenhouse / Lever)
-            source_name = item.get("name", "Greenhouse")
             source = session.query(JobSource).filter_by(name=source_name).first()
             if not source:
                 source = JobSource(name=source_name)
@@ -81,6 +90,7 @@ class JobDataPipeline:
             existing_job = session.query(JobPosting).filter_by(gh_job_id=str(item["job_id"])).first()
             if existing_job:
                 logger.info(f"Skipping reposted job {item['job_id']}")
+                metrics.jobs_skipped_duplicate_total.labels(company=company_name, source=source_name).inc()
                 return item
 
             # 4️⃣ Create JobPosting entry
@@ -113,12 +123,15 @@ class JobDataPipeline:
             session.commit()
 
             logger.info(f"Inserted job: {item['job_title']} for {company_name}")
+            metrics.jobs_inserted_total.labels(company=company_name, source=source_name).inc()
         except IntegrityError as e:
             session.rollback()
             logger.error(f"Integrity error: {str(e)}")
+            metrics.scrape_errors_total.labels(company=company_name or "unknown", source=source_name).inc()
         except Exception as e:
             session.rollback()
             logger.error(f"Unexpected error inserting item: {e}", exc_info=True)
+            metrics.scrape_errors_total.labels(company=company_name or "unknown", source=source_name).inc()
         finally:
             session.close()
 

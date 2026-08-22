@@ -25,5 +25,62 @@ services:
       db:
         condition: service_healthy
 
+  # Observability stack (Prometheus + Pushgateway + Grafana), gated behind
+  # the "observability" profile so a plain `docker-compose up` for regular
+  # dev work doesn't start any of it. Infrastructure only, per design:
+  # nothing in the app pushes real metrics yet, and no dashboards are
+  # provisioned - see CLAUDE.md/SESSIONS.md.
+  pushgateway:
+    image: prom/pushgateway:v1.10.0
+    profiles: ["observability"]
+    ports:
+      - "9091:9091"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9091/-/healthy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    profiles: ["observability"]
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      pushgateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    profiles: ["observability"]
+    environment:
+      # Local dev only - not a production credential. Override via
+      # GRAFANA_ADMIN_PASSWORD in .env if you want something other than
+      # the default.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3000/api/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
 volumes:
   pgdata:
+  prometheus_data:
+  grafana_data:

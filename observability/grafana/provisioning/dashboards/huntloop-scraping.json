@@ -1,0 +1,118 @@
+{
+  "title": "HuntLoop Scraping Activity",
+  "uid": "huntloop-scraping",
+  "editable": true,
+  "schemaVersion": 39,
+  "timezone": "browser",
+  "time": { "from": "now-24h", "to": "now" },
+  "refresh": "30s",
+  "tags": ["huntloop"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Jobs scraped over time (by company)",
+      "description": "huntloop_jobs_scraped_total, broken down by company - one orchestrator run per data point (main.py pushes once at the end of each run).",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "huntloop_jobs_scraped_total",
+          "legendFormat": "{{company}} ({{source}})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "title": "Jobs inserted vs. skipped as duplicate (by company)",
+      "description": "huntloop_jobs_inserted_total vs. huntloop_jobs_skipped_duplicate_total for the most recent orchestrator run.",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "huntloop_jobs_inserted_total",
+          "legendFormat": "inserted: {{company}} ({{source}})",
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "huntloop_jobs_skipped_duplicate_total",
+          "legendFormat": "skipped duplicate: {{company}} ({{source}})",
+          "refId": "B",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "Scrape errors (most recent run)",
+      "description": "huntloop_scrape_errors_total, summed across company/source. Zero series returned means zero errors (Prometheus does not return a 0-valued series for a counter that was never incremented).",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(huntloop_scrape_errors_total) OR vector(0)",
+          "legendFormat": "scrape errors",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "title": "Run duration trend",
+      "description": "huntloop_run_duration_seconds - wall-clock duration of each orchestrator run.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 18, "x": 6, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "huntloop_run_duration_seconds",
+          "legendFormat": "run duration",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true } },
+        "overrides": []
+      }
+    }
+  ]
+}

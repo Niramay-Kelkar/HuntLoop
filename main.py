@@ -1,6 +1,7 @@
 import os
 import sys
 import logging
+import time
 
 SRC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
 sys.path.insert(0, SRC_DIR)
@@ -13,6 +14,7 @@ from huntloop.spiders.greenhouse_spider import GreenhouseScraper
 from huntloop.spiders.lever_spider import LeverScraper
 from huntloop.settings import DATABASE_URL
 from huntloop.db_models import Company
+from huntloop import metrics
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -60,35 +62,43 @@ def run_multi_ats_scrape():
     with the full list of company tokens for that platform. Platforms
     without an implemented spider (e.g. ashby, workday) and companies with
     no detected platform (ats_platform "unknown" or NULL) are skipped with
-    a clear log message, not silently dropped or crashed on."""
-    by_platform, unset_platform_names = get_companies_by_platform()
+    a clear log message, not silently dropped or crashed on. At the end
+    of the run (success or failure), this run's metrics (jobs scraped/
+    inserted/skipped/errored per company+source, plus run duration) are
+    pushed to the Pushgateway as a single batch - see huntloop.metrics."""
+    start_time = time.perf_counter()
+    try:
+        by_platform, unset_platform_names = get_companies_by_platform()
 
-    if unset_platform_names:
-        logger.warning(
-            f"Skipping {len(unset_platform_names)} companies with no detected ATS platform "
-            f"(ats_platform is NULL): {unset_platform_names}"
-        )
-
-    process = CrawlerProcess(get_project_settings())
-    scheduled_any = False
-
-    for platform in sorted(by_platform):
-        tokens = by_platform[platform]
-        spider_class = SPIDERS_BY_PLATFORM.get(platform)
-        if spider_class is None:
+        if unset_platform_names:
             logger.warning(
-                f"No spider implemented for platform '{platform}', skipping {len(tokens)} companies: {tokens}"
+                f"Skipping {len(unset_platform_names)} companies with no detected ATS platform "
+                f"(ats_platform is NULL): {unset_platform_names}"
             )
-            continue
 
-        logger.info(f"Running {spider_class.name} for {len(tokens)} companies: {tokens}")
-        process.crawl(spider_class, companies=tokens)
-        scheduled_any = True
+        process = CrawlerProcess(get_project_settings())
+        scheduled_any = False
 
-    if scheduled_any:
-        process.start()
-    else:
-        logger.warning("No companies with an implemented spider found - nothing to scrape.")
+        for platform in sorted(by_platform):
+            tokens = by_platform[platform]
+            spider_class = SPIDERS_BY_PLATFORM.get(platform)
+            if spider_class is None:
+                logger.warning(
+                    f"No spider implemented for platform '{platform}', skipping {len(tokens)} companies: {tokens}"
+                )
+                continue
+
+            logger.info(f"Running {spider_class.name} for {len(tokens)} companies: {tokens}")
+            process.crawl(spider_class, companies=tokens)
+            scheduled_any = True
+
+        if scheduled_any:
+            process.start()
+        else:
+            logger.warning("No companies with an implemented spider found - nothing to scrape.")
+    finally:
+        metrics.run_duration_seconds.set(time.perf_counter() - start_time)
+        metrics.push_run_metrics()
 
 
 if __name__ == '__main__':

@@ -4,6 +4,7 @@ import logging
 import scrapy
 from scrapy.http import Response
 from ..items import JobPostingItem
+from .. import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -59,17 +60,19 @@ class GreenhouseScraper(scrapy.Spider):
         try:
             data = json.loads(response.text)
         except json.JSONDecodeError:
+            metrics.scrape_errors_total.labels(company=comp_token, source=self.name).inc()
             self.logger.error(f"Non-JSON response for company {comp_token}: {response.text[:200]}")
             return
 
         # Validate data format
         if not isinstance(data, dict) or "jobs" not in data or not isinstance(data["jobs"], list):
-            self.logger.warning(f"No jobs found or invalid format for {company_token}: {type(data)}")
+            metrics.scrape_errors_total.labels(company=comp_token, source=self.name).inc()
+            self.logger.warning(f"No jobs found or invalid format for {comp_token}: {type(data)}")
             return
 
         for job in data["jobs"]:
             if not isinstance(job, dict):
-                logger.warning(f"Skipping malformed job entry for {company_token}: {job}")
+                logger.warning(f"Skipping malformed job entry for {comp_token}: {job}")
                 continue
             item = JobPostingItem()
             #print(job)

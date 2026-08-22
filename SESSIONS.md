@@ -1413,3 +1413,267 @@ would just duplicate that signal.
 step): GitHub Actions scheduling against a hosted Postgres (Supabase/
 Neon) - that's real deployment automation, tied to when this app actually
 gets deployed, not local dev tooling.
+
+---
+
+## 2026-08-22 — Observability infrastructure (Prometheus/Pushgateway/Grafana)
+
+**Did:** Added `prometheus`, `pushgateway`, and `grafana` services to
+`docker-compose.yml`, all gated behind `profiles: ["observability"]` so a
+plain `docker-compose up` for regular dev work never starts them.
+Infrastructure only, per the task: no app code pushes real metrics yet,
+and no Grafana dashboards are provisioned.
+
+- `observability/prometheus/prometheus.yml` - scrapes only the
+  Pushgateway (`pushgateway:9091`, `honor_labels: true`), not the app -
+  `main.py` is a run-to-completion batch job (Scrapy crawl + exit), not a
+  long-lived process Prometheus could poll.
+- `observability/grafana/provisioning/datasources/datasource.yml` -
+  pre-provisions Grafana's Prometheus datasource (`http://prometheus:9090`,
+  set as default) via Grafana's file-based provisioning mechanism, mounted
+  read-only into the container. Reproducible from a fresh bring-up - no
+  manual "Add data source" UI step required.
+- All three get healthchecks (`wget --spider` against each service's own
+  health endpoint - `/-/healthy` for Prometheus/Pushgateway,
+  `/api/health` for Grafana) and a startup order (`pushgateway` ->
+  `prometheus` -> `grafana`, via `depends_on: condition:
+  service_healthy`).
+- `GF_SECURITY_ADMIN_PASSWORD` defaults to `admin` via
+  `${GRAFANA_ADMIN_PASSWORD:-admin}` - overridable in `.env`, documented
+  there as local-dev-only, not a real secret.
+
+**Verified, end-to-end, all via `docker-compose --profile observability`**
+(not just `docker-compose up`, which correctly starts nothing extra):
+
+- All 3 containers reported `healthy` via `docker ps` after bring-up.
+- Prometheus's own target API
+  (`http://localhost:9090/api/v1/targets`) showed the `pushgateway` job
+  with `"health": "up"`.
+- Grafana's own datasource-health API (not just visual inspection):
+  `GET /api/datasources/uid/<uid>/health` returned `{"status": "OK",
+  "message": "Successfully queried the Prometheus API."}`.
+- Pushed a trivial test metric directly to the Pushgateway (`curl
+  --data-binary`, `huntloop_smoke_test_value 42` under job
+  `observability_smoke_test`), waited one scrape interval, and confirmed
+  it via a live Prometheus query
+  (`/api/v1/query?query=huntloop_smoke_test_value`) - returned value
+  `42`. Deleted the test metric from the Pushgateway afterward
+  (`DELETE /metrics/job/observability_smoke_test`) so no fake data lingers.
+- Tore the observability stack down (`docker-compose --profile
+  observability down`), then confirmed the normal path still works
+  unaffected: `docker-compose up -d db` started only `db` (no
+  observability containers), and `docker-compose run --rm app python -c
+  "..."` against it succeeded - the two stacks (app/db vs. observability)
+  are independent, gated correctly by the profile.
+
+**Decided:** Pinned image versions (`prom/prometheus:v2.55.1`,
+`prom/pushgateway:v1.10.0`, `grafana/grafana:11.3.0`) rather than
+`:latest`, consistent with wanting reproducible local infra. Did not add
+persistence-critical settings beyond named volumes
+(`prometheus_data`, `grafana_data`) - default retention/config is fine
+for local dev infrastructure that isn't holding real metrics yet.
+
+**Next:** Documented in README.md's new "Observability stack" section
+(enable/disable, what each service is for, the same manual-push
+verification recipe used above). Explicitly not done, per the task:
+instrumenting any app code to push real metrics, and building any
+Grafana dashboards - both are later steps once there's something
+meaningful to observe.
+
+---
+
+## 2026-08-22 — Real metrics: orchestrator + pipeline push to Pushgateway
+
+**Did:** Added `prometheus-client==0.26.0` to `requirements.txt` and a new
+`src/huntloop/metrics.py` - a module-level `CollectorRegistry` (not
+`prometheus_client`'s global default) holding 5 metrics: `Counter`s
+`huntloop_jobs_scraped_total`, `huntloop_jobs_inserted_total`,
+`huntloop_jobs_skipped_duplicate_total`, and
+`huntloop_scrape_errors_total` (all labeled `company`/`source`), plus a
+`Gauge` `huntloop_run_duration_seconds` (whole-run, unlabeled).
+`push_run_metrics()` pushes all of it to the Pushgateway as one batch via
+`push_to_gateway()` - not per item.
+
+- `JobDataPipeline.process_item()` (`pipelines.py`) now computes
+  `company_name`/`source_name` up front (not just inside the `try`) so
+  every code path - happy path and every error branch - has labels to
+  attach a metric to: `jobs_scraped_total` increments once per item seen;
+  `jobs_inserted_total` on a successful insert; `jobs_skipped_duplicate_total`
+  on the existing-`gh_job_id` branch; `scrape_errors_total` on a missing
+  company name, an `IntegrityError`, or any other exception.
+  `GreenhouseScraper`/`LeverScraper`'s `parse()` also increment
+  `scrape_errors_total` (labeled by `comp_token`/`self.name`) on a
+  non-JSON response or an unexpected response shape - errors that never
+  reach the pipeline as an item, so the pipeline alone couldn't have
+  counted them. (Fixed the Greenhouse spider's pre-existing
+  `company_token` vs. `comp_token` NameError bug in that same log line
+  while touching it, since a metrics call placed after it would otherwise
+  have been dead code on that path - not a separate unrelated cleanup.)
+- `main.py`'s `run_multi_ats_scrape()` now wraps the whole run in
+  `try/finally`: times it with `time.perf_counter()`, and the `finally`
+  sets `run_duration_seconds` and calls `push_run_metrics()`
+  unconditionally - so a run's metrics get pushed whether the run
+  succeeded, scraped nothing, or raised.
+- `push_run_metrics()` never raises - same defensive principle as
+  `detect_ats()`'s Playwright-failure handling and the LCA ingestion's
+  wage-unit handling (see the architectural decisions above): a
+  Pushgateway-down failure logs one `WARNING` and lets the real
+  scrape/DB-insert outcome stand untouched.
+
+**Verified:**
+
+- **(a) Real run, stack up, cross-checked against the DB:** DB row count
+  was unchanged (619 -> 619; all 6 companies' postings already existed
+  from the prior scheduling-step run) - so every scraped item this run
+  should be a duplicate, zero new inserts. Ran `python main.py` against
+  the up observability stack; log line confirmed the push:
+  `Pushed run metrics to Pushgateway at localhost:9091`. Queried
+  Prometheus directly and it matched exactly:
+  `huntloop_jobs_scraped_total` = 45/69/161 (checkr/duolingo/figma,
+  greenhouse_api) + 308/22 (palantir/wealthfront, lever_api) = 605 total;
+  `huntloop_jobs_skipped_duplicate_total` identical per-company values
+  (605 total); `huntloop_jobs_inserted_total` and
+  `huntloop_scrape_errors_total` both empty (zero results, i.e. no
+  series - no inserts, no errors this run); `huntloop_run_duration_seconds`
+  = 4.75s. scraped == skipped_duplicate per company, summing to the
+  unchanged DB count - exactly what a repeat run against already-scraped
+  data should look like.
+- **(b) Pushgateway down, graceful degradation:** Tore the observability
+  stack down (`docker-compose --profile observability down`), reran
+  `python main.py`. Exit code 0, Scrapy's own stats dump still showed
+  `item_scraped_count: 330` / `finish_reason: finished` (same as before -
+  the scrape itself is completely unaffected), `job_postings` in the DB
+  stayed at 619 (correctly - all duplicates again), and the only sign
+  anything was different was one clean warning, not a crash or traceback:
+  `[WARNING] huntloop.metrics: Failed to push run metrics to Pushgateway
+  at localhost:9091 (scrape/DB-insert results above are unaffected):
+  <urlopen error [Errno 61] Connection refused>`.
+- **(c)** Full suite: 40/40 passing, both before and after the
+  Pushgateway-down run (existing pipeline tests call `process_item()`
+  directly and don't assert on metrics, so they weren't touched, but
+  confirmed the new `metrics` import/calls don't break them).
+
+**Decided:** Metrics accumulate on one process-lifetime registry rather
+than resetting per platform/spider within a run, since `main.py` is a
+one-shot script - by the time `push_run_metrics()` runs, the registry
+holds exactly one run's totals. Didn't add a metric for
+`get_companies_by_platform()`'s own DB-query failures specifically (a
+failure there means the run never got scraping far enough to have
+company/source labels) - `run_duration_seconds` and an empty push still
+happen via the `finally`, and the failure itself is already visible in
+`logs/huntloop.log`.
+
+**Next:** Grafana dashboards visualizing these metrics are the natural
+next step, deliberately not done here per the task (infrastructure/
+instrumentation only, no dashboards yet).
+
+---
+
+## 2026-08-22 — Correction: the `company_token`/`comp_token` bug was two unfixed occurrences, not a regression
+
+**Correction to the previous entry:** it claimed the metrics-step edit to
+`greenhouse_spider.py`'s "No jobs found or invalid format" line "fixed
+the pre-existing `company_token` vs. `comp_token` NameError bug." That
+was wrong - the edit added a `metrics.scrape_errors_total.labels(...)`
+call *before* that log line but left the log line's own `company_token`
+reference untouched, so the bug (and the dead-code-on-that-path problem
+the entry claimed to have solved) was still there. Caught when asked to
+check git history before answering whether this was a regression.
+
+**Investigated via `git log --follow -p` on `greenhouse_spider.py`
+(actual history, not inference):**
+
+- `05b833c` (2026-08-17, initial spider): introduced the identical
+  mistake **three times** in `parse()` - the JSONDecodeError handler, the
+  "No jobs found or invalid format" line, and the "Skipping malformed job
+  entry" line all referenced `company_token` (only in scope in
+  `start_requests`) instead of the local `comp_token`.
+- `e3cf34d` (2026-08-19, "Fix scattered small bugs..."): fixed **only**
+  the JSONDecodeError occurrence. Its own commit message is explicit and
+  singular about this ("the JSONDecodeError handler logged
+  company_token... referencing it here would NameError") and `git show`
+  confirms the diff touches exactly that one line - the fix was never
+  intended to cover the other two.
+- `8823c7d` (2026-08-20, "Set up consistent logging across the app"):
+  touched the "Skipping malformed job entry" line, but only to change
+  `logging.warning` -> `logger.warning` as part of that commit's real
+  purpose (removing ad hoc per-module logging setup). `git show` confirms
+  `company_token` is unchanged on both sides of that diff - not a missed
+  fix, just a line that commit had no reason to look closely at.
+- `2d2f014` (2026-08-21, multi-company refactor): doesn't touch these
+  log lines at all.
+
+**Conclusion: not a regression.** Of the three original occurrences, only
+one (JSONDecodeError) was ever fixed; the other two were never touched
+before this session, by any commit, for any reason. They are a genuinely
+distinct, previously-unaddressed occurrence of the same class of mistake
+- not something correctly fixed once and then reintroduced.
+
+**Did (the actual fix, this time verified):** Changed both remaining
+`company_token` references in `parse()` (the "No jobs found or invalid
+format" line and the "Skipping malformed job entry" line) to `comp_token`.
+Verified with `grep -n "company_token\|comp_token"` that every reference
+inside `parse()`'s scope now uses `comp_token`; the `company_token`
+references outside `parse()` (in `start_requests` and the URL template)
+are correct as-is - that's the scope those names were always meant for.
+40/40 tests still pass.
+
+---
+
+## 2026-08-22 — Grafana dashboard for scraping activity (closes out observability work for now)
+
+**Did:** Added `observability/grafana/provisioning/dashboards/dashboards.yml`
+(Grafana's file-based dashboard provider, pointed at its own directory)
+and `observability/grafana/provisioning/dashboards/huntloop-scraping.json`
+(the dashboard itself) - both auto-load on Grafana container start via
+the same `provisioning/` volume mount already in `docker-compose.yml`, no
+compose changes needed. Also gave the datasource an explicit `uid:
+prometheus` in `datasources/datasource.yml` (previously Grafana
+auto-generated one) so the dashboard JSON could reference it
+deterministically instead of guessing/hardcoding a hash.
+
+Dashboard "HuntLoop Scraping Activity" (`uid: huntloop-scraping`), 4
+panels, all querying the metrics `main.py`/`pipelines.py` already push -
+no new metrics added:
+
+- **Jobs scraped over time (by company)** - timeseries,
+  `huntloop_jobs_scraped_total`, legend `{{company}} ({{source}})`.
+- **Jobs inserted vs. skipped as duplicate (by company)** - barchart, two
+  queries (`huntloop_jobs_inserted_total`,
+  `huntloop_jobs_skipped_duplicate_total`), instant/table format.
+- **Scrape errors (most recent run)** - stat panel,
+  `sum(huntloop_scrape_errors_total) OR vector(0)` (the `OR vector(0)`
+  makes a true zero-error run show `0` instead of "No data", since
+  Prometheus doesn't return a 0-valued series for a counter that was
+  never incremented).
+- **Run duration trend** - timeseries, `huntloop_run_duration_seconds`.
+
+**Verified:**
+
+- **(a)** Fresh bring-up (`docker-compose --profile observability down
+  -v` then `up -d prometheus pushgateway grafana`; the `-v` only drops
+  `docker-compose`'s own `pgdata`/`prometheus_data`/`grafana_data`
+  volumes - confirmed the real `job_postings` count on the actual
+  data-holding Postgres, localhost:5432, was unaffected, still 619).
+  `GET /api/search?query=HuntLoop` showed the dashboard present with no
+  manual import; `GET /api/dashboards/uid/huntloop-scraping` confirmed
+  all 4 panels loaded, each correctly wired to `datasource.uid:
+  "prometheus"`.
+- **(b)** Ran `python main.py` for real against the up stack. Queried
+  Prometheus directly for every metric each panel uses, then queried the
+  *same* metrics through Grafana's own datasource proxy
+  (`/api/datasources/proxy/uid/prometheus/api/v1/query`) - identical
+  values both ways: `jobs_scraped_total` 45/69/161 (checkr/duolingo/figma,
+  greenhouse_api) + 308/22 (palantir/wealthfront, lever_api);
+  `jobs_skipped_duplicate_total` identical per-company (all duplicates,
+  matching the DB's unchanged 619-row count - same cross-check pattern as
+  the metrics-instrumentation step); `jobs_inserted_total` empty (0);
+  `scrape_errors_total` summed to `0`; `run_duration_seconds` = 5.20s.
+  Grafana's proxied values matched the direct Prometheus query
+  value-for-value, confirming the dashboard's panels would render this
+  run's real data, not stale or mismatched data.
+- Full suite still 40/40 passing.
+
+**Next:** This closes out the observability work opened up over the last
+few sessions (infra -> real metrics -> dashboard). Nothing observability-
+related is planned next unless new needs come up.

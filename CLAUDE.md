@@ -49,6 +49,50 @@ nothing scrapes them; treat that as planned, not present.
   SESSIONS.md (2026-08-21). `.dockerignore` excludes `data/raw/` and
   `logs/` (mirroring `.gitignore`) so real LCA data and log output never
   get baked into an image layer.
+- **`docker-compose.yml` has a Prometheus/Pushgateway/Grafana
+  observability stack, added 2026-08-22 (see SESSIONS.md), gated behind
+  `profiles: ["observability"]` so plain `docker-compose up` never starts
+  it. This is now closed out — infra, real metrics, and a dashboard all
+  exist.** Config lives under `observability/`:
+  `observability/prometheus/prometheus.yml` (scrapes only the
+  Pushgateway — `main.py` is a run-to-completion batch job, not something
+  Prometheus could poll directly);
+  `observability/grafana/provisioning/datasources/datasource.yml`
+  (pre-provisions the Prometheus datasource with an explicit
+  `uid: prometheus`, no manual UI setup); and
+  `observability/grafana/provisioning/dashboards/` (a `dashboards.yml`
+  file-provider config plus `huntloop-scraping.json`, the "HuntLoop
+  Scraping Activity" dashboard — 4 panels: jobs scraped over time by
+  company, jobs inserted vs. skipped-as-duplicate by company, scrape
+  error count, run duration trend — all pre-provisioned, auto-loaded on
+  container start, no manual import). Verified end-to-end against a real
+  `python main.py` run: Grafana's own datasource proxy returned the same
+  metric values as a direct Prometheus query, matching the run's actual
+  DB row-count delta. Don't add more dashboards/panels unprompted unless
+  there's a real new need.
+- **`main.py`'s orchestrator pushes real per-run metrics to the
+  Pushgateway, added 2026-08-22 (see SESSIONS.md).**
+  `src/huntloop/metrics.py` holds a module-level `CollectorRegistry` (not
+  `prometheus_client`'s global default) with `Counter`s
+  `huntloop_jobs_scraped_total`/`huntloop_jobs_inserted_total`/
+  `huntloop_jobs_skipped_duplicate_total`/`huntloop_scrape_errors_total`
+  (all labeled `company`/`source`) and a `Gauge`
+  `huntloop_run_duration_seconds`. `JobDataPipeline.process_item()`
+  increments the per-item counters; `GreenhouseScraper`/`LeverScraper`'s
+  `parse()` increment `scrape_errors_total` for malformed/non-JSON
+  responses (errors that never reach the pipeline as an item).
+  `run_multi_ats_scrape()` wraps the whole run in `try/finally` and the
+  `finally` always sets `run_duration_seconds` and calls
+  `push_run_metrics()` — one batched `push_to_gateway()` call at the end
+  of the run, never per item. **`push_run_metrics()` never raises** — a
+  Pushgateway-down failure logs one `WARNING`
+  (`huntloop.metrics: Failed to push run metrics...`) and leaves the real
+  scrape/DB-insert outcome untouched, same defensive principle as
+  `detect_ats()`'s Playwright-failure handling. Verified end-to-end twice
+  (see SESSIONS.md): a real run with the stack up, cross-checked
+  metric-for-metric against DB row-count deltas; and a real run with the
+  stack down, confirming the scrape/insert work completes normally and
+  only a warning is logged, not a crash.
 - One-off scripts live in `scripts/` (not part of the ongoing app pipeline
   or CI) — e.g. `scripts/ingest_lca_disclosures.py`, run manually. Uses
   `pandas`/`openpyxl` (in `requirements.txt`) to read DOL's `.xlsx`

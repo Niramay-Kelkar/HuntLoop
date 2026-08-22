@@ -1,0 +1,13 @@
+global:
+  scrape_interval: 15s
+
+# Scrapes the Pushgateway, not the app directly - main.py is a
+# run-to-completion batch job (Scrapy crawl + exit), not a long-lived
+# process Prometheus could scrape on its own schedule. Once app code
+# pushes real metrics to the Pushgateway (a later step - not done here),
+# they'll show up here automatically; no config change needed.
+scrape_configs:
+  - job_name: pushgateway
+    honor_labels: true
+    static_configs:
+      - targets: ["pushgateway:9091"]
