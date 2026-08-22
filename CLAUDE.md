@@ -61,6 +61,32 @@ nothing scrapes them; treat that as planned, not present.
   plain `logging.getLogger(__name__)` and relies on this having already
   run. Level is controlled by the `LOG_LEVEL` env var (default `INFO`), not
   hardcoded per-module. `logs/` is gitignored (runtime artifact).
+- **This dev machine has two distinct local Postgres instances — don't
+  assume "the Postgres" means the Docker one.** `localhost:5432` is a
+  system-installed PostgreSQL 18 (`/Library/PostgreSQL/18`, runs as a
+  system service, not Homebrew's `postgresql@18` — that one fails to
+  start here with "Address already in use" since the system one already
+  holds the port) and is what `.env`'s `DATABASE_URL` points at and what
+  manual `python main.py` runs actually use — confirmed 2026-08-22 (see
+  SESSIONS.md) holding the real accumulated data (1,431,321
+  `lca_disclosures` rows, 616+ `job_postings`, 10 `companies`).
+  `localhost:5433` is `docker-compose`'s `db` service — a deliberately
+  separate, smaller instance (see the Docker bullet above and README's
+  "Run with Docker") that was holding only 115,695/45/1 rows respectively
+  when checked. Don't conflate the two or assume either is stale/unused
+  without checking row counts directly first.
+- Scheduling: `scripts/run_orchestrator_cron.sh` + a local crontab entry
+  (`0 3 * * *`, daily) run `main.py` unattended — added 2026-08-22, see
+  SESSIONS.md. The wrapper is a thin `cd` + `.venv/bin/python main.py`
+  call; it does not duplicate `.env`/`DATABASE_URL` or point at a
+  different DB than manual runs. `logs/cron.log` (new, also gitignored
+  under `logs/`) is a lightweight start/exit-code/end marker log,
+  separate from and in addition to the existing rotating
+  `logs/huntloop.log` — see README's "Scheduled runs" section for
+  enable/disable/where-to-check. This is local-only automation; GitHub
+  Actions scheduling against a hosted Postgres (Supabase/Neon) is a
+  deliberately separate, later deployment step — don't build it
+  unprompted.
 
 ## Key architectural decisions (already made — don't re-litigate)
 
@@ -105,10 +131,13 @@ nothing scrapes them; treat that as planned, not present.
   not eliminate every collision between unrelated companies sharing a
   generic industry-suffix word (e.g. "... CONSULTANCY SERVICES",
   "... INFOSYSTEMS") — that residual ambiguity is what
-  `sponsor_name_overrides` is for. `sponsor_name_overrides` is still empty
-  — for both companies checked so far (`checkr`, `duolingo`), fuzzy
-  matching alone was already unambiguous and verified correct, so no
-  override was needed yet; don't assume the table has real entries in it.
+  `sponsor_name_overrides` is for. `sponsor_name_overrides` has one real
+  entry as of 2026-08-22 (see SESSIONS.md): `kraken` ->
+  `KRAKEN TECHNOLOGIES US`, added because fuzzy matching also pulled in
+  `RAKEN` (`Raken, Inc.`, an unrelated construction-software company) at
+  90.9 — above the 88 threshold. The other 5 currently-scraped companies
+  (`checkr`, `duolingo`, `figma`, `palantir`, `wealthfront`) each resolved
+  to a single unambiguous 100.0-scoring match and needed no override.
 - **Test isolation uses a throwaway Postgres schema per test session**, not
   `pytest-postgresql`. Reuses the existing local Postgres server rather than
   spinning up a separate instance. See `tests/conftest.py`.
@@ -261,9 +290,14 @@ company name to likely `employer_name_normalized` candidates; and
 `get_sponsorship_summary()` applies that to a real `Company` row and
 returns an aggregated sponsorship picture (total approved LCAs by fiscal
 year, distinct job titles, distinct worksite states). Verified end-to-end
-against both currently-scraped companies (`checkr`: 48 approved LCAs
-2021-2025; `duolingo`: 95 approved LCAs 2021-2025) — both matches manually
-confirmed correct, no override needed. Shared logging
+against both currently-scraped companies at the time (`checkr`: 48
+approved LCAs 2021-2025; `duolingo`: 95 approved LCAs 2021-2025) — both
+matches manually confirmed correct, no override needed. Extended
+2026-08-22 (see SESSIONS.md) to the 4 companies scraped since Phase 2 —
+`figma` (107 approved LCAs), `palantir` (241), `wealthfront` (43) all
+resolved to a single unambiguous match each; `kraken` (1 approved LCA)
+needed `sponsor_name_overrides`' first real entry to exclude an unrelated
+company (`Raken, Inc.`) that fuzzy-matched above threshold. Shared logging
 (`src/huntloop/logging_config.py`, `LOG_LEVEL`-controlled, console +
 rotating file) is also in place across the scraper, pipeline, and scripts.
 See SESSIONS.md for the full log.

@@ -92,6 +92,77 @@ environment variable, e.g.:
 LOG_LEVEL=WARNING python main.py
 ```
 
+## Scheduled runs
+
+The orchestrator (`main.py`) can run on a schedule via `cron`, so postings
+stay fresh without a manual `python main.py` each time. This is local-only
+automation for a dev machine that's actually on/awake at the scheduled
+time — it is not a substitute for real deployment scheduling (e.g. GitHub
+Actions against a hosted Postgres), which is a separate, later step once
+there's a publicly reachable database.
+
+`scripts/run_orchestrator_cron.sh` is the entrypoint cron calls. It's a
+thin wrapper, not a parallel code path: it `cd`s into the repo (cron's
+working directory isn't otherwise predictable), then runs
+`.venv/bin/python main.py` — the exact same script, same `.venv`, same
+`.env`/`DATABASE_URL` a manual run uses. Nothing about credentials or
+config is duplicated for the scheduled path.
+
+**Enable it** (runs daily at 3:00 AM local time):
+
+```bash
+(crontab -l 2>/dev/null; echo "0 3 * * * $(pwd)/scripts/run_orchestrator_cron.sh") | crontab -
+```
+
+**Check it's installed:**
+
+```bash
+crontab -l
+```
+
+```
+0 3 * * * /Users/niramaykelkar/Desktop/HuntLoop/scripts/run_orchestrator_cron.sh
+```
+
+**Disable it** (removes just this line, leaves any other crontab entries
+alone):
+
+```bash
+crontab -l | grep -v 'run_orchestrator_cron.sh' | crontab -
+```
+
+**Where to check whether a scheduled run happened, and what it did:**
+
+- `logs/cron.log` — append-only, wrapper-level marker log. One
+  start/end pair per run, with a timestamp and the exit code, e.g.:
+  ```
+  === HuntLoop scheduled orchestrator run started 2026-08-22 03:00:01 PDT ===
+  ...
+  === run finished with exit code 0 at 2026-08-22 03:00:47 PDT ===
+  ```
+  A non-zero exit code (or an `ERROR: .venv/bin/python not found` line,
+  if the venv itself is missing) means the run failed. Check this file
+  first — it's the fastest way to answer "did last night's run happen,
+  and did it succeed."
+- `logs/huntloop.log` — the same rotating, shared-logging file every
+  manual run also writes to (see "Logging" above; 5MB cap, 3 backups).
+  Scheduled runs show up in it exactly like manual ones — same format,
+  same per-company INFO/WARNING lines, same Scrapy stats dump at the end.
+  This is where to look for *what* happened during a run (which
+  companies were scraped, which were skipped and why, item counts),
+  not just whether it succeeded.
+
+The scheduled job assumes Postgres is already reachable at
+`DATABASE_URL` when it fires (same requirement as a manual run — this
+wrapper doesn't start or manage any database). On this repo's dev
+machine that's a locally-installed Postgres 18 running as a system
+service on port 5432, independent of the `docker-compose` `db` service
+described below (which is a separate, smaller Postgres instance on port
+5433 for the containerized workflow — see "Run with Docker"). If
+`DATABASE_URL` points somewhere not currently running, the run fails
+fast with a clear connection-error traceback in `logs/huntloop.log`,
+same as it would for a manual run.
+
 ## Running tests
 
 ```bash

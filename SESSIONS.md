@@ -1277,3 +1277,139 @@ ever prioritized), broadening the curated company list beyond the current
 9, and deciding whether/how `detect_and_store_ats.py` and `main.py`'s
 orchestrator run gets automated (currently both are separate manual
 steps - `python scripts/detect_and_store_ats.py` then `python main.py`).
+
+---
+
+## 2026-08-22 — Sponsorship lookup extended to all 6 scraped companies
+
+**Did:** Ran the existing `get_sponsorship_summary()` (unchanged) against
+all 6 companies with an implemented spider - `checkr`, `duolingo` (the
+original Step 7 pair) plus `figma`, `kraken`, `palantir`, `wealthfront`
+(the 4 companies scraped since Phase 2). No matching-logic changes.
+
+- **checkr**: matched `CHECKR` (100.0). 48 approved LCAs - 2021: 11,
+  2022: 6, 2024: 17, 2025: 14. 38 distinct job titles, 9 worksite states
+  (CA, CO, FL, GA, MA, NC, OR, PA, WA). Unchanged from Step 7.
+- **duolingo**: matched `DUOLINGO` (100.0). 95 approved LCAs - 2021: 8,
+  2022: 4, 2024: 43, 2025: 40. 40 distinct job titles, 3 worksite states
+  (NY, PA, WA). Unchanged from Step 7.
+- **figma**: matched `FIGMA` (100.0), single unambiguous candidate. 107
+  approved LCAs - 2021: 10, 2022: 14, 2024: 31, 2025: 52. 31 distinct job
+  titles (Product Designer, Data Engineer, Software Engineer -
+  Infrastructure, etc.), 5 worksite states (CA, MA, NY, TX, WA). Sanity
+  check: CA (Figma HQ is San Francisco) and design/product/eng titles are
+  exactly what a design-tool company would sponsor. Correct, no override
+  needed.
+- **palantir**: matched `PALANTIR TECHNOLOGIES` (100.0), single
+  unambiguous candidate. 241 approved LCAs - 2021: 26, 2022: 11, 2024: 91,
+  2025: 113. 188 distinct job titles, 8 worksite states (CA, CO, DC, IL,
+  NY, TX, VA, WA). Sanity check: DC/VA line up with Palantir's large
+  government/defense business, "Deployment Strategist" (many numbered
+  variants) and "Forward Deployed Engineer"-style titles are Palantir's
+  well-known signature roles. Correct, no override needed. (The numbered
+  job-title variants, e.g. "Deployment Strategist (11525.2662)", are raw
+  DOL data as filed, not a scraping or normalization artifact.)
+- **wealthfront**: matched `WEALTHFRONT CORPORATION` (100.0), single
+  unambiguous candidate. 43 approved LCAs - 2021: 13, 2022: 1, 2024: 20,
+  2025: 9. 20 distinct job titles, 6 worksite states (AZ, CA, MN, NJ, NY,
+  TX). Sanity check: CA (Wealthfront HQ Palo Alto) plus
+  finance/fintech-adjacent titles ("Broker Dealer Accountant", "IT
+  Auditor", software/product roles) match a robo-advisor. Correct, no
+  override needed.
+- **kraken**: initially matched *two* candidates - `KRAKEN TECHNOLOGIES
+  US` (100.0) and `RAKEN` (90.9, i.e. `Raken, Inc.`) - both above the 88
+  threshold. Sanity check caught this as wrong: `Raken, Inc.` is an
+  unrelated construction-field-management software company (its one LCA
+  row: "Data Analyst", CA), with nothing to do with Kraken the crypto
+  exchange (`jobs.lever.co/kraken`, the company actually scraped here).
+  `KRAKEN TECHNOLOGIES US, INC` is plausibly correct (a real legal-entity
+  naming pattern for Kraken's US operations), but its only LCA row
+  ("CLIENT DELIVERY LEAD", TX) is thin evidence on its own - flagged as
+  the weakest of the 6 matches, still judged correct on the entity name
+  itself.
+
+**Decided:** Added one `sponsor_name_overrides` row - `kraken` ->
+`KRAKEN TECHNOLOGIES US` - to exclude the `RAKEN` false positive
+(rapidfuzz's `token_set_ratio` scores "Kraken" vs "Raken" at 90.9, just
+inside the 88 threshold; this is exactly the residual-ambiguity case the
+override table exists for, not a reason to change the global threshold -
+see the threshold rationale in `fuzzy_match.py`). Before/after:
+
+  - Before: `matched_employer_names` = `[KRAKEN TECHNOLOGIES US (100.0,
+    fuzzy), RAKEN (90.9, fuzzy)]`; `total_approved_lcas` = 2 (1 real
+    Kraken row + 1 contaminating Raken row); `worksite_states` = [CA, TX]
+    (CA came from the Raken row); `job_titles` = ["CLIENT DELIVERY LEAD",
+    "Data Analyst"] ("Data Analyst" came from the Raken row).
+  - After: `matched_employer_names` = `[KRAKEN TECHNOLOGIES US (100.0,
+    override)]`; `total_approved_lcas` = 1; `worksite_states` = [TX];
+    `job_titles` = ["CLIENT DELIVERY LEAD"].
+
+  No other company needed an override - the other 3 new companies
+  (figma, palantir, wealthfront) each returned exactly one unambiguous
+  100.0-scoring candidate.
+
+**Next:** All 6 currently-scraped companies now have verified
+sponsorship summaries. `sponsor_name_overrides` has its first real entry
+(`kraken`). Not yet done: the remaining Phase 1/2 follow-ups already
+listed above (broader company coverage, UI/API surface for
+`get_sponsorship_summary()`, etc.) are still open; kraken's single LCA
+row means its picture may look thin/incomplete relative to its actual US
+headcount - that's a DOL-data-coverage limitation, not a matching bug.
+
+---
+
+## 2026-08-22 — Local cron scheduling for the orchestrator (Step 5)
+
+**Did:** Added `scripts/run_orchestrator_cron.sh`, a thin wrapper cron
+calls: `cd`s into the repo, runs `.venv/bin/python main.py` (the exact
+same script/venv/`.env` a manual run uses - no duplicated credentials or
+config), and appends a start/exit-code/end marker to `logs/cron.log` so a
+scheduled run's outcome is visible after the fact. Installed a crontab
+entry: `0 3 * * * /Users/niramaykelkar/Desktop/HuntLoop/scripts/run_orchestrator_cron.sh`
+(daily, 3:00 AM local). This is local-only scheduling for a dev machine
+that's on at the scheduled time - explicitly not GitHub Actions, which
+needs a publicly reachable DB (Supabase/Neon) and is a separate, later
+deployment step.
+
+**Investigated before picking a DB target:** The task said to schedule
+against "the running Dockerized Postgres," but that phrase turned out to
+be imprecise for this repo's actual setup - checked directly rather than
+assuming. Started both Postgres instances and queried each with `psql`:
+
+  - `localhost:5432` (system-installed PostgreSQL 18 at
+    `/Library/PostgreSQL/18`, running as a system service - not the
+    Homebrew `postgresql@18`, which failed to start with "Address
+    already in use" because this one already held the port): `lca_disclosures`
+    1,431,321 rows, `job_postings` 616, `companies` 10. This is `.env`'s
+    `DATABASE_URL` target and matches the real accumulated data exactly.
+  - `localhost:5433` (docker-compose's `db` service, started via
+    `docker compose up -d db` for this check): `lca_disclosures` 115,695
+    rows, `job_postings` 45, `companies` 1 - a smaller/stale dataset, not
+    the one in active use.
+
+  Targeted 5432 (i.e., left `.env`/`DATABASE_URL` untouched) since that's
+  where the real data actually lives, which also happens to match "use
+  the same .env/config manual runs use." Tore the docker `db` container
+  back down after the check (`docker compose down`) - it was only started
+  to compare counts, not part of the delivered setup.
+
+**Verified:** `crontab -l` shows the installed entry (pasted above). Ran
+`scripts/run_orchestrator_cron.sh` directly (the same command cron would
+invoke, not `python main.py` directly) - exit code 0, `logs/cron.log`
+shows the start/end markers, `logs/huntloop.log` shows the full Scrapy
+run (stats dump, `finish_reason: finished`), and `job_postings` in the
+real DB went 616 -> 619, confirming the wrapper-triggered run actually
+wrote real data, not just logged success.
+
+**Decided:** Cadence is daily at 3 AM - no stated requirement for
+tighter, and job boards don't change fast enough to need more. Didn't add
+a `pg_isready`/DB-reachability preflight check to the wrapper - a
+DB-down failure already surfaces as a clear connection-error traceback in
+`logs/huntloop.log` via the existing shared logging, so a separate check
+would just duplicate that signal.
+
+**Next:** Documented enable/disable/where-to-check in README.md's new
+"Scheduled runs" section. Not done (deliberately out of scope for this
+step): GitHub Actions scheduling against a hosted Postgres (Supabase/
+Neon) - that's real deployment automation, tied to when this app actually
+gets deployed, not local dev tooling.
