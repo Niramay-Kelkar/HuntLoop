@@ -30,6 +30,22 @@ from huntloop.pipelines import JobDataPipeline
 
 
 def _schema_scoped_url(schema_name: str) -> str:
+    # Deliberately schema_name ONLY, never `,public` - tried adding public
+    # to the search_path (2026-08-22, see SESSIONS.md) to make the
+    # `vector` type, which lives in `public` (CREATE EXTENSION vector),
+    # resolve for the new embedding columns. That broke isolation
+    # instead: with `public` second, create_all()'s own has_table() check
+    # resolves unqualified table names via search_path, finds the *real*
+    # public.companies/job_postings/etc. (same names, schema_name has none
+    # yet) before schema_name has any tables of its own, and silently
+    # skips creating fresh ones there - leaving the "isolated" schema
+    # empty and every test silently reading/writing real production data.
+    # Caught by manually inspecting the schema after create_all()
+    # (`\dt schema_name.*` came back empty) rather than trusting that
+    # tests passing meant isolation was intact. Fixed at the source
+    # instead (huntloop.db_models's Vector subclass schema-qualifies
+    # `public.vector(...)` directly in its DDL), so this fixture never
+    # needs `public` on the path at all.
     separator = "&" if "?" in DATABASE_URL else "?"
     return f"{DATABASE_URL}{separator}options=-csearch_path={schema_name}"
 

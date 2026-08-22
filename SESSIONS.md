@@ -1677,3 +1677,469 @@ no new metrics added:
 **Next:** This closes out the observability work opened up over the last
 few sessions (infra -> real metrics -> dashboard). Nothing observability-
 related is planned next unless new needs come up.
+
+---
+
+## 2026-08-22 — pgvector enabled on docker-compose's Postgres (infra only)
+
+**Did:** Switched `docker-compose.yml`'s `db` service from `postgres:18`
+to `pgvector/pgvector:pg18` - confirmed via `docker manifest inspect` and
+the Docker Hub API before switching, not assumed: it's the official
+pgvector project's image (155M+ pulls, actively maintained, last pushed
+2026-08-13 as of this change), amd64+arm64, and `pg18` currently resolves
+to pgvector 0.8.6 built against Postgres 18 - an exact match for the
+`postgres:18` base it replaces. Added
+`alembic/versions/c2d25907fe8e_enable_pgvector_extension.py`
+(`CREATE EXTENSION IF NOT EXISTS vector;` / `DROP EXTENSION IF EXISTS
+vector;`), now head, revising `7fbc4b9c6976`. Infra only, per the task -
+no vector columns, embeddings, or matching logic added.
+
+**Verified, all against the docker-compose `db` (port 5433), not the
+local system Postgres (see below):**
+
+- **(a)** `docker-compose build app` (the running `app` image was stale
+  from an earlier session and needed rebuilding to pick up the new
+  migration file - confirmed via `alembic heads` showing an old head
+  before the rebuild, current head after), then `docker-compose run --rm
+  app alembic upgrade head` ran the full chain cleanly, ending at
+  `7fbc4b9c6976 -> c2d25907fe8e, enable pgvector extension`.
+- **(b)** `psql -h localhost -p 5433 ... -c "\dx"` showed `vector | 0.8.6`
+  installed, schema `public`.
+- **(c)** Smoke test via `psql`: created `pgvector_smoke_test(id serial,
+  embedding vector(3))`, inserted 3 rows (`[1,2,3]`, `[4,5,6]`,
+  `[1,2,4]`), ran `ORDER BY embedding <-> '[1,2,3]'` - returned the
+  correct nearest-neighbor order (distance 0, 1, 5.196...), then dropped
+  the table.
+- **(d)** Seeded one company (`checkr`, `ats_platform='greenhouse'`)
+  into the now-empty-after-rebuild docker `companies` table (a fresh
+  volume, since this session's earlier `down -v` had cleared it - not
+  real data, this docker instance never holds it, see the
+  two-Postgres-instances note in the architectural decisions above), then
+  ran `docker-compose run --rm app python main.py` against the pgvector
+  image: `item_scraped_count: 45`, `finish_reason: finished`,
+  `Spider closed (finished)` - and confirmed `job_postings` in that DB
+  went 0 -> 45, matching. Same log-line proof standard as every prior
+  "does the app still work" check in this project.
+- **(e)** Full suite: 40/40 passing (tests run against local system
+  Postgres per `tests/conftest.py`, untouched by this change).
+
+**Resolved: does local system Postgres (5432, where the real data lives)
+also need pgvector installed? Yes, and it does not have it yet -
+confirmed directly, not assumed.** Ran
+`CREATE EXTENSION IF NOT EXISTS vector;` against the real database
+(`localhost:5432/jobsight`) and got a real, specific error:
+`ERROR: extension "vector" is not available / HINT: The extension must
+first be installed on the system where PostgreSQL is running.` Checked
+for the extension's control/library files directly under
+`/Library/PostgreSQL/18` (`share/postgresql/extension/`,
+`lib/postgresql/`) - absent; this is the official EDB/PostgreSQL.org
+macOS installer's Postgres 18, not a Homebrew one, and pgvector isn't
+bundled with it. That directory tree is owned by `root:daemon` (not the
+invoking user), so installing pgvector there (compiling from source via
+`make PG_CONFIG=/Library/PostgreSQL/18/bin/pg_config install`, the usual
+method - a C compiler and Xcode Command Line Tools are present) would
+need `sudo` against a system directory outside the repo, on the Postgres
+instance holding the real accumulated data (1.43M+ `lca_disclosures`
+rows, 619 `job_postings`). **Not attempted in this session** - flagged
+per the task's explicit instruction rather than assumed/auto-installed,
+since it's a real system-level, `sudo`-gated change to shared machine
+state, not a repo-local or reversible-by-`git`-revert action. The new
+Alembic migration is consequently **not yet applied to local system
+Postgres** - `alembic upgrade head` run there today would fail at
+`c2d25907fe8e` with the same "extension not available" error, blocking
+any migrations layered after it until pgvector is installed there too.
+This matters for Step 7 (local cron scheduling, `scripts/
+run_orchestrator_cron.sh`) only if/when a future migration depends on
+`alembic upgrade head` having succeeded past this point - the cron
+wrapper itself only runs `main.py`, not migrations, so today's cron runs
+are unaffected.
+
+**Next:** Waiting on a decision (asked the user directly, this
+turn) on whether/how to install pgvector on local system Postgres before
+building anything that needs `vector` columns there. Docker-side is
+fully ready. No vector columns, embeddings, or matching logic exist yet
+anywhere, per this step's scope.
+
+---
+
+## 2026-08-22 — pgvector installed on local system Postgres (5432), closing the gap flagged above
+
+**Did:** Compiled and installed pgvector 0.8.6 from source against
+`/Library/PostgreSQL/18` (the EDB/PostgreSQL.org installer, not
+Homebrew), then formally applied the `c2d25907fe8e` migration there so
+both Postgres instances (docker-compose's on 5433 and local system
+Postgres on 5432, where the real data lives) now have the same pgvector
+version available, matching by design.
+
+**Two real build/permission obstacles found and resolved, not assumed
+away:**
+
+1. **Xcode Command Line Tools were not actually installed**, despite
+   `xcode-select -p` reporting a path - confirmed by actually trying to
+   compile a trivial `.c` file (`xcrun: error: invalid active developer
+   path ... missing xcrun`), not by checking `which cc`/`which make`
+   (those resolve to real-looking stub binaries that fail at runtime
+   without CLT). `pkgutil --pkg-info` found no CLT receipt at all, and
+   `/Library/Developer/CommandLineTools/usr/bin/` didn't exist. Fixed via
+   `xcode-select --install` (interactive, user-run - can't be scripted or
+   sudo'd around).
+2. **pgvector's `make` failed with `clang: error: unsupported argument
+   'native' to option '-march='`** - pgvector's Makefile defaults to
+   `-march=native`, which Apple's `clang` rejects when building a
+   universal binary (`-arch x86_64 -arch arm64`, which this Postgres
+   install's `pg_config` CFLAGS specify). Fixed with `make clean` +
+   `make PG_CONFIG=... OPTFLAGS=""` to drop that flag - a documented
+   macOS-specific pgvector quirk, not a tooling or headers problem (the
+   EDB install's server dev headers,
+   `pg_config --includedir-server` -> `/Library/PostgreSQL/18/include/
+   postgresql/server`, were present and correct the whole time, confirmed
+   via `postgres.h` existing there before any of this).
+3. **`CREATE EXTENSION vector` as the app's `job_scraper` role failed**
+   with `permission denied ... Must be superuser to create this
+   extension` - this pgvector version's `vector.control` has no
+   `trusted = true` line, so (correctly) only a real Postgres superuser
+   can install it, never the app's own non-superuser role. The user ran
+   it themselves as `postgres` (the EDB installer's default superuser)
+   via `psql -U postgres`, since that credential isn't something this
+   session has or should have.
+
+**Sequence actually run** (git-cloned pgvector pinned to `v0.8.6` - the
+same version already on the `pgvector/pgvector:pg18` Docker image, for
+parity):
+
+```
+xcode-select --install                                          # user, interactive
+git clone --branch v0.8.6 --depth 1 https://github.com/pgvector/pgvector.git /tmp/pgvector
+cd /tmp/pgvector && make clean
+make PG_CONFIG=/Library/PostgreSQL/18/bin/pg_config OPTFLAGS=""
+sudo make PG_CONFIG=/Library/PostgreSQL/18/bin/pg_config install    # user, sudo
+psql -h localhost -p 5432 -U postgres -d jobsight -c "CREATE EXTENSION IF NOT EXISTS vector;"   # user, superuser
+```
+
+**Verified:**
+
+- **(a/b)** After install, `\dx` against 5432 (as `job_scraper`) showed
+  `vector | 0.8.6` - same version as the docker-compose instance.
+  Confirmed `CREATE EXTENSION IF NOT EXISTS vector` as `job_scraper`
+  (the role `DATABASE_URL`/Alembic actually use) now succeeds as a no-op
+  (`NOTICE: extension "vector" already exists, skipping`) once the
+  extension exists globally in the database - Postgres skips the
+  ownership/privilege check for an already-satisfied `IF NOT EXISTS`, so
+  Alembic (which runs as `job_scraper`, never superuser) can safely apply
+  this migration on a fresh database too, as long as a superuser created
+  the extension there once, or the role is granted appropriately.
+- **(c)** `alembic current` showed `7fbc4b9c6976` (one behind head)
+  before the real `alembic upgrade head` run; ran it for real -
+  `Running upgrade 7fbc4b9c6976 -> c2d25907fe8e, enable pgvector
+  extension`, no errors; `alembic current` afterward confirmed
+  `c2d25907fe8e (head)`.
+- **(d)** Ran `python main.py` for real against local Postgres
+  post-migration: Scrapy finished normally (`Spider closed (finished)`),
+  `job_postings` unchanged at 619 (correctly - same-day repeat run, all
+  duplicates), and the Pushgateway-push warning fired as designed (the
+  observability stack wasn't up during this check - unrelated to the
+  pgvector change, same graceful-degradation behavior verified
+  previously).
+- Full suite: 40/40 passing.
+
+**Resolved: both Postgres instances (Docker's on 5433, local system's on
+5432, which holds the real 1.43M+-row LCA dataset) now have pgvector
+0.8.6 enabled and available**, closing the gap flagged in the prior
+entry. Still no vector columns, embeddings, or matching logic anywhere -
+purely infra, per this step's scope; building on top of this is a
+separate future decision.
+
+---
+
+## 2026-08-22 — Resume ingestion (text extraction + versioned storage, no matching)
+
+**Did:** Added `data/resumes/` to both `.gitignore` and `.dockerignore`
+(personal data - same reasoning as `data/raw/`) before touching anything
+else. Added `pdfplumber==0.11.7` to `requirements.txt` - chose it over
+`pypdf` because it's layout-aware (built on `pdfminer.six`), which
+handles multi-column resume sections and irregular whitespace far better
+than `pypdf`'s more basic extraction; a mis-ordered/garbled extraction at
+this step would silently corrupt everything matching/scoring logic
+builds on top of it later, so accuracy here was worth the extra
+dependency weight. Added `ResumeVersion`
+(`src/huntloop/db_models.py`: `id`, `version_number` [unique], `uploaded_at`,
+`file_path`, `extracted_text`, `is_active`) and Alembic migration
+`cbf7cee7fb12` (revises `c2d25907fe8e`). Added
+`scripts/ingest_resume.py` - takes a PDF path, extracts text with
+`pdfplumber`, computes the next `version_number` from the current max,
+flips any existing active row to inactive (never deletes), and inserts
+the new row as active. Ingestion only, per the task's explicit scope - no
+embeddings, no matching, no LLM-suggestion or skills-extraction logic.
+
+**Verified against the user's real resume**
+(`data/resumes/Niramay_Kelkar_Resume_FullStack_v3.pdf`, placed there
+mid-session - not present when the step started, confirmed by searching
+the repo for any `.pdf` before proceeding rather than assuming it was
+already there):
+
+- **(a)** First run: `Ingested resume version 1 ... (5195 chars
+  extracted), marked active`. Confirmed via `psql`: one row,
+  `is_active=t`.
+- **(b)** Inspected the extracted text directly (not just "it ran without
+  error"): reading order is correct and every section is intact - header/
+  contact info, SUMMARY, TECHNICAL SKILLS (with its sub-category
+  labels), EXPERIENCE (4 roles, each with correct dates/locations and all
+  bullet content), PROJECT, EDUCATION - no jumbled or missing text.
+  **One real, worth-flagging artifact**: every bullet point extracts as
+  literal `(cid:127)` instead of `•` - a known pdfminer/pdfplumber
+  limitation where a PDF's bullet glyph isn't mapped to a real Unicode
+  codepoint in the font's embedded ToUnicode CMap. Not data loss or
+  reordering, just a cosmetic substitution - worth knowing about for any
+  future bullet-aware parsing, not something this ingestion-only step
+  attempts to clean up.
+- **(c)** Ran the script again (same PDF, simulating a resume update):
+  `Ingested resume version 2 ... marked active`. Confirmed via `psql`:
+  version 1 now `is_active=f` (still present, `extracted_text` intact -
+  not deleted), version 2 `is_active=t`.
+- **(d)** Full suite: 40/40 passing, both before the PDF existed (schema/
+  migration-only check) and after both ingestion runs.
+
+**Decided:** `file_path` stores the path as given on the command line
+(here, `data/resumes/Niramay_Kelkar_Resume_FullStack_v3.pdf`, relative to
+repo root) rather than copying the PDF into a canonical location - the
+task didn't ask for file management, just extraction + versioned storage,
+and `data/resumes/` is already gitignored/dockerignored so leaving the
+file where the user put it is fine.
+
+**Next:** No embeddings, matching, LLM-suggestion, or skills-extraction
+logic exists yet - all deliberately deferred, per this step's scope.
+`resume_versions` now has 2 real rows (v1 inactive, v2 active) from this
+session's verification runs, both against the user's real resume.
+
+---
+
+## 2026-08-22 — INCIDENT: full production data wipe during embedding-columns work, and recovery
+
+**What happened:** While adding `embedding vector(384)` columns
+(`resume_versions`, `job_postings`) for match scoring, `\dx` and a real
+`CREATE EXTENSION` test confirmed pgvector's `vector` type lives in
+`public`. `tests/conftest.py`'s isolated-schema fixture scopes
+`search_path` to only the fresh per-session schema (deliberately, so
+tests never touch real data) - so the new `vector` columns' DDL
+(`Base.metadata.create_all()`, run against that fixture) couldn't
+resolve the unqualified `vector` type name, and every DB-touching test
+errored at setup (`type "vector" does not exist`).
+
+The fix applied first - adding `,public` to that fixture's search_path -
+was wrong and caused real, serious damage. With `public` second on the
+path, `create_all()`'s own `has_table()` existence check resolves
+unqualified table names via search_path *before* create_all has put
+anything in the fresh test schema - so it found the *real*
+`public.companies`/`public.job_postings`/etc. (same names) and concluded
+they already existed, silently skipping table creation in the isolated
+schema entirely. The fixture returned successfully (no error), so
+nothing signaled anything was wrong. Every test that ran afterward was
+silently operating on the **real production tables** instead of an
+isolated copy - including `test_pipeline.py`'s tests, whose `pipeline`
+fixture teardown runs `DELETE FROM <table>` on every table
+(`Base.metadata.sorted_tables`, all 9 tables) after each test, to keep
+the (assumed-isolated) schema clean between tests. That teardown ran for
+real, against `public`. Two full pytest runs happened in this state
+before the damage was noticed - not caught immediately because the
+suite's outcome ("38 passed, 2 failed", the 2 failures being unrelated
+cross-test-contamination artifacts of the same bug) looked like ordinary
+test-writing noise, not a signal to check real row counts.
+
+**Full scope of the wipe, confirmed by querying every table directly
+after the fact:** `companies`, `job_postings`, `job_sources`,
+`job_locations`, `job_skills`, `job_metadata`, `lca_disclosures` (all
+1,431,321 rows), `sponsor_name_overrides` (its one real entry, `kraken`
+-> `KRAKEN TECHNOLOGIES US`), and `resume_versions` (both versions
+ingested earlier this session) - every table `Base.metadata` knows
+about, all rows, all gone. `alembic_version` was **not** affected -
+confirmed via `alembic current` before touching any data - `DELETE FROM`
+never touches Alembic's own bookkeeping table, and it isn't part of
+`Base.metadata` (confirmed: `08af7f0a020c (head)`, matching `alembic
+heads` exactly). This was a pure data-loss incident, not schema
+corruption - every table structure, migration, and column definition
+survived untouched.
+
+**Real fix (not the broken one):** Reverted `tests/conftest.py` to
+search_path = schema-name-only, exactly as before (verified this was
+in fact the regression - manually recreated the failure with a scratch
+schema and confirmed `\dt` came back empty after `create_all()` when
+`public` was on the path). Fixed the actual `vector`-type-resolution
+problem at its source instead: `huntloop.db_models` now defines a local
+`Vector` subclass of `pgvector.sqlalchemy.Vector` that overrides
+`get_col_spec()` to always emit `public.vector(n)` (schema-qualified)
+rather than the bare `vector(n)` the base class emits - confirmed via
+reading pgvector's actual source that `get_col_spec` only feeds DDL
+generation and is completely separate from value bind/result processing,
+so this is a safe drop-in for both testing and production, not a hack
+specific to the test fixture. Verified directly (not just "tests green"
+this time): recreated an isolated schema by hand with schema-only
+search_path, ran `create_all()`, and confirmed via `\dt schema.*` that
+all 9 real tables - including the new `vector(384)` columns with the
+correct type - were actually created there.
+
+**Recovery, in dependency order (companies -> job postings -> LCA data
+-> resume -> sponsor override), each step run for real against local
+system Postgres (5432):**
+
+1. **Companies + ATS data**: re-ran `scripts/detect_and_store_ats.py`
+   (worked around its own pre-existing missing-`sys.path`-insert bug
+   with `PYTHONPATH=src` rather than silently fixing it - out of scope
+   here). Result: **9/9 companies restored**, `ats_platform` populated
+   for all 9, matching the original detection results exactly
+   (checkr/duolingo/figma -> greenhouse, kraken/palantir/wealthfront ->
+   lever, ramp -> ashby, adobe -> workday, brex -> unknown). Note: the
+   original `companies` table had a 10th row (`OpenAI`, from
+   `test_db_insert.py`'s separate manual smoke test) not part of this
+   recovery's ordered list - left out, not restored.
+2. **Job postings**: re-ran `python main.py` (the real orchestrator).
+   Result: **605 rows** (checkr 45, duolingo 69, figma 161, palantir
+   308, wealthfront 22) vs. **619 originally** -
+   explicitly NOT an exact restore, as expected and flagged in advance:
+   live job boards changed in the time between the original scrape and
+   this recovery run (some listings closed). `kraken` again shows 0
+   postings - consistent with its real Lever board having 0 open roles,
+   already independently verified as a real, non-bug state in an earlier
+   session, not new evidence of a problem.
+3. **LCA disclosures**: re-ran `scripts/ingest_lca_disclosures.py`
+   against the untouched source files in `data/raw/dol_lca/` (13 files
+   on disk, 11 actually processed - matches prior documentation).
+   Result: **1,431,321 rows - an exact match** to the pre-wipe count,
+   as expected (deterministic from unchanged source files, same
+   `ON CONFLICT` dedup logic). Took 33m28s wall-clock. All rows have
+   `employer_name_normalized` populated (confirmed already wired into
+   the ingest path, no separate backfill pass needed).
+4. **Resume**: re-ran `scripts/ingest_resume.py` against
+   `data/resumes/Niramay_Kelkar_Resume_FullStack_v3.pdf` (same file,
+   untouched by the DB wipe). Result: version 1 (fresh numbering, the
+   table was empty - not the original v1/v2), active, 5195 chars
+   extracted - content identical to before, since extraction from an
+   unchanged PDF is deterministic.
+5. **Sponsor override**: manually reinserted the one known row
+   (`kraken` -> `KRAKEN TECHNOLOGIES US`) directly via SQL - this exact
+   value was already independently verified correct via real
+   investigation in an earlier session (see the sponsorship-lookup
+   entries above), so re-deriving it via fuzzy-matching again wasn't
+   necessary.
+
+**Verified test isolation is genuinely fixed, not just "tests green"
+again:** captured real production row counts
+(companies=9, job_postings=605, lca_disclosures=1431321,
+resume_versions=1, sponsor_name_overrides=1) immediately before running
+the full suite, ran it twice (40/40 passing both times), and confirmed
+the exact same row counts held after each run - the new standing check
+for any future session touching `tests/conftest.py` or the isolated-
+schema mechanism.
+
+**Decided:** No backup/dump mechanism exists for this local database -
+worth considering as real future work (e.g. a periodic `pg_dump` cron
+job alongside the existing scraper-orchestrator one), but not built here
+- out of scope for what was already a recovery, not a new-feature step.
+
+**Next:** Data is restored and test isolation is verified fixed. Ready
+to proceed with the actual Step 3 (embeddings/match scoring) work this
+incident interrupted, now against the restored data.
+
+---
+
+## 2026-08-22 — Embedding-based match scoring (Step 3)
+
+**Did:** Added `sentence-transformers==6.0.0` and `pgvector==0.5.0` to
+`requirements.txt`, using `all-MiniLM-L6-v2` (dimension confirmed as 384
+against the model's own published `1_Pooling/config.json`, not assumed -
+matches `EMBEDDING_DIM` in `huntloop.db_models`). Added
+`huntloop.text_cleaning.clean_text()` - checked real data before writing
+it, not assumed: the resume's `extracted_text` has every bullet as
+literal `(cid:127)` (a pdfminer glyph-mapping artifact, generalized to
+any `(cid:\d+)`); `job_postings.job_description` is HTML in every real
+row across all 5 scraped companies with descriptions, in two different
+forms depending on source - Greenhouse rows (checkr/duolingo/figma) come
+back HTML-entity-escaped (`&lt;p&gt;...`), Lever rows
+(palantir/wealthfront) come back as raw HTML (`<div>...`) - one
+`html.unescape()` call normalizes both to the same shape before tag-
+stripping. Added `huntloop.embeddings` (lazy-loaded `SentenceTransformer`
+wrapper, CPU-only, runs `clean_text()` before embedding). Added
+migration `08af7f0a020c`: nullable `embedding vector(384)` on both
+`resume_versions` and `job_postings`. Added
+`scripts/backfill_embeddings.py` - embeds the active resume version
+(recomputed every run) and backfills `job_postings` in batches of 100,
+committing per batch, selecting only `embedding IS NULL` each pass (same
+interrupt-safe pattern as `backfill_employer_name_normalized.py`).
+
+**Real environment blocker, worked around, not ignored:** this
+project's local dev venv (macOS, Intel, Python 3.13) cannot run
+`sentence-transformers` - confirmed by actually trying to install
+`torch`, not assumed: PyPI's last macOS-x86_64 torch wheel is `2.2.2`,
+which only ships `cp38`-`cp312` wheels, nothing for `cp313`. Checked
+whether another local Python was available (only system Python 3.9 and
+this venv's 3.13 exist; no 3.10/3.11/3.12) before deciding not to stand
+up a second parallel Python install just for this. Instead ran the
+embedding computation inside the `app` Docker image (`python:3.13-slim`,
+Linux - real `torch` wheels exist for Linux+cp313), pointed at the real
+host Postgres via Docker's `host.docker.internal` gateway:
+`docker compose run --rm -e DATABASE_URL="...@host.docker.internal:5432/..." app python scripts/backfill_embeddings.py`.
+Confirmed this reaches the real data (not `docker-compose`'s own smaller
+`db` on 5433) before running anything for real. Image grew to 5.81GB
+after adding `torch`+`sentence-transformers` - expected, not investigated
+further (out of scope; nothing about image size was part of this task).
+
+**A serious incident happened mid-task and is written up in the entry
+above this one** ("INCIDENT: full production data wipe...") - all
+real data was restored before this step's actual verification (below)
+ran, and `tests/conftest.py`/`huntloop.db_models.Vector` both needed real
+fixes (not just the embedding-columns migration) to get here safely.
+
+**Match scoring: computed at query time via pgvector's `<=>` operator
+(cosine distance; similarity = `1 - distance`), NOT stored.** Decided
+against a stored score column/table: with exactly one active resume at a
+time and ~600 job postings, a live query is milliseconds - no
+precomputation benefit - and a stored score would need an invalidation
+mechanism (on every new scrape, on every resume update) that doesn't
+exist and is out of scope for this step; storing it now would just be a
+staleness bug waiting to happen. Revisit if/when there are enough
+concurrent resume versions or jobs that live scoring becomes measurably
+slow.
+
+**Verified:**
+
+- **(a)** `job_postings`: 605/605 rows have `embedding IS NOT NULL` (0
+  nulls). Active resume version (1): has embedding. Backfill wall-clock:
+  **34.9s** for all 605 job postings + 1 resume (Docker container run,
+  includes one-time model download/load).
+- **(b)** Score distribution across all 605 real job postings (resume vs.
+  every posting, `1 - (r.embedding <=> j.embedding)`): min 0.033, max
+  0.593, mean 0.372, stddev 0.091. Histogram across six 0.1-wide buckets
+  from 0-0.6 is roughly bell-shaped and centered near the mean (1, 17,
+  94, 290, 138, 65) - real spread at both tails, no degenerate
+  clustering near 0.99 or a flat/uniform blob. Healthy signal.
+- **(c)** Top 5 by score: all 5 are Palantir "Software Engineer" roles
+  (Defense Applications x2 - same title, genuinely different `job_url`s/
+  postings, confirmed not a dedup bug; Frontend Developer Productivity;
+  Production Infrastructure Internship x2), scores 0.577-0.593. Bottom 5:
+  Wealthfront "Fraud Operations Specialist" (0.033, the single lowest
+  score in the whole dataset), two Wealthfront/Duolingo creative-design
+  roles, Duolingo "Creative Director, Marketing" x2, scores 0.033-0.136.
+  **Sanity check, by eye, against the resume's actual content** (backend
+  engineer - Java/Python/C#, microservices, Spring Boot/FastAPI, AWS/
+  Kubernetes, Prometheus/Grafana observability, DB optimization): the
+  top-ranked roles are exactly the kind of software engineering work the
+  resume describes; the bottom-ranked roles (fraud ops, creative/design,
+  marketing) have essentially zero real skill overlap with it. The
+  ranking looks correct and meaningful, not arbitrary - nothing here
+  looked wrong enough to flag as a problem.
+- **(d)** Full suite: 40/40 passing. Real production row counts
+  (companies=9, job_postings=605, lca_disclosures=1431321,
+  resume_versions=1, sponsor_name_overrides=1) reconfirmed unchanged
+  before and after this run - the new standing check from the incident
+  above.
+
+**Decided:** No skills-list, 70%-threshold wiring, or LLM-suggestion
+logic added - explicitly out of scope for this step, per the task.
+
+**Next:** Real embeddings and a working, sanity-checked scoring mechanism
+exist for both the active resume and every currently-scraped job
+posting. Not yet built: any of the deferred matching-UX pieces above, a
+`get_match_scores()`-style reusable function/API (this step's
+verification used ad hoc SQL, documented here and reproducible, rather
+than building an application-level interface prematurely), and
+persistence/embedding computation triggered automatically on new scrapes
+or resume updates (both still manual script runs).

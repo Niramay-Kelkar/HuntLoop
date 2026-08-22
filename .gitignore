@@ -12,4 +12,5 @@ dist/
 .idea/
 .vscode/
 data/raw/
+data/resumes/
 logs/

@@ -1,6 +1,16 @@
 services:
   db:
-    image: postgres:18
+    # pgvector/pgvector:pg18 is the official pgvector project's image
+    # (https://hub.docker.com/r/pgvector/pgvector) - a drop-in
+    # postgres:18 replacement with the pgvector extension's shared
+    # library pre-installed (not enabled by default - see the
+    # 0001_enable_pgvector migration, which runs CREATE EXTENSION
+    # IF NOT EXISTS vector). Confirmed via `docker manifest inspect` and
+    # Docker Hub before switching: actively maintained (155M+ pulls,
+    # last pushed 2026-08-13 as of this change), amd64+arm64, and `pg18`
+    # currently resolves to pgvector 0.8.6 built against Postgres 18 -
+    # matching the postgres:18 base this replaces exactly.
+    image: pgvector/pgvector:pg18
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}

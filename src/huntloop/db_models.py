@@ -19,8 +19,32 @@ from sqlalchemy import (
     Index,
 )
 from sqlalchemy.orm import declarative_base, relationship
+from pgvector.sqlalchemy import Vector as _Vector
 
 Base = declarative_base()
+
+# all-MiniLM-L6-v2's output dimension - confirmed against the model's own
+# published config (1_Pooling/config.json: "word_embedding_dimension": 384
+# on https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2), not
+# assumed. See huntloop.embeddings.
+EMBEDDING_DIM = 384
+
+
+class Vector(_Vector):
+    """pgvector's Vector type, but always emits a schema-qualified
+    `public.vector(n)` in DDL instead of the bare `vector(n)` the base
+    class emits. Needed for tests/conftest.py's isolated-schema fixture:
+    its search_path deliberately never includes `public` (see that
+    file's comment for why - adding it broke test isolation instead), so
+    an unqualified `vector` type reference wouldn't resolve there even
+    though the `vector` extension (CREATE EXTENSION vector) is installed
+    and lives in `public` on both this project's Postgres instances.
+    Schema-qualifying only affects DDL (get_col_spec) - value
+    binding/result processing is inherited unchanged from pgvector's
+    Vector, so this is a safe drop-in everywhere, not just for tests."""
+
+    def get_col_spec(self, **kw):
+        return f"public.{super().get_col_spec(**kw)}"
 
 
 # ----------------------------------------------------------------------
@@ -79,6 +103,11 @@ class JobPosting(Base):
     is_active = Column(Boolean, nullable=True, default=True, server_default="true")
     scraped_at = Column(DateTime(timezone=True), server_default=func.now())
     last_checked = Column(DateTime, nullable=True)
+    # all-MiniLM-L6-v2 embedding of the cleaned job_description (see
+    # huntloop.text_cleaning, huntloop.embeddings). Nullable - backfilled
+    # separately (scripts/backfill_job_embeddings.py), not computed at
+    # insert time by JobDataPipeline yet.
+    embedding = Column(Vector(EMBEDDING_DIM), nullable=True)
 
     # Foreign Keys
     company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"))
@@ -208,4 +237,38 @@ class SponsorNameOverride(Base):
         return (
             f"<SponsorNameOverride(raw_company_name={self.raw_company_name}, "
             f"employer_name_normalized={self.employer_name_normalized})>"
+        )
+
+
+# ----------------------------------------------------------------------
+# 9️⃣ Resume Version Table
+# ----------------------------------------------------------------------
+class ResumeVersion(Base):
+    """
+    Ingested resume text, versioned so a resume update never overwrites
+    history - see scripts/ingest_resume.py. `is_active` marks the single
+    version to match against; ingesting a new version flips the previous
+    active row to inactive rather than deleting it. `embedding` is an
+    all-MiniLM-L6-v2 embedding of the cleaned extracted_text (see
+    huntloop.text_cleaning, huntloop.embeddings,
+    scripts/backfill_job_embeddings.py) - computed for the active version
+    only. Match scoring is computed at query time via pgvector's `<=>`
+    operator against job_postings.embedding, not stored - no skills-list
+    or LLM-suggestion logic lives here yet (deliberately out of scope,
+    see SESSIONS.md).
+    """
+    __tablename__ = "resume_versions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    version_number = Column(Integer, nullable=False, unique=True)
+    uploaded_at = Column(DateTime, server_default=func.now())
+    file_path = Column(String(500), nullable=False)
+    extracted_text = Column(Text, nullable=False)
+    is_active = Column(Boolean, nullable=False, default=False, server_default="false")
+    embedding = Column(Vector(EMBEDDING_DIM), nullable=True)
+
+    def __repr__(self):
+        return (
+            f"<ResumeVersion(version_number={self.version_number}, "
+            f"is_active={self.is_active})>"
         )

@@ -119,6 +119,33 @@ nothing scrapes them; treat that as planned, not present.
   "Run with Docker") that was holding only 115,695/45/1 rows respectively
   when checked. Don't conflate the two or assume either is stale/unused
   without checking row counts directly first.
+- **Both Postgres instances now have pgvector 0.8.6 enabled — `docker-
+  compose.yml`'s `db` (`pgvector/pgvector:pg18`, switched from
+  `postgres:18`) and local system Postgres (5432, where the real data
+  lives), as of 2026-08-22 (see SESSIONS.md for both entries). Still
+  infra only — no vector columns, embeddings, or matching logic exist
+  anywhere yet.** Enabled via Alembic migration `c2d25907fe8e`
+  (`CREATE EXTENSION IF NOT EXISTS vector;`), confirmed applied on both
+  (`alembic current` → `c2d25907fe8e (head)` on each) and verified via
+  `\dx` (`vector 0.8.6`) plus a smoke-test `vector(3)` column/distance
+  query on the Docker instance.
+  **Local system Postgres needed pgvector compiled from source** against
+  `/Library/PostgreSQL/18` (the EDB/PostgreSQL.org installer, not
+  Homebrew) — three real obstacles hit and resolved along the way, not
+  hypothetical: (1) Xcode Command Line Tools were registered
+  (`xcode-select -p` returned a path) but not actually present — only
+  caught by trying to compile something, not by `which cc`; fixed via
+  `xcode-select --install`. (2) pgvector's default `-march=native` build
+  flag isn't supported by Apple `clang` on a universal (`x86_64`+`arm64`)
+  build, which is what this Postgres install's `pg_config` targets; fixed
+  with `make PG_CONFIG=... OPTFLAGS=""`. (3) `CREATE EXTENSION vector`
+  needs a real Postgres superuser (this pgvector version's `.control` has
+  no `trusted = true`) — the app's `job_scraper` role correctly can't do
+  it; the user ran it once as `postgres` (EDB's default superuser), after
+  which `job_scraper`/Alembic can re-run the idempotent `CREATE EXTENSION
+  IF NOT EXISTS` as a no-op indefinitely. Don't assume a future fresh
+  Postgres install (a new dev machine, a rebuilt volume) has any of this
+  done — re-check `\dx` and re-run this same sequence if not.
 - Scheduling: `scripts/run_orchestrator_cron.sh` + a local crontab entry
   (`0 3 * * *`, daily) run `main.py` unattended — added 2026-08-22, see
   SESSIONS.md. The wrapper is a thin `cd` + `.venv/bin/python main.py`
@@ -131,6 +158,61 @@ nothing scrapes them; treat that as planned, not present.
   Actions scheduling against a hosted Postgres (Supabase/Neon) is a
   deliberately separate, later deployment step — don't build it
   unprompted.
+- **Resume ingestion exists (`resume_versions` table + `scripts/
+  ingest_resume.py`), added 2026-08-22.** `data/resumes/` holds the
+  actual PDF(s) and is gitignored + dockerignored (personal data, same
+  reasoning as `data/raw/`) — never assume a PDF is present there; check
+  before building anything that reads from it. Text extraction uses
+  `pdfplumber` (not `pypdf`) for its layout-aware, `pdfminer.six`-based
+  extraction — verified against a real resume: all sections extract in
+  correct reading order with no jumbling, though bullet points come
+  through as literal `(cid:127)` rather than `•` (a known pdfminer
+  font-encoding limitation — now normalized away by
+  `huntloop.text_cleaning.clean_text()` before embedding, see below).
+  Each `scripts/ingest_resume.py` run inserts a new `resume_versions` row
+  with an auto-incremented `version_number`, flips any previously-active
+  row to `is_active=False` (never deletes it), and marks the new row
+  active.
+- **Embedding-based match scoring exists, added 2026-08-22 (Step 3, see
+  SESSIONS.md) — scoring mechanism only, no 70%-threshold wiring,
+  skills-list, or LLM-suggestion logic yet.** `huntloop.embeddings`
+  wraps `sentence-transformers`' `all-MiniLM-L6-v2` (CPU-only, 384-dim -
+  confirmed against the model's own published config, matches
+  `EMBEDDING_DIM` in `db_models.py`); `huntloop.text_cleaning.clean_text()`
+  strips HTML (job descriptions - checked real data: Greenhouse rows
+  come back HTML-entity-escaped, Lever rows as raw HTML, one
+  `html.unescape()` handles both) and `(cid:N)` pdfminer artifacts
+  (resume text) before anything gets embedded. `resume_versions` and
+  `job_postings` both have a nullable `embedding vector(384)` column
+  (migration `08af7f0a020c`). **`huntloop.db_models.Vector` is a
+  required subclass of `pgvector.sqlalchemy.Vector`, not just a style
+  choice — it schema-qualifies DDL as `public.vector(n)`. Do not replace
+  it with the bare `pgvector.sqlalchemy.Vector` or add another
+  `vector`-typed column using anything else — see the conftest.py
+  incident bullet above for exactly why.**
+  `scripts/backfill_embeddings.py` embeds the active resume (recomputed
+  every run) and backfills `job_postings` in batches of 100 (only
+  `embedding IS NULL` rows, safe to interrupt/resume). **This project's
+  local dev venv (macOS, Intel, Python 3.13) cannot run
+  `sentence-transformers`/`torch` — confirmed by actually trying to
+  install `torch` and finding no compatible wheel (PyPI's last
+  macOS-x86_64 torch build, 2.2.2, tops out at Python 3.12).** Run
+  `backfill_embeddings.py` inside the `app` Docker image instead (Linux,
+  real `torch` wheels exist for cp313), pointed at the real local
+  Postgres via `docker compose run --rm -e
+  DATABASE_URL="...@host.docker.internal:5432/<db>" app python
+  scripts/backfill_embeddings.py` — not the docker-compose `db` on 5433.
+  Match scores are **computed at query time** via pgvector's `<=>`
+  cosine-distance operator (`similarity = 1 - distance`), deliberately
+  **not stored** — with one active resume and ~600 jobs a live query is
+  trivial, and a stored score would need an invalidation mechanism (on
+  every scrape/resume update) that doesn't exist; revisit only if live
+  scoring ever becomes measurably slow. Verified end-to-end against the
+  real resume + all 605 real job postings: healthy, non-degenerate score
+  distribution (min 0.033, max 0.593, mean 0.372) and a by-eye-sane
+  top/bottom-5 ranking (top 5 all Palantir "Software Engineer" roles;
+  bottom 5 fraud-ops/creative/marketing roles) — see SESSIONS.md for the
+  full numbers.
 
 ## Key architectural decisions (already made — don't re-litigate)
 
@@ -185,6 +267,36 @@ nothing scrapes them; treat that as planned, not present.
 - **Test isolation uses a throwaway Postgres schema per test session**, not
   `pytest-postgresql`. Reuses the existing local Postgres server rather than
   spinning up a separate instance. See `tests/conftest.py`.
+- **`tests/conftest.py`'s isolated-schema `search_path` must NEVER include
+  `public` — this caused a full production data wipe on 2026-08-22 (see
+  SESSIONS.md for the full incident writeup).** Adding `,public` (to make
+  the `vector` type, which lives in `public`, resolve for the new
+  embedding columns) silently broke isolation: `Base.metadata.
+  create_all()`'s own `has_table()` check resolves unqualified table
+  names via search_path, found the *real* `public.companies`/
+  `public.job_postings`/etc. before the fresh test schema had any tables
+  of its own, and concluded they already existed — so it silently
+  created nothing in the isolated schema, and every DB-touching test ran
+  against real production data instead. `test_pipeline.py`'s teardown
+  (`DELETE FROM` every table after each test) then wiped `companies`,
+  `job_postings`, `job_sources`, `job_locations`, `job_skills`,
+  `job_metadata`, `lca_disclosures` (1.43M rows), `sponsor_name_overrides`,
+  and `resume_versions` for real. All data was restored (see SESSIONS.md
+  for the exact recovery sequence and which parts were exact vs.
+  necessarily inexact restores), and `alembic_version` was untouched
+  throughout (`DELETE FROM` never touches it, and it isn't part of
+  `Base.metadata`) — but this is exactly the failure mode to never
+  reintroduce. If a future migration adds another type/extension that
+  needs to resolve in DDL under this fixture, schema-qualify the type in
+  its SQLAlchemy definition instead (see `huntloop.db_models.Vector`, a
+  `pgvector.sqlalchemy.Vector` subclass whose `get_col_spec()` always
+  emits `public.vector(n)` — confirmed via pgvector's own source that this
+  only affects DDL, not value bind/result processing, so it's safe
+  everywhere) — never by touching this fixture's search_path.
+  **Standing check**: after touching `tests/conftest.py` or the isolated-
+  schema mechanism, capture real production row counts before running the
+  suite and confirm they're unchanged after — don't trust "tests green"
+  alone.
 - **`JobPosting.location` was dropped** in favor of the `job_locations` child
   table, which is the canonical one-to-many representation.
 - **`alembic upgrade head` is the sole source of schema creation.** The
