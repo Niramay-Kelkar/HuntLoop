@@ -9,6 +9,7 @@ stored. matched_skills/missing_skills are precomputed and stored on
 job_postings (see huntloop.skills_matching,
 scripts/backfill_skills_matching.py) - read here, not recomputed.
 """
+import dataclasses
 import logging
 from datetime import datetime, timezone
 
@@ -23,7 +24,10 @@ from huntloop.api.schemas.jobs import (
     JobDetail,
     JobListResponse,
     JobSummary,
+    SalaryEstimate,
+    SponsorSummary,
 )
+from huntloop.api.sponsor_summary import get_sponsorship_summary
 from huntloop.db_models import ApplicationStatus, Company, JobApplication, JobPosting, ResumeVersion
 
 logger = logging.getLogger(__name__)
@@ -69,6 +73,7 @@ def _row_to_summary(row) -> JobSummary:
         missing_skills=job.missing_skills,
         locations=[loc.location_name for loc in job.locations],
         application_status=row.application_status,
+        has_sponsor_history=row.matched_sponsor_employer_name is not None,
     )
 
 
@@ -96,7 +101,13 @@ def list_jobs(
     score_expr, status_expr = _score_and_status_columns(resume_embedding)
 
     query = (
-        select(JobPosting, Company.name.label("company_name"), score_expr, status_expr)
+        select(
+            JobPosting,
+            Company.name.label("company_name"),
+            Company.matched_sponsor_employer_name,
+            score_expr,
+            status_expr,
+        )
         .join(Company, JobPosting.company_id == Company.id)
         .outerjoin(JobApplication, JobApplication.job_posting_id == JobPosting.id)
     )
@@ -139,7 +150,7 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
     score_expr, status_expr = _score_and_status_columns(resume_embedding)
 
     query = (
-        select(JobPosting, Company.name.label("company_name"), score_expr, status_expr)
+        select(JobPosting, Company, score_expr, status_expr)
         .join(Company, JobPosting.company_id == Company.id)
         .outerjoin(JobApplication, JobApplication.job_posting_id == JobPosting.id)
         .where(JobPosting.id == job_id)
@@ -149,10 +160,18 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
         raise HTTPException(404, f"No job posting with id={job_id}")
 
     job = row.JobPosting
+    company = row.Company
+
+    sponsor = get_sponsorship_summary(db, company)
+    sponsor_response = SponsorSummary(**dataclasses.asdict(sponsor)) if sponsor is not None else None
+    salary_estimate = (
+        SalaryEstimate(amount=sponsor.median_wage) if sponsor is not None and sponsor.median_wage is not None else None
+    )
+
     return JobDetail(
         id=job.id,
         job_title=job.job_title,
-        company_name=row.company_name,
+        company_name=company.name,
         job_url=job.job_url,
         department=job.department,
         date_posted=job.date_posted,
@@ -161,7 +180,11 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
         missing_skills=job.missing_skills,
         locations=[loc.location_name for loc in job.locations],
         application_status=row.application_status,
+        has_sponsor_history=company.matched_sponsor_employer_name is not None,
         job_description=job.job_description,
+        ats_platform=company.ats_platform,
+        sponsor=sponsor_response,
+        salary_estimate=salary_estimate,
     )
 
 

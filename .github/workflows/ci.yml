@@ -18,7 +18,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:18
+        image: pgvector/pgvector:pg18
         env:
           POSTGRES_USER: ci_user
           POSTGRES_PASSWORD: ci_password

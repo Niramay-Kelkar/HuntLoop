@@ -11,9 +11,19 @@ verifying the API's query/filter/sort/upsert logic, not the embedding
 model itself (that's covered by the real end-to-end verification done
 manually against real data - see SESSIONS.md).
 """
+from datetime import date
+
 import pytest
 
-from huntloop.db_models import Company, JobApplication, JobLocation, JobPosting, JobSource, ResumeVersion
+from huntloop.db_models import (
+    Company,
+    JobApplication,
+    JobLocation,
+    JobPosting,
+    JobSource,
+    LcaDisclosure,
+    ResumeVersion,
+)
 
 EMBEDDING_DIM = 384
 
@@ -45,8 +55,10 @@ def _seed(db_session):
         is_active=True,
         embedding=RESUME_EMBEDDING,
     )
-    palantir = Company(name="palantir")
-    checkr = Company(name="checkr")
+    # palantir has a resolved sponsor match (Step 8); checkr deliberately
+    # doesn't, to exercise the "no sponsor match" null path.
+    palantir = Company(name="palantir", matched_sponsor_employer_name="PALANTIR TECHNOLOGIES", ats_platform="lever")
+    checkr = Company(name="checkr", matched_sponsor_employer_name=None)
     source = JobSource(name="lever_api")
     db_session.add_all([resume, palantir, checkr, source])
     db_session.commit()
@@ -97,6 +109,106 @@ def _seed(db_session):
     db_session.commit()
 
     return {"high": high, "mid": mid, "low": low, "no_embedding": no_embedding}
+
+
+def _seed_palantir_lca_rows(db_session):
+    """LCA rows for PALANTIR TECHNOLOGIES (matching palantir's
+    matched_sponsor_employer_name in _seed()) spanning two fiscal years,
+    with a deliberate WAGE_UNIT_OF_PAY='Month' contamination row (same
+    real data-entry error pattern found in production - see
+    huntloop.api.sponsor_summary's docstring) to verify the median-wage
+    query actually excludes it rather than just happening not to hit it."""
+    rows = [
+        # Older fiscal year - lower total, shouldn't count toward "most
+        # recent fiscal year" totals.
+        LcaDisclosure(
+            case_number="I-200-24000-000001",
+            employer_name="Palantir Technologies Inc.",
+            employer_name_normalized="PALANTIR TECHNOLOGIES",
+            case_status="Certified",
+            job_title="Forward Deployed Engineer",
+            wage_rate_of_pay_from=140000,
+            wage_unit_of_pay="Year",
+            received_date=date(2024, 3, 1),
+            fiscal_year=2024,
+            quarter=2,
+            source_file="test.xlsx",
+        ),
+        # Most recent fiscal year: three "Software Engineer" rows (the
+        # most frequent title overall too), one other title, one
+        # non-Year-unit row that must NOT affect the median.
+        LcaDisclosure(
+            case_number="I-200-25000-000001",
+            employer_name="Palantir Technologies Inc.",
+            employer_name_normalized="PALANTIR TECHNOLOGIES",
+            case_status="Certified",
+            job_title="Software Engineer",
+            wage_rate_of_pay_from=150000,
+            wage_unit_of_pay="Year",
+            received_date=date(2025, 1, 10),
+            fiscal_year=2025,
+            quarter=1,
+            source_file="test.xlsx",
+        ),
+        LcaDisclosure(
+            case_number="I-200-25000-000002",
+            employer_name="Palantir Technologies Inc.",
+            employer_name_normalized="PALANTIR TECHNOLOGIES",
+            case_status="Certified",
+            job_title="Software Engineer",
+            wage_rate_of_pay_from=160000,
+            wage_unit_of_pay="Year",
+            received_date=date(2025, 2, 15),
+            fiscal_year=2025,
+            quarter=2,
+            source_file="test.xlsx",
+        ),
+        LcaDisclosure(
+            case_number="I-200-25000-000003",
+            employer_name="Palantir Technologies Inc.",
+            employer_name_normalized="PALANTIR TECHNOLOGIES",
+            case_status="Certified",
+            job_title="Software Engineer",
+            wage_rate_of_pay_from=170000,
+            wage_unit_of_pay="Year",
+            received_date=date(2025, 3, 20),
+            fiscal_year=2025,
+            quarter=2,
+            source_file="test.xlsx",
+        ),
+        LcaDisclosure(
+            case_number="I-200-25000-000004",
+            employer_name="Palantir Technologies Inc.",
+            employer_name_normalized="PALANTIR TECHNOLOGIES",
+            case_status="Certified",
+            job_title="Deployment Strategist",
+            wage_rate_of_pay_from=130000,
+            wage_unit_of_pay="Year",
+            received_date=date(2025, 4, 1),
+            fiscal_year=2025,
+            quarter=3,
+            source_file="test.xlsx",
+        ),
+        # The contamination row: a huge value under a non-Year unit -
+        # if it leaked into the median calculation it would blow the
+        # result far outside any plausible salary range.
+        LcaDisclosure(
+            case_number="I-200-25000-000005",
+            employer_name="Palantir Technologies Inc.",
+            employer_name_normalized="PALANTIR TECHNOLOGIES",
+            case_status="Withdrawn",
+            job_title="Solutions Engineer",
+            wage_rate_of_pay_from=999000,
+            wage_unit_of_pay="Month",
+            received_date=date(2025, 5, 30),  # most recent by date - tests latest_case_status
+            fiscal_year=2025,
+            quarter=3,
+            source_file="test.xlsx",
+        ),
+    ]
+    db_session.add_all(rows)
+    db_session.commit()
+    return rows
 
 
 def test_list_jobs_returns_scores_sorted_descending_by_default(api_client, db_session):
@@ -160,6 +272,67 @@ def test_list_jobs_default_application_status_is_not_applied(api_client, db_sess
     response = api_client.get("/jobs")
     for item in response.json()["items"]:
         assert item["application_status"] == "not_applied"
+
+
+def test_list_jobs_has_sponsor_history_reflects_company_match(api_client, db_session):
+    _seed(db_session)
+
+    response = api_client.get("/jobs")
+    by_title = {item["job_title"]: item["has_sponsor_history"] for item in response.json()["items"]}
+    # High/Mid are palantir (matched_sponsor_employer_name set in _seed());
+    # Low/Not Yet Embedded are checkr (deliberately left unmatched).
+    assert by_title["High Match Job"] is True
+    assert by_title["Mid Match Job"] is True
+    assert by_title["Low Match Job"] is False
+    assert by_title["Not Yet Embedded Job"] is False
+
+
+def test_get_job_detail_includes_ats_platform(api_client, db_session):
+    seeded = _seed(db_session)
+
+    response = api_client.get(f"/jobs/{seeded['high'].id}")
+    assert response.json()["ats_platform"] == "lever"
+
+
+def test_get_job_detail_sponsor_is_null_when_company_has_no_match(api_client, db_session):
+    seeded = _seed(db_session)
+
+    response = api_client.get(f"/jobs/{seeded['low'].id}")  # checkr - no matched_sponsor_employer_name
+    body = response.json()
+    assert body["has_sponsor_history"] is False
+    assert body["sponsor"] is None
+    assert body["salary_estimate"] is None
+
+
+def test_get_job_detail_sponsor_summary_and_salary_estimate(api_client, db_session):
+    seeded = _seed(db_session)
+    _seed_palantir_lca_rows(db_session)
+
+    response = api_client.get(f"/jobs/{seeded['high'].id}")
+    assert response.status_code == 200
+    body = response.json()
+
+    assert body["has_sponsor_history"] is True
+    sponsor = body["sponsor"]
+    assert sponsor["matched_employer_name"] == "PALANTIR TECHNOLOGIES"
+    assert sponsor["most_recent_fiscal_year"] == 2025
+    # 5 rows filed in fiscal_year=2025 (three Software Engineer, one
+    # Deployment Strategist, one Month-unit Solutions Engineer row) -
+    # the count itself isn't wage-unit-filtered, only the median is.
+    assert sponsor["total_lcas_most_recent_fiscal_year"] == 5
+    # Median of the five WAGE_UNIT_OF_PAY='Year' rows only
+    # (130000/140000/150000/160000/170000) = 150000 - the $999,000
+    # 'Month' contamination row must not shift this.
+    assert sponsor["median_wage"] == pytest.approx(150000.0)
+    assert sponsor["most_frequent_job_title"] == "Software Engineer"
+    # The single most recently *received* filing is the Month-unit
+    # "Withdrawn" row (2025-05-30) - confirms latest_case_status is by
+    # actual received_date, not just "whatever's in the Year-filtered set".
+    assert sponsor["latest_case_status"] == "Withdrawn"
+
+    salary_estimate = body["salary_estimate"]
+    assert salary_estimate["amount"] == pytest.approx(150000.0)
+    assert salary_estimate["basis"] == "Estimated from DOL wage filings for this employer, not job-specific"
 
 
 def test_get_job_detail_includes_full_description(api_client, db_session):

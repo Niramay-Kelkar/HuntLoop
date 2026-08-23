@@ -352,6 +352,62 @@ nothing scrapes them; treat that as planned, not present.
   to row, so a rigid one-to-one FK would be premature normalization. Don't
   add that FK unprompted; if it's ever needed, that's a deliberate future
   decision, not a "fix" for this being "incomplete."
+- **`companies.matched_sponsor_employer_name` (nullable `String(255)`,
+  migration `c3be4d9c3a36`, added 2026-08-23) is a denormalized cache of
+  the single top-scoring match, not a substitute for the above FK
+  decision or for `get_sponsorship_summary()`'s live aggregation.**
+  Populated by `scripts/resolve_sponsor_matches.py`, which calls the
+  existing `find_matching_employers()` unchanged for every `companies`
+  row and stores `matches[0].employer_name_normalized` (or `NULL` if
+  `find_matching_employers()` returns no match above threshold — never a
+  forced low-confidence guess); `sponsor_name_overrides` entries (e.g.
+  Kraken → `KRAKEN TECHNOLOGIES US`) still take precedence automatically,
+  since `find_matching_employers()` itself checks that table first. Not
+  automatically kept fresh — re-run the script after `sponsor_name_overrides`
+  changes or new LCA data is ingested. `get_sponsorship_summary()` still
+  aggregates across *every* `EmployerMatch` `find_matching_employers()`
+  returns (a company can span multiple legal entities), not just this one
+  cached top match — don't narrow it to use this column instead, that
+  would silently drop legitimate multi-entity aggregation. This step is
+  persistence only: no aggregate sponsor-summary query changes and no API
+  endpoint wiring yet — both are deliberately deferred to a later step.
+- **A second, distinct `get_sponsorship_summary(session, company)` now
+  exists at `src/huntloop/api/sponsor_summary.py` (added 2026-08-23, see
+  SESSIONS.md) — same function name as
+  `huntloop.matching.sponsorship.get_sponsorship_summary()`, deliberately
+  a different module, different behavior. Don't merge or confuse the
+  two.** This one reads only `company.matched_sponsor_employer_name`
+  (Step 8's persisted column, no live `find_matching_employers()` call —
+  the API-facing version is required to be fast/deterministic per
+  request) and returns `None` outright if unset. It returns exactly four
+  fields, matched to what `GET /jobs/{id}` needs: LCAs filed in the
+  employer's most recent `fiscal_year`, median wage, the single most
+  frequent job title, and `case_status` of the single most recently
+  received filing — not the older function's fuller
+  fiscal-year-by-fiscal-year/multi-entity aggregate. **Median wage is
+  computed over `WAGE_UNIT_OF_PAY = 'Year'` rows only — checked against
+  real data before deciding, not assumed (see SESSIONS.md's wage-unit
+  investigation): 99.86% of the 9 matched companies' LCA rows are
+  `'Year'`; the small remainder includes two rows that are unmistakably
+  annual salaries mislabeled `'Week'`/`'Month'` (same Phase 1-audit
+  error pattern, reconfirmed on this table) and one plausible genuine
+  `'Hour'` row. Don't remove this filter or try to annualize non-`'Year'`
+  rows instead — that would re-trust a unit field already shown to be
+  unreliable on exactly the rows where it matters most.** `latest_case_status`
+  is deliberately NOT wage-unit-filtered — it reflects whatever the
+  single most recently *received* filing actually says, unit notwithstanding.
+  `GET /jobs/{id}` now returns `ats_platform` (trivial `Company`
+  passthrough), `sponsor` (this summary, `null` if unresolved), and
+  `salary_estimate` (`{amount, basis}`, `null` whenever `sponsor` is
+  `null` or has no `median_wage` — `basis` is always the fixed string
+  `"Estimated from DOL wage filings for this employer, not job-specific"`,
+  so this can never be mistaken for a real posted salary). `GET /jobs`
+  list rows gained one lightweight boolean, `has_sponsor_history`
+  (`Company.matched_sponsor_employer_name is not None`, added to the
+  existing join — no per-row aggregate query, for performance). The
+  frontend was NOT touched in this step — wiring this real data into the
+  job detail page's sponsor sidebar (currently omitted, per the reskin
+  step's known display gap) is the deliberately deferred next step.
 - **`normalize_employer_name()` (`src/huntloop/matching/normalize.py`) is
   mechanical normalization only** — uppercase, strip periods/commas,
   collapse whitespace, drop a trailing legal-entity suffix

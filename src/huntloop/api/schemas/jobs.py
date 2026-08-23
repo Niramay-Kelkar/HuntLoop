@@ -39,12 +39,53 @@ class JobSummary(BaseModel):
     application_status: ApplicationStatus = Field(
         description="Defaults to not_applied when no job_applications row exists yet."
     )
+    has_sponsor_history: bool = Field(
+        description=(
+            "Whether this job's company has a resolved DOL sponsor match "
+            "(companies.matched_sponsor_employer_name is set - see "
+            "scripts/resolve_sponsor_matches.py). A cheap presence check, not "
+            "the full sponsor aggregate - see JobDetail.sponsor for that."
+        )
+    )
+
+
+class SponsorSummary(BaseModel):
+    """GET /jobs/{id}'s sponsor aggregate - huntloop.api.sponsor_summary,
+    built from the persisted match only, no live fuzzy-matching per
+    request."""
+
+    matched_employer_name: str
+    most_recent_fiscal_year: int
+    total_lcas_most_recent_fiscal_year: int = Field(
+        description="LCAs filed by this employer in most_recent_fiscal_year only - a subset of its all-time total."
+    )
+    median_wage: float | None = Field(
+        default=None,
+        description="Median wage_rate_of_pay_from across this employer's WAGE_UNIT_OF_PAY='Year' filings only.",
+    )
+    most_frequent_job_title: str | None = None
+    latest_case_status: str | None = Field(
+        default=None, description="case_status of this employer's most recently received LCA filing."
+    )
+
+
+class SalaryEstimate(BaseModel):
+    """A rough estimate derived from the sponsor's median wage - never a
+    real posted salary for this specific job, hence the mandatory label."""
+
+    amount: float
+    basis: str = "Estimated from DOL wage filings for this employer, not job-specific"
 
 
 class JobDetail(JobSummary):
-    """GET /jobs/{id} - JobSummary plus the full job description."""
+    """GET /jobs/{id} - JobSummary plus the full job description, the
+    company's detected ATS platform, and (if resolved) its DOL sponsor
+    summary and a derived salary estimate."""
 
     job_description: str | None = None
+    ats_platform: str | None = None
+    sponsor: SponsorSummary | None = None
+    salary_estimate: SalaryEstimate | None = None
 
 
 class JobListResponse(BaseModel):

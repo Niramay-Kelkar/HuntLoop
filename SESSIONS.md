@@ -3190,3 +3190,172 @@ remain explicitly not built (need new backend work first, per the task).
 Location-radius and department filters remain explicitly blocked. Closing
 the per-job sponsor/ATS/salary display gap would need new backend fields/
 endpoints - not scheduled.
+
+## 2026-08-23 — Persist each company's matched DOL sponsor employer name
+
+**Did:** Added `companies.matched_sponsor_employer_name` (nullable
+`String(255)`, migration `c3be4d9c3a36`, trimmed to just this column same
+as `a89474d578f7` before it - autogenerate again picked up the same
+pre-existing job_postings/job_skills/job_sources drift noted in that
+earlier migration's comment, left out here too) and a new script,
+`scripts/resolve_sponsor_matches.py`, that calls the existing
+`find_matching_employers()` (`huntloop.matching.fuzzy_match`, unchanged -
+not reimplemented) for every `companies` row and stores the top-scoring
+`employer_name_normalized` result. `sponsor_name_overrides` still takes
+precedence automatically, since `find_matching_employers()` itself checks
+that table first and short-circuits before fuzzy matching runs - the
+script didn't need any override-specific branching. Companies with no
+match clearing `DEFAULT_THRESHOLD` (88) get `None` stored, not a forced
+low-confidence guess. Explicitly did not build the aggregate
+sponsor-summary query (LCAs filed/median wage/top title/latest status -
+that's `get_sponsorship_summary()`, already built, untouched here) and
+did not touch any API endpoint - this is persistence only, per the task.
+
+**Verified, all against the real running system (real Postgres on
+:5432, `.venv/bin/python scripts/resolve_sponsor_matches.py` run for
+real, nothing mocked):**
+
+- **(a)** Ran the script for real against all 9 real companies - every
+  one resolved: `adobe`→`ADOBE`, `brex`→`BREX`, `checkr`→`CHECKR`,
+  `duolingo`→`DUOLINGO`, `figma`→`FIGMA`,
+  `kraken`→`KRAKEN TECHNOLOGIES US`, `palantir`→`PALANTIR TECHNOLOGIES`,
+  `ramp`→`RAMP BUSINESS CORPORATION`,
+  `wealthfront`→`WEALTHFRONT CORPORATION`, all scoring 100.0. Confirmed
+  the values actually persisted via a direct read-back query against
+  `companies.matched_sponsor_employer_name`, not just the script's log
+  output.
+- **(b)** Kraken's log line shows `source=override`, and the resolved
+  value is `KRAKEN TECHNOLOGIES US` - the same
+  `sponsor_name_overrides` entry from the 2026-08-22 sponsorship-lookup
+  extension, not a fresh fuzzy match that could reintroduce the old
+  `RAKEN` (`Raken, Inc.`) contamination that override exists to prevent.
+- **(c)** All 9 real companies happened to resolve this run (none left
+  NULL), so the "leave NULL, don't guess" path was verified separately:
+  called `find_matching_employers()` directly with a deliberately
+  unmatchable name (`"Zzyxq Nonexistent Gibberish Corp Xyzzy123"`) and
+  confirmed it returns `[]`, which the script's `if matches: ... else:
+  matched_sponsor_employer_name = None` branch correctly maps to `NULL`
+  rather than storing the closest (low-confidence) fuzzy candidate
+  regardless of score.
+- **(d)** Full suite: 54/54 passing. Real production row counts captured
+  before and after the migration + script run and confirmed unchanged
+  both times (`companies=9`, `job_postings=605`,
+  `lca_disclosures=1431321`, `sponsor_name_overrides=1`) -
+  `job_applications=2` both times too (two real rows from the prior
+  session's reskin-verification status-change/reset, unrelated to this
+  task, left as-is since this task didn't touch that table).
+- **(e)** This entry plus the CLAUDE.md architectural-decisions update.
+
+**Next:** The aggregate sponsor-summary query (LCAs filed, median wage,
+top title, latest status) and wiring any of this into an API endpoint are
+both explicitly deferred to a later step, per the task.
+
+## 2026-08-23 — Real sponsor summary data, exposed via GET /jobs/{id}
+
+**Did:** Built the aggregate sponsor summary deferred from the previous
+step and wired it into the API (still nothing in the frontend - explicitly
+out of scope here, per the task).
+
+**(a) Wage-unit investigation (done first, before writing the median
+query, per the task):** Queried real `WAGE_UNIT_OF_PAY` values across the
+9 matched companies' `lca_disclosures` rows (3,527 rows total). 3,522 of
+them (99.86%) are `'Year'`. The remaining 5: Adobe has one `'Hour'` row
+(`$38.87`, "Solutions Consulting Analyst" - a plausible genuine hourly
+rate); Duolingo has one `'Week'` row (`$135,000`, "Marketing Analytics
+Manager, Growth") and one `'Month'` row (`$220,000`, "Senior Software
+Engineer, Platform") - both unmistakably annual salaries mislabeled with
+the wrong unit (a $135k/week or $220k/month rate is absurd for either
+title), the exact same data-entry error pattern the Phase 1 audit
+originally flagged, now reconfirmed on this specific table. **Decision:**
+filter median-wage calculation to `WAGE_UNIT_OF_PAY = 'Year'` only, per
+the task's suggested approach - confirmed correct by the real data rather
+than assumed. Annualizing each unit instead was considered and rejected:
+it would require trusting the *unit* field on rows already shown to
+mislabel it, risking further-compounded contamination, for a sample-size
+gain of well under 0.2%.
+
+**(b)** New module `src/huntloop/api/sponsor_summary.py` -
+`get_sponsorship_summary(session, company)` reads
+`company.matched_sponsor_employer_name` (Step 8's persisted column) and
+returns `None` immediately if unset - no live `find_matching_employers()`
+call, per the task's explicit "no live fuzzy-matching per request"
+requirement. Deliberately a different module from
+`huntloop.matching.sponsorship.get_sponsorship_summary()` (same function
+name, different module, different purpose) - that one still does live
+multi-entity fuzzy aggregation across every `EmployerMatch`, kept
+untouched for whatever broader multi-entity use case it was built for
+(see CLAUDE.md); this new one is scoped to exactly what `GET /jobs/{id}`
+needs from a single persisted match. Returns four fields: LCAs filed in
+the matched employer's most recent `fiscal_year` (a straight count, not
+wage-unit-filtered - unit only matters for the wage figure), the
+`'Year'`-filtered median wage (`percentile_cont(0.5)` over
+`wage_rate_of_pay_from` - `wage_rate_of_pay_to` is populated on well
+under 2% of rows for every matched company, so `_from` alone is the
+right column to aggregate on), the single most frequently filed job
+title across all fiscal years, and `case_status` of the single most
+recently *received* filing (by `received_date`, not wage-unit-filtered -
+confirmed via a real test seeding the Month-unit contaminated row as the
+most recent by date and asserting its status is what's returned, not a
+Year-only row's).
+
+`GET /jobs/{id}` (`huntloop.api.routers.jobs.get_job`) now also selects
+the full `Company` row (previously just `Company.name`) and returns three
+new `JobDetail` fields: `ats_platform` (a trivial `company.ats_platform`
+passthrough), `sponsor` (the `SponsorSummary` above, `None` if
+unresolved), and `salary_estimate` (`{amount, basis}`, `None` whenever
+`sponsor` is `None` or its `median_wage` is `None` - `basis` is a fixed,
+always-present disclaimer string, "Estimated from DOL wage filings for
+this employer, not job-specific", so this can never render indistinguishably
+from a real posted salary). `GET /jobs`'s list rows gained one new
+boolean field, `has_sponsor_history` - a cheap
+`Company.matched_sponsor_employer_name is not None` check added to the
+existing `Company` join, no per-row aggregate query, per the task's
+explicit performance constraint.
+
+**Verified, all against the real running system (real API on :8000, real
+Postgres, nothing mocked):**
+
+- **(a)** Wage-unit findings and decision above - the real numbers, not
+  assumed.
+- **(b)/(c)** Hit `GET /jobs/{id}` for one real job each at Palantir,
+  Duolingo, and Wealthfront. Palantir (job 818): `most_recent_fiscal_year:
+  2025`, `total_lcas_most_recent_fiscal_year: 113`, `median_wage: 150000.0`,
+  `most_frequent_job_title: "Software Engineer"`, `latest_case_status:
+  "Certified"`. Duolingo (job 1258): FY 2025, 40 filings, median
+  $159,100, top title "Software Engineer", status "Certified". Wealthfront
+  (job 877): FY 2025, 9 filings, median $189,000, top title "Senior
+  Software Engineer", status "Certified". All three plausible relative to
+  the Phase 2 Step 6 all-time totals (Palantir 241, Duolingo 95,
+  Wealthfront 43) - 113/241, 40/95, and 9/43 are all sensible
+  most-recent-year subsets of those totals, not wildly inconsistent with
+  them. `salary_estimate` on each matched its sponsor's `median_wage`
+  exactly, with the fixed disclaimer string present.
+- **(d)** `GET /jobs?limit=100` (covers the 4 companies with the highest
+  real match scores) and per-company `GET /jobs?company=X&limit=1` for
+  every real company: `has_sponsor_history: true` for
+  palantir/figma/wealthfront/duolingo/checkr (all have a resolved match
+  from Step 8); brex/adobe/ramp/kraken have no scraped `job_postings` rows
+  at all (Ashby/Workday spiders not built, kraken's real Lever board has
+  0 open postings - see CLAUDE.md), so the list indicator couldn't be
+  exercised live for them, but their `companies.matched_sponsor_employer_name`
+  values were independently confirmed set via direct query (adobe→ADOBE,
+  brex→BREX, ramp→RAMP BUSINESS CORPORATION, kraken→KRAKEN TECHNOLOGIES US).
+- **(e)** Full suite: 58/58 passing (54 pre-existing + 4 new -
+  `test_list_jobs_has_sponsor_history_reflects_company_match`,
+  `test_get_job_detail_includes_ats_platform`,
+  `test_get_job_detail_sponsor_is_null_when_company_has_no_match`,
+  `test_get_job_detail_sponsor_summary_and_salary_estimate`). The last one
+  seeds a deliberately contaminated `LcaDisclosure` set (a `'Month'`-unit
+  $999,000 row mixed with five real-scale `'Year'` rows) and asserts the
+  computed median (150000.0) is unaffected by it, and separately that
+  `latest_case_status` *does* reflect that same contaminated row (since
+  it's the most recently received one) - the two behaviors the wage-unit
+  decision above is actually about, exercised directly rather than only
+  spot-checked against real data. Real production row counts
+  (`companies=9`, `job_postings=605`, `lca_disclosures=1431321`,
+  `sponsor_name_overrides=1`) confirmed unchanged before and after.
+- **(f)** This entry plus the CLAUDE.md architectural-decisions update.
+
+**Next:** Wiring this into the frontend (the sponsor sidebar on the job
+detail page, using this now-real data instead of the omitted fields from
+the reskin step) is the explicitly deferred next step.

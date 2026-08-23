@@ -95,6 +95,13 @@ class Company(Base):
     ats_platform = Column(String(50), nullable=True)
     ats_token = Column(String(255), nullable=True)
     careers_url = Column(String(500), nullable=True)
+    # Resolved via find_matching_employers() (huntloop.matching.fuzzy_match)
+    # - the top-scoring lca_disclosures.employer_name_normalized match for
+    # this company, or the sponsor_name_overrides value when one exists.
+    # Nullable: left NULL when no match clears the threshold, rather than
+    # forced to a low-confidence guess. Populated by
+    # scripts/resolve_sponsor_matches.py, not automatically kept fresh.
+    matched_sponsor_employer_name = Column(String(255), nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now())
 
