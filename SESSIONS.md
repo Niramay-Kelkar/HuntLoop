@@ -3042,3 +3042,151 @@ project phase. Nothing else is queued for the frontend right now -
 future frontend work (e.g. a detail-page view, resume upload UI, or the
 sponsorship-summary surface) is unplanned, not started, and not implied
 by anything in this entry.
+
+## 2026-08-23 — Frontend reskin against the Claude Design mockup (bright theme)
+
+**Did:** Reskinned the existing Next.js frontend to match
+`design/HuntLoop.dc.html` - a Claude Design mockup in its own x-dc/sc-for/
+sc-if runtime format, read as a pixel-accurate visual/layout spec (exact
+colors, spacing, typography, component structure) and translated by hand
+into real React/Next.js/Tailwind v4. Backend untouched, per the task's
+explicit constraint - every screen still calls the exact same `GET /jobs`,
+`GET /jobs/{id}`, `PATCH /jobs/{id}/application` endpoints as before.
+**This is the file future design-reference steps should read** -
+`design/HuntLoop.dc.html`, not a `.md` spec; its `PALETTE`/`META`/`tier()`
+JS-side color logic was ported directly into `frontend/src/lib/theme.ts`
+rather than re-derived.
+
+- Tailwind theme (`frontend/src/app/globals.css`): the mockup's full bright
+  palette added as named `@theme inline` tokens (`--color-bg #f4f2ef`,
+  `--color-accent #e0533d`, plus surface/border/text-scale tokens),
+  extracted directly from the mockup's inline styles, not approximated.
+  Dropped `prefers-color-scheme` dark mode entirely - the mockup is a
+  single fixed light theme, not two.
+- JetBrains Mono added via `next/font/google` (`frontend/src/app/
+  layout.tsx`), replacing Geist Mono (the mockup never uses Geist Mono),
+  mapped to Tailwind's `--font-mono` - used for nav items, numerics,
+  labels and badges per the mockup's typography split, alongside the
+  existing sans body font (kept, not replaced).
+- `JobCard` reskinned to the mockup's card design: colored-initial avatar
+  (`lib/theme.ts`'s `avatarColors()`/`initials()`, ported from the
+  mockup's `PALETTE`/`job.id % PALETTE.length`), a conic-gradient score
+  ring (`ScoreIndicator` rewritten from a bar to a ring) instead of a bar,
+  a matched-skills-only preview chip row (`SkillChipsPreview`, top 3 +
+  "+N" overflow - the mockup's card shows matched skills only, not
+  missing; missing moved to the detail page's dedicated section instead
+  of being duplicated on the card), a location line, and a footer with
+  the status control + posted date. `ScoreIndicator`'s existing
+  `SCORE_CEILING`-based calibration (real scores cluster ~0.03-0.59, see
+  the 2026-08-22 embedding-scoring entry) was preserved exactly, just
+  ported from bar-fill/hue math to ring-arc-degrees/tier math
+  (`calibratedPercent()`/`scoreTier()` in `lib/theme.ts`) - the printed
+  percent is still the real raw score, only the color/arc is calibrated.
+  Added a cards/table view toggle (`SegmentedToggle`, reused for the
+  applications tracker's board/list toggle too) and a new `JobTable`
+  component for the table view.
+- Job detail page **did not exist before this task** (CLAUDE.md's own
+  "not yet started" list confirms this) - built new at
+  `frontend/src/app/jobs/[id]/page.tsx` (a thin async server component
+  that awaits Next 16's now-Promise `params`, per `PageProps<'/jobs/
+  [id]'>`) + `JobDetailClient.tsx` (the real `useQuery(getJob(id))` +
+  rendering). Matches the mockup's structure: header card with large
+  score ring and coral Apply button (opens `job_url` in a new tab), then
+  matched skills FIRST (green, checkmark-prefixed, full list) and missing
+  skills SECOND (dashed outline, muted, full list) as two visually
+  distinct sections - this ordering was explicitly called out as
+  important in the task and preserved.
+- Applications tracker **did not exist before this task either** - built
+  new at `frontend/src/app/applications/page.tsx`, with a real kanban
+  board (`KanbanBoard.tsx`, native HTML5 drag-and-drop - `draggable`,
+  `onDragStart`/`onDragOver`/`onDrop`, mirroring the mockup's own
+  implementation approach) and a list view (`ApplicationsList.tsx`, a
+  table with a per-row status `<select>`), both wired to the same real
+  `PATCH` mutation as everything else. The optimistic-update/rollback
+  mutation logic (previously private to `StatusControl`) was extracted
+  into a shared hook, `frontend/src/hooks/useApplicationStatus.ts`, and
+  changed to take `{jobId, status}` as mutate-call variables instead of
+  being bound to one job id at hook-creation time - necessary so the
+  kanban board's single `onDrop` handler (which sees a different job id
+  per drop) and the list view's many per-row selects can all share one
+  mutation instance instead of three copies of the rollback logic.
+- The real `GET /jobs` endpoint caps `limit` at 100 (`Query(20, ge=1,
+  le=100)` in `huntloop/api/routers/jobs.py`) and has no server-side
+  status filter - the tracker page's `getAllJobs()` pages through every
+  job at the 100-cap (matching the mockup's own client-side `all`/
+  `trackerList`/`kanbanColumns` derivation) rather than trying one
+  oversized request, which was tried first and correctly 422'd.
+- **Real bug found and fixed via the browser check, not by inspection:**
+  the mockup's Apply button rendered with completely invisible text (coral
+  text on the identical coral background) despite `text-white` being
+  present in its className. Root cause: `globals.css`'s plain `a { color:
+  ... }` rule lived in Tailwind v4's unlayered cascade, which always beats
+  Tailwind's own utilities (they live in a lower-priority `@layer`)
+  regardless of specificity - confirmed via `getComputedStyle` showing
+  `color` and `background-color` as the identical `rgb(224,83,61)`. Fixed
+  by wrapping all of `globals.css`'s custom base rules in `@layer base`,
+  after which the Apply button's white text render correctly. Any future
+  global CSS added to this file needs to go inside `@layer base` (or a
+  more specific selector) for the same reason - a bare unlayered selector
+  will keep beating Tailwind utilities.
+- Fields the mockup shows but the real API doesn't expose - per-job H-1B
+  sponsor status, ATS platform name, salary estimate, "via {source}" -
+  were deliberately left out of both the card and detail page rather than
+  fabricated, since the task explicitly scoped this to "reusing the exact
+  same API calls already in place." `department` (present in the schema)
+  is shown; sponsor/ATS/salary are not. This is a known display gap, not
+  a bug - closing it needs new backend fields/endpoints, out of scope
+  here same as the location-radius and department filters the task
+  explicitly deferred.
+- `frontend/src/components/StatusBadge.tsx` (the old read-only badge) was
+  deleted - every status display in the reskinned UI is the interactive
+  `StatusControl` (restyled to the mockup's pill-select look), so nothing
+  referenced the read-only badge anymore.
+
+**Verified, all against the real running system (real API on :8000 via
+`.venv/bin/python -m uvicorn` - note the `.venv`'s console-script shebangs
+are stale after the `JobSight`→`HuntLoop` rename, `-m uvicorn` sidesteps
+it; real frontend on :3000; real Postgres data; real screenshots +
+JS-in-page checks via claude-in-chrome - nothing mocked):**
+
+- **(a)** Cards view, table view, job detail page (both a high-scoring
+  Palantir role with 9 matched/3 missing skills and a near-bottom
+  fraud-ops role scoring 3%, confirming red/amber/green tiers all render
+  correctly), and both applications-tracker views (kanban board, list)
+  all screenshotted and visually compared against the mockup's structure/
+  spacing/colors - close fidelity, modulo the deliberately-omitted fields
+  noted above.
+- **(b)** Existing behavior re-verified end-to-end: company text filter,
+  min-match range slider, sort (best/worst match), pagination (Previous/
+  Next, page count), and status updates. Status-update rollback was
+  re-verified for real (not assumed carried over from the 2026-08-23
+  Step 5 entry) - killed the real API mid-session, changed a status via
+  the applications list dropdown, confirmed it reverted to the prior
+  value rather than sticking on the failed optimistic value, restarted
+  the API, and confirmed the drag-and-drop kanban path (verified via
+  dispatched real `DragEvent`s with a `DataTransfer`, since this
+  environment's synthetic mouse-drag primitive doesn't trigger native
+  HTML5 DnD - a browser-automation limitation, not a product bug) also
+  moves a card between columns and updates the count correctly. Two real
+  test status changes (job ids 1064, 1065) were reset back to
+  `not_applied` via direct `PATCH` calls afterward so no test artifacts
+  were left in production data.
+- **(c)** Contrast spot-checked across score tiers (red/amber/green),
+  status pill colors, and body/muted/faint text scales - all ported
+  directly from the mockup's own colors, which were designed as a
+  cohesive light theme; no dark-mode-leftover low-contrast combinations
+  found. The one real contrast bug found (the invisible Apply button
+  text) is described and fixed above.
+- **(d)** Backend suite: 54/54 passing, confirmed by actually running
+  `pytest` after this task's changes (frontend-only, but verified rather
+  than assumed).
+- **(e)** This entry plus the reference-file pointer above and the
+  CLAUDE.md frontend bullet update.
+- Cleanup: both manually-started servers (API, frontend dev) were killed
+  at the end of the session.
+
+**Next:** Dashboard, Resume Management, and AI resume-review screens
+remain explicitly not built (need new backend work first, per the task).
+Location-radius and department filters remain explicitly blocked. Closing
+the per-job sponsor/ATS/salary display gap would need new backend fields/
+endpoints - not scheduled.

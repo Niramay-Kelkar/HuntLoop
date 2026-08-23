@@ -1,48 +1,49 @@
+import Link from "next/link";
+
 import type { JobSummary } from "@/types/api";
 import { ScoreIndicator } from "./ScoreIndicator";
-import { SkillChips } from "./SkillChips";
+import { SkillChipsPreview } from "./SkillChips";
 import { StatusControl } from "./StatusControl";
-
-function formatDate(dateString: string | null): string | null {
-  if (!dateString) return null;
-  return new Date(dateString).toLocaleDateString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-  });
-}
+import { avatarColors, formatDate, initials } from "@/lib/theme";
 
 export function JobCard({ job }: { job: JobSummary }) {
   const postedDate = formatDate(job.date_posted);
+  const avatar = avatarColors(job.id);
 
   return (
-    <article className="flex flex-col gap-3 rounded-xl border border-neutral-200 bg-white p-5 shadow-sm transition-shadow hover:shadow-md dark:border-neutral-800 dark:bg-neutral-900">
-      <div className="flex items-start justify-between gap-4">
-        <div className="min-w-0">
-          <p className="truncate text-sm font-medium uppercase tracking-wide text-neutral-500 dark:text-neutral-400">
-            {job.company_name}
-          </p>
-          <a
-            href={job.job_url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-lg font-semibold text-neutral-900 hover:text-blue-600 hover:underline dark:text-neutral-50 dark:hover:text-blue-400"
-          >
-            {job.job_title}
-          </a>
-          <p className="mt-0.5 text-sm text-neutral-500 dark:text-neutral-400">
-            {job.locations.length > 0 ? job.locations.join(" · ") : "Location not listed"}
-            {postedDate && <span className="text-neutral-300 dark:text-neutral-600"> · Posted {postedDate}</span>}
-          </p>
-        </div>
+    <article className="relative flex flex-col gap-3 rounded-xl border border-border bg-surface p-4 transition-all hover:-translate-y-px hover:border-border-strong hover:shadow-[0_6px_20px_rgba(0,0,0,.06)]">
+      <Link href={`/jobs/${job.id}`} className="absolute inset-0 z-0" aria-label={job.job_title} />
 
-        <div className="flex flex-shrink-0 flex-col items-end gap-2">
-          <ScoreIndicator score={job.match_score} />
-          <StatusControl jobId={job.id} status={job.application_status} />
+      <div className="pointer-events-none relative z-[1] flex items-start gap-3">
+        <div
+          className="grid h-[38px] w-[38px] flex-none place-items-center rounded-lg font-mono text-[13px] font-bold"
+          style={{ backgroundColor: avatar.bg, color: avatar.color }}
+        >
+          {initials(job.company_name)}
         </div>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-[15px] font-semibold leading-tight tracking-tight text-text">
+            {job.job_title}
+          </p>
+          <p className="mt-0.5 text-[13px] text-text-subtle">{job.company_name}</p>
+        </div>
+        <ScoreIndicator score={job.match_score} />
       </div>
 
-      <SkillChips matchedSkills={job.matched_skills} missingSkills={job.missing_skills} />
+      <div className="pointer-events-none relative z-[1]">
+        <SkillChipsPreview matchedSkills={job.matched_skills} />
+      </div>
+
+      <p className="pointer-events-none relative z-[1] text-xs text-text-subtle">
+        {job.locations.length > 0 ? job.locations.join(" · ") : "Location not listed"}
+      </p>
+
+      <div className="relative z-[1] flex items-center justify-between border-t border-divider pt-2.5">
+        <StatusControl jobId={job.id} status={job.application_status} size="sm" />
+        <span className="font-mono text-[11px] text-text-faintest">
+          {postedDate ? `Posted ${postedDate}` : "—"}
+        </span>
+      </div>
     </article>
   );
 }

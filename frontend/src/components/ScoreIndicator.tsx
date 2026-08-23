@@ -1,51 +1,59 @@
+import { calibratedPercent, scoreTier } from "@/lib/theme";
+
 /**
- * Match-score visual indicator: a color-graded bar + percentage, not a
- * bare number. Calibrated to this app's real observed score
- * distribution (all-MiniLM-L6-v2 cosine similarity between the active
- * resume and real scraped job descriptions - see SESSIONS.md): real
- * scores cluster roughly between 0.03 and 0.59, with the bulk in
- * 0.3-0.4. A generic 0-1 red/yellow/green scale would make almost every
- * real job look the same dull color and defeat the point of a
- * scannable-at-a-glance indicator, so the gradient's "full green" end
- * is pinned to the real observed ceiling (SCORE_CEILING) instead of 1.0.
+ * Match-score ring (design/HuntLoop.dc.html's conic-gradient ring, not a
+ * bar) - calibrated to this app's real observed score range (see
+ * lib/theme.ts's SCORE_CEILING comment): real scores cluster roughly
+ * between 0.03 and 0.59, so the ring's color/fill uses the score's
+ * fraction of SCORE_CEILING while the printed number stays the real raw
+ * percent - a generic 0-100 scale would render almost every real job the
+ * same dull red.
  */
+const SIZES = {
+  sm: { outer: 38, inner: 28, num: "text-[11px]" },
+  md: { outer: 52, inner: 38, num: "text-sm" },
+  lg: { outer: 74, inner: 56, num: "text-xl" },
+} as const;
 
-// Highest score seen across real backfills so far (~0.593, Palantir
-// "Software Engineer" roles) - a job scoring at or above this renders
-// fully green. Revisit if the resume or job mix changes enough to shift
-// the real distribution meaningfully.
-const SCORE_CEILING = 0.6;
+export function ScoreIndicator({
+  score,
+  size = "md",
+}: {
+  score: number | null;
+  size?: keyof typeof SIZES;
+}) {
+  const dims = SIZES[size];
 
-function scoreToHue(score: number): number {
-  const clamped = Math.max(0, Math.min(1, score / SCORE_CEILING));
-  return clamped * 120; // 0 = red, 60 = amber, 120 = green
-}
-
-export function ScoreIndicator({ score }: { score: number | null }) {
   if (score === null) {
     return (
-      <span className="inline-flex items-center rounded-full bg-neutral-100 px-2.5 py-1 text-xs font-medium text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
+      <span className="inline-flex items-center rounded-full bg-surface-alt px-2.5 py-1 text-xs font-medium text-text-faintest">
         not scored
       </span>
     );
   }
 
-  const hue = scoreToHue(score);
+  const { color } = scoreTier(score);
   const percent = Math.round(score * 100);
-  const fillPercent = Math.round(Math.max(4, Math.min(100, (score / SCORE_CEILING) * 100)));
-  const color = `hsl(${hue}, 72%, 42%)`;
+  const deg = Math.round(calibratedPercent(score) * 3.6);
 
   return (
-    <div className="flex min-w-[128px] items-center gap-2" title={`Match score: ${percent}%`}>
-      <div className="h-2 flex-1 overflow-hidden rounded-full bg-neutral-200 dark:bg-neutral-700">
-        <div
-          className="h-full rounded-full transition-[width] duration-300"
-          style={{ width: `${fillPercent}%`, backgroundColor: color }}
-        />
+    <div
+      className="grid flex-none place-items-center rounded-full"
+      style={{
+        width: dims.outer,
+        height: dims.outer,
+        background: `conic-gradient(${color} ${deg}deg, #ece9e3 ${deg}deg)`,
+      }}
+      title={`Match score: ${percent}%`}
+    >
+      <div
+        className="grid place-items-center rounded-full bg-surface"
+        style={{ width: dims.inner, height: dims.inner }}
+      >
+        <span className={`font-mono font-bold ${dims.num}`} style={{ color }}>
+          {percent}
+        </span>
       </div>
-      <span className="w-10 text-right text-xs font-bold tabular-nums" style={{ color }}>
-        {percent}%
-      </span>
     </div>
   );
 }

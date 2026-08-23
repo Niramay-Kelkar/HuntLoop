@@ -8,6 +8,12 @@ export interface JobFiltersValue {
   sort: NonNullable<ListJobsParams["sort"]>;
 }
 
+/**
+ * Only the filters the real API supports (company text match, min score,
+ * sort) get built here - the mockup also shows location/department/radius
+ * selects, but those are blocked pending backend work (see CLAUDE.md), so
+ * they're deliberately left out rather than added as non-functional UI.
+ */
 export function JobFilters({
   value,
   onChange,
@@ -15,54 +21,63 @@ export function JobFilters({
   value: JobFiltersValue;
   onChange: (value: JobFiltersValue) => void;
 }) {
+  const minScorePercent = value.minScore === "" ? 0 : Math.round(Number(value.minScore) * 100);
+
   return (
-    <div className="flex flex-wrap items-end gap-4 rounded-xl border border-neutral-200 bg-white p-4 dark:border-neutral-800 dark:bg-neutral-900">
-      <label className="flex flex-col gap-1">
-        <span className="text-xs font-medium text-neutral-500 dark:text-neutral-400">Company</span>
-        <input
-          type="text"
-          placeholder="e.g. palantir"
-          value={value.company}
-          onChange={(e) => onChange({ ...value, company: e.target.value })}
-          className="w-40 rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm text-neutral-900 placeholder:text-neutral-400 focus:border-blue-500 focus:outline-none dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-100"
-        />
-      </label>
+    <div className="rounded-xl border border-border bg-surface p-4">
+      <div className="flex flex-wrap items-center gap-2.5">
+        <div className="relative min-w-[200px] flex-1">
+          <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-text-faintest">⌕</span>
+          <input
+            type="text"
+            placeholder="Search by company…"
+            value={value.company}
+            onChange={(e) => onChange({ ...value, company: e.target.value })}
+            className="w-full rounded-lg border border-border-strong bg-surface-alt py-2.5 pl-8 pr-3 text-[13px] text-text focus:border-accent focus:outline-none"
+          />
+        </div>
+        <div className="relative">
+          <select
+            value={value.sort}
+            onChange={(e) => onChange({ ...value, sort: e.target.value as JobFiltersValue["sort"] })}
+            className="appearance-none rounded-lg border border-border-strong bg-surface py-2 pl-3 pr-7 text-[13px] text-text"
+          >
+            <option value="-score">Sort: Best match</option>
+            <option value="score">Sort: Worst match</option>
+          </select>
+          <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-faintest">
+            ▼
+          </span>
+        </div>
+      </div>
 
-      <label className="flex flex-col gap-1">
-        <span className="text-xs font-medium text-neutral-500 dark:text-neutral-400">Min. match score</span>
-        <input
-          type="number"
-          min={0}
-          max={1}
-          step={0.05}
-          placeholder="0.0 - 1.0"
-          value={value.minScore}
-          onChange={(e) => onChange({ ...value, minScore: e.target.value })}
-          className="w-32 rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm text-neutral-900 placeholder:text-neutral-400 focus:border-blue-500 focus:outline-none dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-100"
-        />
-      </label>
-
-      <label className="flex flex-col gap-1">
-        <span className="text-xs font-medium text-neutral-500 dark:text-neutral-400">Sort by score</span>
-        <select
-          value={value.sort}
-          onChange={(e) => onChange({ ...value, sort: e.target.value as JobFiltersValue["sort"] })}
-          className="rounded-lg border border-neutral-300 bg-white px-3 py-1.5 text-sm text-neutral-900 focus:border-blue-500 focus:outline-none dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-100"
-        >
-          <option value="-score">Best match first</option>
-          <option value="score">Worst match first</option>
-        </select>
-      </label>
-
-      {(value.company || value.minScore) && (
-        <button
-          type="button"
-          onClick={() => onChange({ company: "", minScore: "", sort: value.sort })}
-          className="rounded-lg px-3 py-1.5 text-sm font-medium text-neutral-500 hover:text-neutral-900 dark:text-neutral-400 dark:hover:text-neutral-100"
-        >
-          Clear filters
-        </button>
-      )}
+      <div className="mt-3 flex flex-wrap items-center gap-5 border-t border-divider pt-3">
+        <div className="flex min-w-[230px] items-center gap-2.5">
+          <span className="whitespace-nowrap font-mono text-[11px] uppercase tracking-wide text-text-faintest">
+            Min match
+          </span>
+          <input
+            type="range"
+            min={0}
+            max={95}
+            step={5}
+            value={minScorePercent}
+            onChange={(e) => onChange({ ...value, minScore: String(Number(e.target.value) / 100) })}
+            className="min-w-[110px] flex-1"
+          />
+          <span className="w-9 text-right font-mono text-[13px] font-semibold">{minScorePercent}%</span>
+        </div>
+        <div className="flex-1" />
+        {(value.company || value.minScore) && (
+          <button
+            type="button"
+            onClick={() => onChange({ company: "", minScore: "", sort: value.sort })}
+            className="font-mono text-[11px] text-accent hover:text-accent-hover"
+          >
+            Clear filters ✕
+          </button>
+        )}
+      </div>
     </div>
   );
 }

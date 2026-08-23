@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet data-dc-atomics>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:#f4f2ef;color:#1c1a17;font-family:'Helvetica Neue',Helvetica,Arial,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:#e0533d;text-decoration:none}
+a:hover{color:#c8442f}
+input,select,button,textarea{font-family:inherit;font-size:inherit}
+::placeholder{color:#a89f95}
+select{cursor:pointer;-webkit-appearance:none;appearance:none}
+input[type=range]{accent-color:#e0533d}
+::-webkit-scrollbar{height:10px;width:10px}
+::-webkit-scrollbar-thumb{background:#d9d3cb;border-radius:6px;border:2px solid #f4f2ef}
+</style>
+</helmet>
+
+<div style="min-height:100vh">
+
+<!-- ===== TOP NAV ===== -->
+<div style="position:sticky;top:0;z-index:30;background:rgba(249,248,246,.88);backdrop-filter:blur(12px);border-bottom:1px solid #e7e3dd">
+  <div style="max-width:1280px;margin:0 auto;padding:0 24px;height:58px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+    <div onClick="{{ goHome }}" style="display:flex;align-items:center;gap:9px;cursor:pointer;margin-right:14px">
+      <div style="width:26px;height:26px;border-radius:7px;background:#e0533d;display:grid;place-items:center;box-shadow:0 2px 6px rgba(224,83,61,.35)"><span style="font-family:'JetBrains Mono';font-weight:700;font-size:14px;color:#fff">H</span></div>
+      <span style="font-family:'JetBrains Mono';font-weight:600;font-size:16px;letter-spacing:-.3px">HuntLoop</span>
+    </div>
+    <nav style="display:flex;align-items:center;gap:4px">
+      <sc-for list="{{ navItems }}" as="item" hint-placeholder-count="4">
+        <button onClick="{{ item.go }}" style="{{ item.style }}">{{ item.label }}</button>
+      </sc-for>
+    </nav>
+    <div style="flex:1"></div>
+    <div style="display:flex;align-items:center;gap:14px">
+      <div style="display:flex;align-items:center;gap:6px;font-family:'JetBrains Mono';font-size:11px;color:#78736c;padding:5px 10px;background:#fff;border:1px solid #e7e3dd;border-radius:7px">
+        <span style="width:6px;height:6px;border-radius:50%;background:#a89f95"></span>{{ homeBase }}
+      </div>
+      <div onClick="{{ goResume }}" style="display:flex;align-items:center;gap:6px;font-family:'JetBrains Mono';font-size:11px;color:#1f8f4e;padding:5px 10px;background:#e8f4ec;border:1px solid #cfe8d8;border-radius:7px;cursor:pointer">
+        <span style="width:6px;height:6px;border-radius:50%;background:#1f9d55"></span>{{ activeResumeLabel }}
+      </div>
+    </div>
+  </div>
+</div>
+
+<div style="max-width:1280px;margin:0 auto;padding:26px 24px 60px">
+
+<!-- ================= DASHBOARD ================= -->
+<sc-if value="{{ isDashboard }}" hint-placeholder-val="{{ true }}">
+<div>
+  <div style="display:flex;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:20px">
+    <div>
+      <div style="font-family:'JetBrains Mono';font-size:11px;letter-spacing:1.5px;text-transform:uppercase;color:#a89f95;margin-bottom:5px">Overview</div>
+      <h1 style="margin:0;font-size:26px;font-weight:600;letter-spacing:-.5px">Good to see you, Niramay</h1>
+    </div>
+    <div style="font-family:'JetBrains Mono';font-size:12px;color:#78736c">{{ todayLabel }}</div>
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px;margin-bottom:16px">
+    <sc-for list="{{ statCards }}" as="s" hint-placeholder-count="4">
+      <div style="background:#fff;border:1px solid #e7e3dd;border-radius:12px;padding:16px 18px">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <span style="font-family:'JetBrains Mono';font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:#a89f95">{{ s.label }}</span>
+          <span style="{{ s.dotStyle }}"></span>
+        </div>
+        <div style="font-family:'JetBrains Mono';font-weight:700;font-size:34px;line-height:1.1;margin-top:8px">{{ s.value }}</div>
+        <div style="font-size:12px;color:#78736c;margin-top:3px">{{ s.sub }}</div>
+      </div>
+    </sc-for>
+  </div>
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px">
+    <div style="background:#fff;border:1px solid #e7e3dd;border-radius:12px;padding:18px 20px">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:16px">
+        <h2 style="margin:0;font-size:15px;font-weight:600">Applications by status</h2>
+        <span onClick="{{ goApplications }}" style="font-family:'JetBrains Mono';font-size:11px;color:#e0533d;cursor:pointer">Open tracker →</span>
+      </div>
+      <div style="display:flex;height:12px;border-radius:6px;overflow:hidden;background:#f0eeea;margin-bottom:16px">
+        <sc-for list="{{ statusSegments }}" as="seg" hint-placeholder-count="5">
+          <div style="{{ seg.barStyle }}"></div>
+        </sc-for>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:2px">
+        <sc-for list="{{ statusSegments }}" as="seg" hint-placeholder-count="5">
+          <div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid #f2efea">
+            <span style="{{ seg.dotStyle }}"></span>
+            <span style="font-size:13px;flex:1">{{ seg.label }}</span>
+            <span style="font-family:'JetBrains Mono';font-weight:600;font-size:14px">{{ seg.count }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+
+    <div style="background:#fff;border:1px solid #e7e3dd;border-radius:12px;padding:18px 20px">
+      <div style="display:flex;align-items:baseline;justify-content:space-between;margin-bottom:14px">
+        <h2 style="margin:0;font-size:15px;font-weight:600">New matches this week</h2>
+        <span style="font-family:'JetBrains Mono';font-size:11px;color:#a89f95">{{ newCount }} new</span>
+      </div>
+      <div style="display:flex;flex-direction:column">
+        <sc-for list="{{ newMatches }}" as="job" hint-placeholder-count="4">
+          <div onClick="{{ job.open }}" style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid #f2efea;cursor:pointer">
+            <div style="{{ job.avatarStyle }}">{{ job.initials }}</div>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ job.title }}</div>
+              <div style="font-size:12px;color:#78736c">{{ job.company }} · {{ job.locationShort }}</div>
+            </div>
+            <div style="{{ job.miniRingStyle }}"><div style="width:28px;height:28px;border-radius:50%;background:#fff;display:grid;place-items:center"><span style="{{ job.miniNumStyle }}">{{ job.score }}</span></div></div>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+  </div>
+</div>
+</sc-if>
+
+<!-- ================= JOBS LIST ================= -->
+<sc-if value="{{ isJobs }}" hint-placeholder-val="{{ true }}">
+<div>
+  <div style="display:flex;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:16px">
+    <div>
+      <h1 style="margin:0;font-size:24px;font-weight:600;letter-spacing:-.5px">Jobs</h1>
+      <div style="font-size:13px;color:#78736c;margin-top:3px"><span style="font-family:'JetBrains Mono';font-weight:600;color:#1c1a17">{{ resultCount }}</span> of {{ totalCount }} postings · scored against your active resume</div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px">
+      <div style="position:relative">
+        <select value="{{ filters.sort }}" onChange="{{ onSort }}" style="padding:8px 30px 8px 12px;border:1px solid #e0dcd5;border-radius:8px;background:#fff;font-size:13px;color:#1c1a17">
+          <option value="best">Sort: Best match</option>
+          <option value="new">Sort: Newest</option>
+          <option value="az">Sort: Company A–Z</option>
+        </select>
+        <span style="position:absolute;right:11px;top:50%;transform:translateY(-50%);pointer-events:none;color:#a89f95;font-size:10px">▼</span>
+      </div>
+      <div style="display:flex;border:1px solid #e0dcd5;border-radius:8px;overflow:hidden;background:#fff">
+        <button onClick="{{ setCards }}" style="{{ cardsBtnStyle }}">Cards</button>
+        <button onClick="{{ setTable }}" style="{{ tableBtnStyle }}">Table</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- filters -->
+  <div style="background:#fff;border:1px solid #e7e3dd;border-radius:12px;padding:14px 16px;margin-bottom:18px">
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+      <div style="position:relative;flex:1;min-width:200px">
+        <span style="position:absolute;left:11px;top:50%;transform:translateY(-50%);color:#a89f95">⌕</span>
+        <input value="{{ filters.search }}" onInput="{{ onSearch }}" placeholder="Search title, company or skill…" style="width:100%;padding:9px 12px 9px 30px;border:1px solid #e0dcd5;border-radius:8px;background:#faf9f7;font-size:13px" />
+      </div>
+      <sc-for list="{{ filterSelects }}" as="fs" hint-placeholder-count="4">
+        <div style="position:relative">
+          <select value="{{ fs.value }}" onChange="{{ fs.onChange }}" style="padding:9px 28px 9px 11px;border:1px solid #e0dcd5;border-radius:8px;background:#faf9f7;font-size:13px;color:#1c1a17;max-width:180px">
+            <sc-for list="{{ fs.options }}" as="opt" hint-placeholder-count="3">
+              <option value="{{ opt.value }}">{{ opt.label }}</option>
+            </sc-for>
+          </select>
+          <span style="position:absolute;right:10px;top:50%;transform:translateY(-50%);pointer-events:none;color:#a89f95;font-size:9px">▼</span>
+        </div>
+      </sc-for>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:20px;align-items:center;margin-top:12px;padding-top:12px;border-top:1px solid #f2efea">
+      <div style="display:flex;align-items:center;gap:10px;min-width:230px">
+        <span style="font-family:'JetBrains Mono';font-size:11px;letter-spacing:.4px;text-transform:uppercase;color:#a89f95;white-space:nowrap">Min match</span>
+        <input type="range" min="0" max="95" step="5" value="{{ filters.minScore }}" onInput="{{ onMinScore }}" style="flex:1;min-width:110px" />
+        <span style="font-family:'JetBrains Mono';font-weight:600;font-size:13px;width:38px;text-align:right">{{ minScoreLabel }}</span>
+      </div>
+      <div style="flex:1"></div>
+      <button onClick="{{ clearFilters }}" style="background:none;border:none;font-family:'JetBrains Mono';font-size:11px;color:#e0533d;cursor:pointer;padding:4px 0">Clear filters ✕</button>
+    </div>
+  </div>
+
+  <!-- cards -->
+  <sc-if value="{{ isCards }}" hint-placeholder-val="{{ true }}">
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:14px">
+      <sc-for list="{{ jobs }}" as="job" hint-placeholder-count="6">
+        <div style="background:#fff;border:1px solid #e7e3dd;border-radius:12px;padding:16px;cursor:pointer;transition:all .15s ease;display:flex;flex-direction:column;gap:12px" style-hover="border-color:#d6cfc6;box-shadow:0 6px 20px rgba(0,0,0,.06);transform:translateY(-1px)" onClick="{{ job.open }}">
+          <div style="display:flex;gap:12px;align-items:flex-start">
+            <div style="{{ job.avatarStyle }}">{{ job.initials }}</div>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:15px;font-weight:600;line-height:1.25;letter-spacing:-.2px">{{ job.title }}</div>
+              <div style="font-size:13px;color:#78736c;margin-top:2px">{{ job.company }}</div>
+            </div>
+            <div style="{{ job.ringStyle }}"><div style="width:38px;height:38px;border-radius:50%;background:#fff;display:grid;place-items:center"><span style="{{ job.scoreNumStyle }}">{{ job.score }}</span></div></div>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px">
+            <sc-for list="{{ job.matchedTop }}" as="sk" hint-placeholder-count="3">
+              <span style="font-family:'JetBrains Mono';font-size:11px;padding:3px 8px;background:#e9f4ee;color:#1f8f4e;border-radius:6px">{{ sk }}</span>
+            </sc-for>
+            <sc-if value="{{ job.hasMore }}" hint-placeholder-val="{{ true }}">
+              <span style="font-family:'JetBrains Mono';font-size:11px;padding:3px 8px;color:#a89f95">+{{ job.matchedMore }}</span>
+            </sc-if>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;font-size:12px;color:#78736c">
+            <span>{{ job.locationStr }}</span>
+            <span style="color:#d9d3cb">·</span>
+            <span style="{{ job.sponsorStyle }}">{{ job.sponsorLabel }}</span>
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;padding-top:11px;border-top:1px solid #f2efea">
+            <span style="{{ job.badgeStyle }}"><span style="{{ job.badgeDotStyle }}"></span>{{ job.statusLabel }}</span>
+            <span style="font-family:'JetBrains Mono';font-size:11px;color:#a89f95">{{ job.postedLabel }}</span>
+          </div>
+        </div>
+      </sc-for>
+    </div>
+    <sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
+      <div style="text-align:center;padding:60px 20px;color:#a89f95;font-size:14px">No jobs match these filters. <span onClick="{{ clearFilters }}" style="color:#e0533d;cursor:pointer">Clear filters</span></div>
+    </sc-if>
+  </sc-if>
+
+  <!-- table -->
+  <sc-if value="{{ isTable }}" hint-placeholder-val="{{ false }}">
+    <div style="background:#fff;border:1px solid #e7e3dd;border-radius:12px;overflow:hidden">
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;min-width:720px">
+          <thead>
+            <tr style="background:#faf9f7">
+              <th style="text-align:left;padding:11px 16px;font-family:'JetBrains Mono';font-size:10px;letter-spacing:.6px;text-transform:uppercase;color:#a89f95;font-weight:600">Match</th>
+              <th style="text-align:left;padding:11px 8px;font-family:'JetBrains Mono';font-size:10px;letter-spacing:.6px;text-transform:uppercase;color:#a89f95;font-weight:600">Role</th>
+              <th style="text-align:left;padding:11px 8px;font-family:'JetBrains Mono';font-size:10px;letter-spacing:.6px;text-transform:uppercase;color:#a89f95;font-weight:600">Location</th>
+              <th style="text-align:left;padding:11px 8px;font-family:'JetBrains Mono';font-size:10px;letter-spacing:.6px;text-transform:uppercase;color:#a89f95;font-weight:600">Sponsor</th>
+              <th style="text-align:left;padding:11px 16px;font-family:'JetBrains Mono';font-size:10px;letter-spacing:.6px;text-transform:uppercase;color:#a89f95;font-weight:600">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            <sc-for list="{{ jobs }}" as="job" hint-placeholder-count="8">
+              <tr onClick="{{ job.open }}" style="border-top:1px solid #f2efea;cursor:pointer" style-hover="background:#faf9f7">
+                <td style="padding:11px 16px;width:70px"><span style="{{ job.scorePillStyle }}">{{ job.score }}%</span></td>
+                <td style="padding:11px 8px">
+                  <div style="display:flex;align-items:center;gap:10px">
+                    <div style="{{ job.avatarStyleSm }}">{{ job.initials }}</div>
+                    <div><div style="font-size:13px;font-weight:600">{{ job.title }}</div><div style="font-size:12px;color:#78736c">{{ job.company }}</div></div>
+                  </div>
+                </td>
+                <td style="padding:11px 8px;font-size:13px;color:#5a544c">{{ job.locationStr }}</td>
+                <td style="padding:11px 8px;font-size:12px"><span style="{{ job.sponsorStyle }}">{{ job.sponsorLabel }}</span></td>
+                <td style="padding:11px 16px"><span style="{{ job.badgeStyle }}"><span style="{{ job.badgeDotStyle }}"></span>{{ job.statusLabel }}</span></td>
+              </tr>
+            </sc-for>
+          </tbody>
+        </table>
+      </div>
+      <sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
+        <div style="text-align:center;padding:50px 20px;color:#a89f95;font-size:14px">No jobs match these filters.</div>
+      </sc-if>
+    </div>
+  </sc-if>
+</div>
+</sc-if>
+
+<!-- ================= JOB DETAIL ================= -->
+<sc-if value="{{ isDetail }}" hint-placeholder-val="{{ false }}">
+<div>
+  <button onClick="{{ back }}" style="background:none;border:none;font-family:'JetBrains Mono';font-size:12px;color:#78736c;cursor:pointer;padding:0;margin-bottom:16px">← Back to jobs</button>
+  <div style="display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:22px;align-items:start">
+    <!-- main -->
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <div style="background:#fff;border:1px solid #e7e3dd;border-radius:14px;padding:22px 24px">
+        <div style="display:flex;gap:16px;align-items:flex-start">
+          <div style="{{ detail.avatarStyleLg }}">{{ detail.initials }}</div>
+          <div style="flex:1;min-width:0">
+            <h1 style="margin:0;font-size:23px;font-weight:600;letter-spacing:-.4px;line-height:1.2">{{ detail.title }}</h1>
+            <div style="font-size:15px;color:#5a544c;margin-top:4px">{{ detail.company }} · {{ detail.dept }}</div>
+            <div style="display:flex;flex-wrap:wrap;gap:14px;margin-top:12px;font-size:13px;color:#78736c">
+              <span>◎ {{ detail.locationStr }}</span>
+              <span>◷ {{ detail.postedLabel }}</span>
+              <span style="font-family:'JetBrains Mono';font-size:12px">via {{ detail.source }}</span>
+            </div>
+          </div>
+          <div style="{{ detail.ringStyleLg }}"><div style="width:56px;height:56px;border-radius:50%;background:#fff;display:grid;place-items:center;flex-direction:column"><span style="{{ detail.scoreNumStyleLg }}">{{ detail.score }}</span><span style="font-family:'JetBrains Mono';font-size:8px;color:#a89f95;letter-spacing:.5px">MATCH</span></div></div>
+        </div>
+        <div style="display:flex;gap:10px;margin-top:20px;flex-wrap:wrap">
+          <a href="{{ detail.url }}" target="_blank" rel="noopener" style="display:inline-flex;align-items:center;gap:8px;background:#e0533d;color:#fff;padding:11px 20px;border-radius:9px;font-weight:600;font-size:14px;box-shadow:0 2px 8px rgba(224,83,61,.3)">Apply on {{ detail.source }} ↗</a>
+          <div style="position:relative">
+            <select value="{{ detail.status }}" onChange="{{ detail.onStatusChange }}" style="{{ detail.statusSelectStyle }}">
+              <sc-for list="{{ statusOptions }}" as="opt" hint-placeholder-count="5">
+                <option value="{{ opt.value }}">{{ opt.selLabel }}</option>
+              </sc-for>
+            </select>
+            <span style="position:absolute;right:12px;top:50%;transform:translateY(-50%);pointer-events:none;color:#78736c;font-size:9px">▼</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- matched skills FIRST -->
+      <div style="background:#fff;border:1px solid #e7e3dd;border-radius:14px;padding:22px 24px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+          <span style="width:8px;height:8px;border-radius:50%;background:#1f9d55"></span>
+          <h2 style="margin:0;font-size:16px;font-weight:600">Your matching skills</h2>
+          <span style="font-family:'JetBrains Mono';font-size:12px;color:#1f8f4e;background:#e9f4ee;padding:2px 8px;border-radius:6px">{{ detail.matchedCount }} matched</span>
+        </div>
+        <p style="font-size:13px;color:#78736c;margin:0 0 14px">Pulled from your active resume — skills this role asks for that you already demonstrate.</p>
+        <div style="display:flex;flex-wrap:wrap;gap:8px">
+          <sc-for list="{{ detail.matched }}" as="sk" hint-placeholder-count="6">
+            <span style="display:inline-flex;align-items:center;gap:6px;font-family:'JetBrains Mono';font-size:13px;padding:7px 12px;background:#e9f4ee;color:#1f7a45;border:1px solid #cfe8d8;border-radius:8px;font-weight:500"><span style="color:#1f9d55">✓</span>{{ sk }}</span>
+          </sc-for>
+        </div>
+        <div style="margin-top:20px;padding-top:18px;border-top:1px solid #f2efea">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+            <span style="width:8px;height:8px;border-radius:50%;background:#c9c2b8"></span>
+            <h3 style="margin:0;font-size:14px;font-weight:600;color:#5a544c">Skills to develop</h3>
+            <span style="font-family:'JetBrains Mono';font-size:12px;color:#a89f95">{{ detail.missingCount }} gap</span>
+          </div>
+          <p style="font-size:13px;color:#a89f95;margin:0 0 12px">Mentioned in the posting but not evident on your resume.</p>
+          <div style="display:flex;flex-wrap:wrap;gap:8px">
+            <sc-for list="{{ detail.missing }}" as="sk" hint-placeholder-count="3">
+              <span style="font-family:'JetBrains Mono';font-size:12px;padding:6px 11px;background:#faf9f7;color:#8a837a;border:1px dashed #d9d3cb;border-radius:8px">{{ sk }}</span>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+
+      <!-- description -->
+      <div style="background:#fff;border:1px solid #e7e3dd;border-radius:14px;padding:22px 24px">
+        <h2 style="margin:0 0 12px;font-size:16px;font-weight:600">About the role</h2>
+        <p style="font-size:14px;line-height:1.6;color:#3a352f;margin:0 0 18px;text-wrap:pretty">{{ detail.blurb }}</p>
+        <h3 style="margin:0 0 10px;font-size:13px;font-weight:600;font-family:'JetBrains Mono';letter-spacing:.5px;text-transform:uppercase;color:#a89f95">What you'll do</h3>
+        <ul style="margin:0;padding-left:18px;display:flex;flex-direction:column;gap:8px">
+          <sc-for list="{{ detail.responsibilities }}" as="r" hint-placeholder-count="4">
+            <li style="font-size:14px;line-height:1.5;color:#3a352f">{{ r }}</li>
+          </sc-for>
+        </ul>
+      </div>
+    </div>
+
+    <!-- sidebar -->
+    <div style="display:flex;flex-direction:column;gap:16px;position:sticky;top:78px">
+      <div style="background:#fff;border:1px solid #e7e3dd;border-radius:14px;padding:18px 20px">
+        <h3 style="margin:0 0 14px;font-size:13px;font-weight:600;font-family:'JetBrains Mono';letter-spacing:.5px;text-transform:uppercase;color:#a89f95">Company</h3>
+        <div style="display:flex;flex-direction:column;gap:11px">
+          <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:#78736c">Name</span><span style="font-weight:600">{{ detail.company }}</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:#78736c">Department</span><span style="font-weight:500">{{ detail.dept }}</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:#78736c">Salary est.</span><span style="font-family:'JetBrains Mono';font-weight:600">{{ detail.salary }}</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:#78736c">ATS</span><span style="font-family:'JetBrains Mono';font-size:12px">{{ detail.ats }}</span></div>
+        </div>
+      </div>
+
+      <div style="{{ detail.sponsorCardStyle }}">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">
+          <span style="{{ detail.sponsorCardDot }}"></span>
+          <h3 style="margin:0;font-size:14px;font-weight:600">{{ detail.sponsorTitle }}</h3>
+        </div>
+        <sc-if value="{{ detail.sponsors }}" hint-placeholder-val="{{ true }}">
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:#5a7a63">LCAs filed ({{ detail.lcaFy }})</span><span style="font-family:'JetBrains Mono';font-weight:700">{{ detail.lcaCount }}</span></div>
+            <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:#5a7a63">Median wage</span><span style="font-family:'JetBrains Mono';font-weight:600">{{ detail.lcaWage }}</span></div>
+            <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:#5a7a63">Top title</span><span style="font-weight:500;text-align:right">{{ detail.lcaTitle }}</span></div>
+            <div style="display:flex;justify-content:space-between;font-size:13px"><span style="color:#5a7a63">Latest status</span><span style="font-family:'JetBrains Mono';font-size:12px;color:#1f8f4e">{{ detail.lcaStatus }}</span></div>
+          </div>
+          <p style="font-size:11px;line-height:1.5;color:#7a9284;margin:12px 0 0;font-family:'JetBrains Mono'">Source: DOL LCA disclosure data.</p>
+        </sc-if>
+        <sc-if value="{{ detail.noSponsor }}" hint-placeholder-val="{{ false }}">
+          <p style="font-size:13px;line-height:1.5;color:#8a837a;margin:0">No H-1B LCA disclosures found for this employer in recent DOL data. Sponsorship isn't guaranteed either way — confirm with the recruiter.</p>
+        </sc-if>
+      </div>
+    </div>
+  </div>
+</div>
+</sc-if>
+
+<!-- ================= APPLICATIONS ================= -->
+<sc-if value="{{ isApplications }}" hint-placeholder-val="{{ false }}">
+<div>
+  <div style="display:flex;align-items:flex-end;justify-content:space-between;flex-wrap:wrap;gap:12px;margin-bottom:18px">
+    <div>
+      <h1 style="margin:0;font-size:24px;font-weight:600;letter-spacing:-.5px">Applications</h1>
+      <div style="font-size:13px;color:#78736c;margin-top:3px">Track everything you've engaged with. Drag cards between columns to update status.</div>
+    </div>
+    <div style="display:flex;border:1px solid #e0dcd5;border-radius:8px;overflow:hidden;background:#fff">
+      <button onClick="{{ setKanban }}" style="{{ kanbanBtnStyle }}">Board</button>
+      <button onClick="{{ setList }}" style="{{ listBtnStyle }}">List</button>
+    </div>
+  </div>
+
+  <sc-if value="{{ isKanban }}" hint-placeholder-val="{{ true }}">
+    <div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:8px;align-items:flex-start">
+      <sc-for list="{{ kanbanColumns }}" as="col" hint-placeholder-count="5">
+        <div onDragOver="{{ col.onDragOver }}" onDrop="{{ col.onDrop }}" style="flex:1;min-width:236px;background:#efece7;border-radius:12px;padding:10px;display:flex;flex-direction:column;gap:10px">
+          <div style="display:flex;align-items:center;gap:8px;padding:4px 6px">
+            <span style="{{ col.dotStyle }}"></span>
+            <span style="font-size:13px;font-weight:600">{{ col.label }}</span>
+            <span style="font-family:'JetBrains Mono';font-size:12px;color:#a89f95;margin-left:auto">{{ col.count }}</span>
+          </div>
+          <sc-for list="{{ col.jobs }}" as="job" hint-placeholder-count="2">
+            <div draggable="true" onDragStart="{{ job.onDragStart }}" onClick="{{ job.open }}" style="background:#fff;border:1px solid #e7e3dd;border-radius:10px;padding:12px;cursor:pointer;transition:box-shadow .12s" style-hover="box-shadow:0 4px 14px rgba(0,0,0,.08)">
+              <div style="display:flex;align-items:center;gap:9px;margin-bottom:9px">
+                <div style="{{ job.avatarStyleSm }}">{{ job.initials }}</div>
+                <div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ job.title }}</div><div style="font-size:11px;color:#78736c">{{ job.company }}</div></div>
+              </div>
+              <div style="display:flex;align-items:center;justify-content:space-between">
+                <span style="{{ job.scorePillStyle }}">{{ job.score }}%</span>
+                <span style="font-family:'JetBrains Mono';font-size:11px;color:#a89f95">{{ job.dateLabel }}</span>
+              </div>
+            </div>
+          </sc-for>
+          <sc-if value="{{ col.empty }}" hint-placeholder-val="{{ false }}">
+            <div style="font-family:'JetBrains Mono';font-size:11px;color:#b8b1a7;text-align:center;padding:14px 0">Drop here</div>
+          </sc-if>
+        </div>
+      </sc-for>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ isList }}" hint-placeholder-val="{{ false }}">
+    <div style="background:#fff;border:1px solid #e7e3dd;border-radius:12px;overflow:hidden">
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;min-width:680px">
+          <thead><tr style="background:#faf9f7">
+            <th style="text-align:left;padding:11px 16px;font-family:'JetBrains Mono';font-size:10px;letter-spacing:.6px;text-transform:uppercase;color:#a89f95;font-weight:600">Role</th>
+            <th style="text-align:left;padding:11px 8px;font-family:'JetBrains Mono';font-size:10px;letter-spacing:.6px;text-transform:uppercase;color:#a89f95;font-weight:600">Match</th>
+            <th style="text-align:left;padding:11px 8px;font-family:'JetBrains Mono';font-size:10px;letter-spacing:.6px;text-transform:uppercase;color:#a89f95;font-weight:600">Applied</th>
+            <th style="text-align:left;padding:11px 16px;font-family:'JetBrains Mono';font-size:10px;letter-spacing:.6px;text-transform:uppercase;color:#a89f95;font-weight:600">Status</th>
+          </tr></thead>
+          <tbody>
+            <sc-for list="{{ trackerList }}" as="job" hint-placeholder-count="8">
+              <tr onClick="{{ job.open }}" style="border-top:1px solid #f2efea;cursor:pointer" style-hover="background:#faf9f7">
+                <td style="padding:11px 16px"><div style="display:flex;align-items:center;gap:10px"><div style="{{ job.avatarStyleSm }}">{{ job.initials }}</div><div><div style="font-size:13px;font-weight:600">{{ job.title }}</div><div style="font-size:12px;color:#78736c">{{ job.company }} · {{ job.locationShort }}</div></div></div></td>
+                <td style="padding:11px 8px"><span style="{{ job.scorePillStyle }}">{{ job.score }}%</span></td>
+                <td style="padding:11px 8px;font-family:'JetBrains Mono';font-size:12px;color:#5a544c">{{ job.dateLabel }}</td>
+                <td style="padding:11px 16px">
+                  <div style="position:relative;display:inline-block">
+                    <select value="{{ job.status }}" onChange="{{ job.onStatusChange }}" style="{{ job.rowSelectStyle }}">
+                      <sc-for list="{{ statusOptions }}" as="opt" hint-placeholder-count="5">
+                        <option value="{{ opt.value }}">{{ opt.label }}</option>
+                      </sc-for>
+                    </select>
+                  </div>
+                </td>
+              </tr>
+            </sc-for>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </sc-if>
+</div>
+</sc-if>
+
+<!-- ================= RESUME ================= -->
+<sc-if value="{{ isResume }}" hint-placeholder-val="{{ false }}">
+<div>
+  <div style="margin-bottom:18px">
+    <h1 style="margin:0;font-size:24px;font-weight:600;letter-spacing:-.5px">Resume</h1>
+    <div style="font-size:13px;color:#78736c;margin-top:3px">The active version is what every job is scored against.</div>
+  </div>
+  <div style="display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:20px;align-items:start">
+    <!-- left: review -->
+    <div style="display:flex;flex-direction:column;gap:16px">
+      <div style="background:#fff;border:1px solid #e7e3dd;border-radius:14px;padding:20px 22px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+          <h2 style="margin:0;font-size:16px;font-weight:600">AI resume review</h2>
+          <span style="font-family:'JetBrains Mono';font-size:11px;color:#b07817;background:#fbf1dd;padding:2px 8px;border-radius:6px">{{ reviewCount }} suggestions</span>
+        </div>
+        <p style="font-size:13px;color:#78736c;margin:0">Generated from your active resume against your {{ totalCount }} tracked roles.</p>
+      </div>
+
+      <div style="background:#fff;border:1px solid #e7e3dd;border-radius:14px;padding:20px 22px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><span style="width:8px;height:8px;border-radius:50%;background:#e0533d"></span><h3 style="margin:0;font-size:15px;font-weight:600">Missing keywords</h3></div>
+        <p style="font-size:13px;color:#78736c;margin:0 0 14px">High-frequency skills across your matched roles that don't appear on your resume. Add the ones you actually have.</p>
+        <div style="display:flex;flex-wrap:wrap;gap:8px">
+          <sc-for list="{{ missingKeywords }}" as="kw" hint-placeholder-count="6">
+            <span style="display:inline-flex;align-items:center;gap:7px;font-family:'JetBrains Mono';font-size:13px;padding:7px 12px;background:#fdeee9;color:#c8442f;border:1px solid #f6d4ca;border-radius:8px"><span style="font-size:11px">＋</span>{{ kw.name }}<span style="color:#d99;font-size:11px">{{ kw.freq }}</span></span>
+          </sc-for>
+        </div>
+      </div>
+
+      <div style="background:#fff;border:1px solid #e7e3dd;border-radius:14px;padding:20px 22px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px"><span style="width:8px;height:8px;border-radius:50%;background:#2f6bb0"></span><h3 style="margin:0;font-size:15px;font-weight:600">Phrasing suggestions</h3></div>
+        <div style="display:flex;flex-direction:column;gap:14px">
+          <sc-for list="{{ phrasingSuggestions }}" as="p" hint-placeholder-count="3">
+            <div style="border:1px solid #eee7df;border-radius:10px;overflow:hidden">
+              <div style="padding:11px 14px;background:#faf6f5;border-bottom:1px solid #f2e8e4"><span style="font-family:'JetBrains Mono';font-size:11px;color:#c8442f">− before</span><div style="font-size:13px;color:#8a837a;margin-top:4px;text-decoration:line-through;text-decoration-color:#e0c9c2">{{ p.before }}</div></div>
+              <div style="padding:11px 14px;background:#f4f9f5"><span style="font-family:'JetBrains Mono';font-size:11px;color:#1f8f4e">＋ after</span><div style="font-size:13px;color:#2a4a34;margin-top:4px;font-weight:500">{{ p.after }}</div></div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+
+      <div style="background:#fff;border:1px solid #e7e3dd;border-radius:14px;padding:20px 22px">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px"><span style="width:8px;height:8px;border-radius:50%;background:#b07817"></span><h3 style="margin:0;font-size:15px;font-weight:600">Formatting notes</h3></div>
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <sc-for list="{{ formattingNotes }}" as="n" hint-placeholder-count="3">
+            <div style="display:flex;gap:11px;align-items:flex-start">
+              <span style="{{ n.iconStyle }}">{{ n.icon }}</span>
+              <div><div style="font-size:14px;font-weight:500">{{ n.title }}</div><div style="font-size:13px;color:#78736c;margin-top:2px;line-height:1.45">{{ n.detail }}</div></div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </div>
+
+    <!-- right: upload + versions -->
+    <div style="display:flex;flex-direction:column;gap:16px;position:sticky;top:78px">
+      <div style="background:#fff;border:2px dashed #dcd6ce;border-radius:14px;padding:26px 20px;text-align:center">
+        <div style="width:44px;height:44px;border-radius:11px;background:#fdeee9;display:grid;place-items:center;margin:0 auto 12px"><span style="font-size:20px;color:#e0533d">↑</span></div>
+        <div style="font-size:14px;font-weight:600">Upload a new version</div>
+        <div style="font-size:12px;color:#a89f95;margin-top:3px;margin-bottom:14px">Drop a PDF or browse</div>
+        <button style="background:#e0533d;color:#fff;border:none;padding:9px 18px;border-radius:8px;font-weight:600;font-size:13px;cursor:pointer;box-shadow:0 2px 6px rgba(224,83,61,.3)">Choose file</button>
+      </div>
+
+      <div style="background:#fff;border:1px solid #e7e3dd;border-radius:14px;padding:18px 20px">
+        <h3 style="margin:0 0 14px;font-size:13px;font-weight:600;font-family:'JetBrains Mono';letter-spacing:.5px;text-transform:uppercase;color:#a89f95">Version history</h3>
+        <div style="display:flex;flex-direction:column;gap:12px">
+          <sc-for list="{{ resumeVersions }}" as="v" hint-placeholder-count="3">
+            <div style="{{ v.cardStyle }}">
+              <div style="display:flex;align-items:center;gap:9px;margin-bottom:6px">
+                <span style="font-family:'JetBrains Mono';font-weight:700;font-size:13px">v{{ v.version }}</span>
+                <sc-if value="{{ v.active }}" hint-placeholder-val="{{ true }}"><span style="font-family:'JetBrains Mono';font-size:10px;color:#1f8f4e;background:#e8f4ec;padding:2px 7px;border-radius:5px;letter-spacing:.4px">ACTIVE</span></sc-if>
+                <span style="margin-left:auto;font-family:'JetBrains Mono';font-size:11px;color:#a89f95">{{ v.date }}</span>
+              </div>
+              <div style="font-size:12px;color:#78736c;font-family:'JetBrains Mono';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ v.file }}</div>
+              <div style="font-size:12px;color:#8a837a;margin-top:6px;line-height:1.4">{{ v.note }}</div>
+              <sc-if value="{{ v.inactive }}" hint-placeholder-val="{{ false }}">
+                <button onClick="{{ v.setActive }}" style="margin-top:10px;width:100%;background:#faf9f7;border:1px solid #e0dcd5;color:#1c1a17;padding:7px;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer" style-hover="border-color:#e0533d;color:#e0533d">Make active</button>
+              </sc-if>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</sc-if>
+
+</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:&quot;100%&quot;,&quot;height&quot;:820}}">
+class Component extends DCLogic {
+  state = {
+    view: 'dashboard',
+    selectedJobId: null,
+    jobListMode: 'cards',
+    trackerMode: 'kanban',
+    sort: 'best',
+    activeResume: 3,
+    statuses: {},
+    filters: { search: '', company: 'all', location: 'all', dept: 'all', radius: 'any', minScore: 0, status: 'any' },
+  };
+
+  STATUS_ORDER = ['not_applied', 'applied', 'interviewing', 'offer', 'rejected'];
+  META = {
+    not_applied: { label: 'Not applied', color: '#78736c', bg: '#efece7', dot: '#b0a89d' },
+    applied: { label: 'Applied', color: '#2f6bb0', bg: '#e9f1fa', dot: '#3f7fca' },
+    interviewing: { label: 'Interviewing', color: '#b07817', bg: '#fbf1dd', dot: '#d98324' },
+    offer: { label: 'Offer', color: '#1f8f4e', bg: '#e6f4ea', dot: '#1f9d55' },
+    rejected: { label: 'Rejected', color: '#b0463a', bg: '#f8e9e6', dot: '#d64c3c' },
+  };
+  HOME = 'San Francisco, CA';
+  PALETTE = [['#fdece7', '#c8442f'], ['#e9eef7', '#3560a8'], ['#e7f2ec', '#2b8a56'], ['#f3ecf7', '#7346a8'], ['#fbf0dd', '#a5701a'], ['#e7f1f0', '#2b7a72'], ['#f5ece2', '#8a6528']];
+
+  base() {
+    return [
+      { id: 1, company: 'Checkr', initials: 'Ch', title: 'Backend Engineer', dept: 'Engineering', locations: ['San Francisco, CA'], remote: false, dist: 6, source: 'Greenhouse', ats: 'Greenhouse', salary: '$150k–$205k', url: 'https://job-boards.greenhouse.io/checkr', score: 91, status: 'applied', isNew: true, applied: 'Aug 12', matched: ['Python', 'PostgreSQL', 'REST APIs', 'Docker', 'System Design', 'CI/CD'], missing: ['Go', 'Kafka'], sponsor: { count: 214, wage: '$168k', title: 'Software Engineer', status: 'Certified', fy: 'FY2025' }, blurb: 'Checkr is building the data platform behind modern background checks. This role owns core backend services that ingest, normalize and serve verification data at scale.' },
+      { id: 2, company: 'Duolingo', initials: 'Du', title: 'Data Scientist', dept: 'Data', locations: ['Pittsburgh, PA', 'Remote'], remote: true, dist: null, source: 'Greenhouse', ats: 'Greenhouse', salary: '$140k–$185k', url: 'https://boards.greenhouse.io/duolingo', score: 78, status: 'interviewing', isNew: false, applied: 'Aug 5', matched: ['Python', 'SQL', 'Machine Learning', 'pandas', 'Experimentation'], missing: ['R', 'Causal Inference', 'Spark'], sponsor: { count: 63, wage: '$149k', title: 'Data Scientist', status: 'Certified', fy: 'FY2025' }, blurb: 'Work on the learning-science models that decide what every Duolingo learner sees next. You will design experiments and ship models that touch hundreds of millions of sessions.' },
+      { id: 3, company: 'Ramp', initials: 'Ra', title: 'Full-Stack Engineer', dept: 'Engineering', locations: ['New York, NY', 'Remote'], remote: true, dist: null, source: 'Ashby', ats: 'Ashby', salary: '$160k–$210k', url: 'https://jobs.ashbyhq.com/ramp', score: 84, status: 'applied', isNew: true, applied: 'Aug 15', matched: ['TypeScript', 'React', 'Node.js', 'PostgreSQL', 'GraphQL'], missing: ['Rust'], sponsor: { count: 47, wage: '$172k', title: 'Software Engineer', status: 'Certified', fy: 'FY2025' }, blurb: 'Ramp is rethinking corporate finance. As a full-stack engineer you will ship product surfaces end-to-end, from the React frontend to the services and schema behind them.' },
+      { id: 4, company: 'Notion', initials: 'No', title: 'Product Designer', dept: 'Design', locations: ['San Francisco, CA'], remote: false, dist: 5, source: 'Lever', ats: 'Lever', salary: '$155k–$195k', url: 'https://jobs.lever.co/notion', score: 47, status: 'not_applied', isNew: false, applied: null, matched: ['User Research'], missing: ['Figma', 'Interaction Design', 'Visual Design', 'Prototyping', 'Design Systems'], sponsor: null, blurb: 'Design core editing experiences used by millions of teams. This is a craft-heavy IC role spanning interaction, visual and systems design.' },
+      { id: 5, company: 'Databricks', initials: 'Db', title: 'Machine Learning Engineer', dept: 'ML', locations: ['San Francisco, CA', 'Mountain View, CA'], remote: false, dist: 6, source: 'Greenhouse', ats: 'Greenhouse', salary: '$175k–$235k', url: 'https://boards.greenhouse.io/databricks', score: 88, status: 'not_applied', isNew: true, applied: null, matched: ['Python', 'Machine Learning', 'Data Pipelines', 'AWS', 'Airflow'], missing: ['Scala', 'Spark', 'MLflow'], sponsor: { count: 189, wage: '$182k', title: 'Software Engineer', status: 'Certified', fy: 'FY2025' }, blurb: 'Build the ML infrastructure that powers the Databricks Lakehouse. You will take models from notebook to production across a massive distributed platform.' },
+      { id: 6, company: 'Figma', initials: 'Fi', title: 'Frontend Engineer', dept: 'Engineering', locations: ['San Francisco, CA'], remote: false, dist: 4, source: 'Greenhouse', ats: 'Greenhouse', salary: '$160k–$215k', url: 'https://boards.greenhouse.io/figma', score: 73, status: 'not_applied', isNew: false, applied: null, matched: ['TypeScript', 'React', 'JavaScript', 'System Design'], missing: ['WebGL', 'C++', 'Canvas rendering'], sponsor: { count: 58, wage: '$176k', title: 'Software Engineer', status: 'Certified', fy: 'FY2025' }, blurb: 'Figma runs a high-performance design editor in the browser. This role pushes the limits of what the web platform can do for real-time collaboration.' },
+      { id: 7, company: 'Instacart', initials: 'In', title: 'Data Engineer', dept: 'Data', locations: ['Remote'], remote: true, dist: null, source: 'Lever', ats: 'Lever', salary: '$145k–$190k', url: 'https://jobs.lever.co/instacart', score: 81, status: 'applied', isNew: false, applied: 'Jul 28', matched: ['Python', 'SQL', 'Data Pipelines', 'Airflow', 'AWS'], missing: ['dbt', 'Snowflake'], sponsor: { count: 92, wage: '$161k', title: 'Data Engineer', status: 'Certified', fy: 'FY2025' }, blurb: 'Own the pipelines that move billions of grocery events into a warehouse the whole company trusts. Reliability and data quality are the job.' },
+      { id: 8, company: 'Airtable', initials: 'At', title: 'Software Engineer', dept: 'Engineering', locations: ['San Francisco, CA'], remote: false, dist: 7, source: 'Greenhouse', ats: 'Greenhouse', salary: '$150k–$200k', url: 'https://boards.greenhouse.io/airtable', score: 69, status: 'rejected', isNew: false, applied: 'Jul 10', matched: ['JavaScript', 'TypeScript', 'Node.js', 'REST APIs'], missing: ['GraphQL at scale', 'Redis'], sponsor: null, blurb: 'Build the flexible database product teams use to run their work. Generalist role spanning product features and platform.' },
+      { id: 9, company: 'Stripe', initials: 'St', title: 'Infrastructure Engineer', dept: 'Engineering', locations: ['San Francisco, CA', 'Remote'], remote: true, dist: 6, source: 'Greenhouse', ats: 'Greenhouse', salary: '$170k–$225k', url: 'https://stripe.com/jobs', score: 76, status: 'not_applied', isNew: false, applied: null, matched: ['AWS', 'Docker', 'Kubernetes', 'System Design', 'CI/CD'], missing: ['Terraform', 'Go'], sponsor: { count: 301, wage: '$179k', title: 'Software Engineer', status: 'Certified', fy: 'FY2025' }, blurb: 'Keep the infrastructure behind global payments fast and reliable. You will own systems where availability is measured in nines.' },
+      { id: 10, company: 'Anthropic', initials: 'An', title: 'Product Engineer', dept: 'Engineering', locations: ['San Francisco, CA'], remote: false, dist: 3, source: 'Greenhouse', ats: 'Greenhouse', salary: '$200k–$260k', url: 'https://boards.greenhouse.io/anthropic', score: 94, status: 'interviewing', isNew: true, applied: 'Aug 8', matched: ['TypeScript', 'React', 'Python', 'System Design', 'REST APIs', 'Node.js'], missing: ['LLM tooling'], sponsor: { count: 74, wage: '$205k', title: 'Software Engineer', status: 'Certified', fy: 'FY2025' }, blurb: 'Build the product surfaces people use to work with frontier AI. This is a fast, high-ownership role at the intersection of product and applied research.' },
+      { id: 11, company: 'Plaid', initials: 'Pl', title: 'Backend Engineer', dept: 'Engineering', locations: ['San Francisco, CA'], remote: false, dist: 5, source: 'Lever', ats: 'Lever', salary: '$155k–$205k', url: 'https://jobs.lever.co/plaid', score: 80, status: 'not_applied', isNew: false, applied: null, matched: ['Python', 'PostgreSQL', 'REST APIs', 'AWS', 'Docker'], missing: ['Go', 'gRPC'], sponsor: { count: 68, wage: '$174k', title: 'Software Engineer', status: 'Certified', fy: 'FY2025' }, blurb: 'Plaid connects apps to the financial system. You will build the resilient backend services that thousands of fintechs depend on.' },
+      { id: 12, company: 'Vercel', initials: 'Ve', title: 'Developer Experience Engineer', dept: 'Engineering', locations: ['Remote'], remote: true, dist: null, source: 'Ashby', ats: 'Ashby', salary: '$150k–$195k', url: 'https://jobs.ashbyhq.com/vercel', score: 66, status: 'not_applied', isNew: false, applied: null, matched: ['TypeScript', 'Node.js', 'React', 'Git'], missing: ['Next.js internals', 'Rust'], sponsor: null, blurb: 'Make the frontend cloud a joy to build on. Split time between DX tooling, docs, and the framework itself.' },
+      { id: 13, company: 'Palantir', initials: 'Pa', title: 'Software Engineer', dept: 'Engineering', locations: ['New York, NY', 'Palo Alto, CA'], remote: false, dist: 33, source: 'Greenhouse', ats: 'Greenhouse', salary: '$160k–$215k', url: 'https://jobs.lever.co/palantir', score: 71, status: 'offer', isNew: false, applied: 'Jul 2', matched: ['Python', 'System Design', 'Data Pipelines', 'SQL'], missing: ['Java', 'Distributed Systems at scale'], sponsor: { count: 420, wage: '$176k', title: 'Software Engineer', status: 'Certified', fy: 'FY2025' }, blurb: 'Deploy software that helps large institutions make decisions with their data. Broad, deployment-focused engineering role.' },
+      { id: 14, company: 'Scale AI', initials: 'Sc', title: 'Machine Learning Engineer', dept: 'ML', locations: ['San Francisco, CA'], remote: false, dist: 8, source: 'Ashby', ats: 'Ashby', salary: '$170k–$225k', url: 'https://jobs.ashbyhq.com/scaleai', score: 85, status: 'applied', isNew: true, applied: 'Aug 14', matched: ['Python', 'Machine Learning', 'AWS', 'Data Pipelines'], missing: ['PyTorch', 'CUDA'], sponsor: { count: 55, wage: '$188k', title: 'Machine Learning Engineer', status: 'Certified', fy: 'FY2025' }, blurb: 'Build the data engine behind frontier models. You will work on pipelines and tooling that turn raw data into high-quality training sets.' },
+    ];
+  }
+
+  st(job) { return this.state.statuses[job.id] != null ? this.state.statuses[job.id] : job.status; }
+  tier(s) { return s >= 80 ? '#1f9d55' : s >= 60 ? '#d98324' : '#d64c3c'; }
+  tierBg(s) { return s >= 80 ? '#e6f4ea' : s >= 60 ? '#fbf1dd' : '#f8e9e6'; }
+
+  go = (v) => this.setState({ view: v, selectedJobId: null });
+  openJob = (id) => { this.setState({ view: 'detail', selectedJobId: id }); if (typeof window !== 'undefined') window.scrollTo(0, 0); };
+  back = () => this.setState({ view: 'jobs' });
+  setStatus = (id, val) => this.setState(s => ({ statuses: { ...s.statuses, [id]: val } }));
+  setFilter = (k, val) => this.setState(s => ({ filters: { ...s.filters, [k]: val } }));
+  clearFilters = () => this.setState({ filters: { search: '', company: 'all', location: 'all', dept: 'all', radius: 'any', minScore: 0, status: 'any' } });
+  setActiveResume = (v) => this.setState({ activeResume: v });
+
+  decorate(job) {
+    const status = this.st(job);
+    const m = this.META[status];
+    const s = job.score;
+    const color = this.tier(s);
+    const deg = Math.round(s * 3.6);
+    const pal = this.PALETTE[job.id % this.PALETTE.length];
+    const avBase = "border-radius:8px;display:grid;place-items:center;font-family:'JetBrains Mono';font-weight:700;flex:none;";
+    const short = job.remote && job.locations.length === 1 ? 'Remote' : job.locations[0];
+    return {
+      ...job, status,
+      scoreColor: color,
+      ringStyle: `width:52px;height:52px;border-radius:50%;display:grid;place-items:center;flex:none;background:conic-gradient(${color} ${deg}deg,#ece9e3 ${deg}deg)`,
+      scoreNumStyle: `font-family:'JetBrains Mono';font-weight:700;font-size:14px;color:${color}`,
+      miniRingStyle: `width:38px;height:38px;border-radius:50%;display:grid;place-items:center;flex:none;background:conic-gradient(${color} ${deg}deg,#ece9e3 ${deg}deg)`,
+      miniNumStyle: `font-family:'JetBrains Mono';font-weight:700;font-size:11px;color:${color}`,
+      ringStyleLg: `width:74px;height:74px;border-radius:50%;display:grid;place-items:center;flex:none;background:conic-gradient(${color} ${deg}deg,#ece9e3 ${deg}deg)`,
+      scoreNumStyleLg: `font-family:'JetBrains Mono';font-weight:700;font-size:20px;color:${color};line-height:1`,
+      scorePillStyle: `font-family:'JetBrains Mono';font-weight:700;font-size:12px;padding:3px 8px;border-radius:6px;background:${this.tierBg(s)};color:${color}`,
+      avatarStyle: avBase + `width:38px;height:38px;font-size:13px;background:${pal[0]};color:${pal[1]}`,
+      avatarStyleSm: avBase + `width:30px;height:30px;font-size:11px;background:${pal[0]};color:${pal[1]}`,
+      avatarStyleLg: avBase + `width:56px;height:56px;border-radius:12px;font-size:18px;background:${pal[0]};color:${pal[1]}`,
+      locationStr: job.locations.join(' · '),
+      locationShort: short,
+      matchedTop: job.matched.slice(0, 3),
+      matchedMore: Math.max(0, job.matched.length - 3),
+      hasMore: job.matched.length > 3,
+      matchedCount: job.matched.length,
+      missingCount: job.missing.length,
+      statusLabel: m.label,
+      badgeStyle: `display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;padding:3px 9px;border-radius:20px;background:${m.bg};color:${m.color}`,
+      badgeDotStyle: `width:6px;height:6px;border-radius:50%;background:${m.dot}`,
+      sponsorLabel: job.sponsor ? 'Sponsors H-1B' : 'No H-1B data',
+      sponsorStyle: `display:inline-flex;align-items:center;gap:5px;color:${job.sponsor ? '#1f8f4e' : '#a89f95'};font-size:12px` + (job.sponsor ? ";font-weight:500" : ""),
+      postedLabel: job.isNew ? 'New' : (job.remote ? 'Remote' : 'On-site'),
+      dateLabel: job.applied || '—',
+      open: () => this.openJob(job.id),
+      onStatusChange: (e) => this.setStatus(job.id, e.target.value),
+      onDragStart: (e) => { e.dataTransfer.setData('text/plain', String(job.id)); e.dataTransfer.effectAllowed = 'move'; },
+      rowSelectStyle: `padding:4px 24px 4px 10px;border:1px solid ${m.color}44;border-radius:20px;background:${m.bg};color:${m.color};font-size:11px;font-weight:600;-webkit-appearance:none;appearance:none;cursor:pointer`,
+    };
+  }
+
+  navStyle(active) {
+    return `background:${active ? '#fff' : 'transparent'};border:1px solid ${active ? '#e7e3dd' : 'transparent'};color:${active ? '#1c1a17' : '#78736c'};font-family:'JetBrains Mono';font-size:12px;font-weight:${active ? 600 : 500};letter-spacing:.3px;padding:6px 13px;border-radius:8px;cursor:pointer;box-shadow:${active ? '0 1px 2px rgba(0,0,0,.04)' : 'none'}`;
+  }
+  segStyle(active) {
+    return `background:${active ? '#e0533d' : '#fff'};color:${active ? '#fff' : '#78736c'};border:none;padding:8px 15px;font-size:12px;font-weight:600;cursor:pointer;font-family:'JetBrains Mono'`;
+  }
+
+  renderVals() {
+    const v = this.state.view;
+    const all = this.base().map(j => this.decorate(j));
+    const f = this.state.filters;
+
+    // ---- jobs filter/sort ----
+    let list = all.filter(j => {
+      if (f.company !== 'all' && j.company !== f.company) return false;
+      if (f.dept !== 'all' && j.dept !== f.dept) return false;
+      if (f.location !== 'all') { if (f.location === 'Remote') { if (!j.remote) return false; } else if (!j.locations.includes(f.location)) return false; }
+      if (f.status !== 'any' && j.status !== f.status) return false;
+      if (j.score < f.minScore) return false;
+      if (f.radius !== 'any') {
+        if (f.radius === 'remote') { if (!j.remote) return false; }
+        else { const mi = Number(f.radius); if (!j.remote && (j.dist == null || j.dist > mi)) return false; }
+      }
+      if (f.search) { const q = f.search.toLowerCase(); const hay = (j.title + ' ' + j.company + ' ' + j.matched.join(' ') + ' ' + j.missing.join(' ')).toLowerCase(); if (!hay.includes(q)) return false; }
+      return true;
+    });
+    if (this.state.sort === 'best') list.sort((a, b) => b.score - a.score);
+    else if (this.state.sort === 'az') list.sort((a, b) => a.company.localeCompare(b.company));
+    else list = list.slice().reverse();
+
+    const uniq = (arr) => Array.from(new Set(arr));
+    const companyOpts = [{ value: 'all', label: 'All companies' }].concat(uniq(all.map(j => j.company)).sort().map(c => ({ value: c, label: c })));
+    const deptOpts = [{ value: 'all', label: 'All departments' }].concat(uniq(all.map(j => j.dept)).map(d => ({ value: d, label: d })));
+    const locSet = uniq([].concat(...all.map(j => j.locations)));
+    const locOpts = [{ value: 'all', label: 'All locations' }].concat(locSet.sort().map(l => ({ value: l, label: l })));
+    const statusFilterOpts = [{ value: 'any', label: 'Any status' }].concat(this.STATUS_ORDER.map(k => ({ value: k, label: this.META[k].label })));
+    const radiusOpts = [{ value: 'any', label: 'Any distance' }, { value: '10', label: 'Within 10 mi' }, { value: '25', label: 'Within 25 mi' }, { value: '50', label: 'Within 50 mi' }, { value: 'remote', label: 'Remote only' }];
+
+    const filterSelects = [
+      { value: f.company, options: companyOpts, onChange: (e) => this.setFilter('company', e.target.value) },
+      { value: f.location, options: locOpts, onChange: (e) => this.setFilter('location', e.target.value) },
+      { value: f.radius, options: radiusOpts, onChange: (e) => this.setFilter('radius', e.target.value) },
+      { value: f.dept, options: deptOpts, onChange: (e) => this.setFilter('dept', e.target.value) },
+      { value: f.status, options: statusFilterOpts, onChange: (e) => this.setFilter('status', e.target.value) },
+    ];
+
+    // ---- detail ----
+    const selected = all.find(j => j.id === this.state.selectedJobId);
+    let detail = null;
+    if (selected) {
+      const sp = selected.sponsor;
+      detail = {
+        ...selected,
+        responsibilities: [
+          `Design, build and ship features across the ${selected.dept.toLowerCase()} stack`,
+          'Partner with cross-functional teams to scope work and make trade-offs',
+          'Own quality end to end — testing, observability and safe rollout',
+          'Raise the technical bar through reviews and mentorship',
+        ],
+        statusSelectStyle: `padding:11px 34px 11px 16px;border:1px solid #e0dcd5;border-radius:9px;background:#fff;font-size:14px;font-weight:600;color:#1c1a17;-webkit-appearance:none;appearance:none;cursor:pointer`,
+        sponsors: !!sp,
+        noSponsor: !sp,
+        sponsorTitle: sp ? 'H-1B sponsorship' : 'H-1B sponsorship',
+        sponsorCardStyle: sp
+          ? "background:#eef7f0;border:1px solid #cfe8d8;border-radius:14px;padding:18px 20px"
+          : "background:#faf9f7;border:1px solid #e7e3dd;border-radius:14px;padding:18px 20px",
+        sponsorCardDot: `width:9px;height:9px;border-radius:50%;background:${sp ? '#1f9d55' : '#b0a89d'}`,
+        lcaCount: sp ? sp.count : '', lcaWage: sp ? sp.wage : '', lcaTitle: sp ? sp.title : '', lcaStatus: sp ? sp.status : '', lcaFy: sp ? sp.fy : '',
+      };
+    }
+
+    // ---- applications ----
+    const trackerList = all.filter(j => j.status !== 'not_applied');
+    trackerList.sort((a, b) => this.STATUS_ORDER.indexOf(a.status) - this.STATUS_ORDER.indexOf(b.status));
+    const kanbanColumns = this.STATUS_ORDER.map(k => {
+      const jobs = all.filter(j => j.status === k);
+      return {
+        status: k, label: this.META[k].label, count: jobs.length, jobs, empty: jobs.length === 0,
+        dotStyle: `width:8px;height:8px;border-radius:50%;background:${this.META[k].dot}`,
+        onDragOver: (e) => e.preventDefault(),
+        onDrop: (e) => { e.preventDefault(); const id = Number(e.dataTransfer.getData('text/plain')); if (id) this.setStatus(id, k); },
+      };
+    });
+    const statusOptions = this.STATUS_ORDER.map(k => ({ value: k, label: this.META[k].label, selLabel: 'Status: ' + this.META[k].label }));
+
+    // ---- dashboard ----
+    const cnt = (k) => all.filter(j => j.status === k).length;
+    const activeApps = cnt('applied') + cnt('interviewing') + cnt('offer');
+    const statCards = [
+      { label: 'Jobs tracked', value: all.length, sub: 'across ' + uniq(all.map(j => j.company)).length + ' companies', dotStyle: 'width:8px;height:8px;border-radius:50%;background:#e0533d' },
+      { label: 'Active apps', value: activeApps, sub: 'in the pipeline', dotStyle: 'width:8px;height:8px;border-radius:50%;background:#3f7fca' },
+      { label: 'Interviewing', value: cnt('interviewing'), sub: 'in progress', dotStyle: 'width:8px;height:8px;border-radius:50%;background:#d98324' },
+      { label: 'Offers', value: cnt('offer'), sub: 'to decide on', dotStyle: 'width:8px;height:8px;border-radius:50%;background:#1f9d55' },
+    ];
+    const total = all.length;
+    const statusSegments = this.STATUS_ORDER.map(k => {
+      const c = cnt(k); const pct = (c / total) * 100;
+      return { label: this.META[k].label, count: c, barStyle: `width:${pct}%;background:${this.META[k].dot}`, dotStyle: `width:9px;height:9px;border-radius:50%;background:${this.META[k].dot}` };
+    });
+    const newMatches = all.filter(j => j.isNew).sort((a, b) => b.score - a.score);
+
+    // ---- resume ----
+    const missingKeywords = [
+      { name: 'Go', freq: '×4' }, { name: 'Kubernetes', freq: '×3' }, { name: 'Terraform', freq: '×2' }, { name: 'Spark', freq: '×3' }, { name: 'gRPC', freq: '×2' }, { name: 'dbt', freq: '×2' }, { name: 'PyTorch', freq: '×2' },
+    ];
+    const phrasingSuggestions = [
+      { before: 'Responsible for building a job scraping pipeline.', after: 'Built a Scrapy + Postgres pipeline ingesting 10k+ postings/day with 99.9% dedup accuracy.' },
+      { before: 'Worked on machine learning matching features.', after: 'Shipped a pgvector semantic-match ranker cutting irrelevant results by 38%.' },
+      { before: 'Helped with database performance.', after: 'Cut P95 query latency 4× by adding composite indexes and query batching.' },
+    ];
+    const formattingNotes = [
+      { icon: '✓', title: 'Skills section is well-structured', detail: 'Grouped by category and easy to parse — keep it near the top.', iconStyle: "width:22px;height:22px;border-radius:6px;background:#e6f4ea;color:#1f9d55;display:grid;place-items:center;font-size:12px;flex:none" },
+      { icon: '!', title: 'Two-page length may hurt scanning', detail: 'Recruiters spend ~7s on first pass. Trim to one page by cutting pre-2022 roles.', iconStyle: "width:22px;height:22px;border-radius:6px;background:#fbf1dd;color:#b07817;display:grid;place-items:center;font-size:12px;flex:none" },
+      { icon: '!', title: 'Add quantified impact to 3 bullets', detail: 'Bullets under your last role describe tasks, not outcomes. Add a metric to each.', iconStyle: "width:22px;height:22px;border-radius:6px;background:#fbf1dd;color:#b07817;display:grid;place-items:center;font-size:12px;flex:none" },
+    ];
+    const rvBase = [
+      { version: 3, date: 'Aug 18, 2026', file: 'niramay_resume_v3.pdf', note: 'Added Scrapy + pgvector projects and quantified results.' },
+      { version: 2, date: 'Jul 2, 2026', file: 'niramay_resume_v2.pdf', note: 'Reordered skills; added distributed-systems coursework.' },
+      { version: 1, date: 'May 20, 2026', file: 'niramay_resume_v1.pdf', note: 'Initial upload.' },
+    ];
+    const resumeVersions = rvBase.map(rv => {
+      const active = rv.version === this.state.activeResume;
+      return { ...rv, active, inactive: !active, setActive: () => this.setActiveResume(rv.version), cardStyle: `border:1px solid ${active ? '#cfe8d8' : '#eee7df'};background:${active ? '#f4faf6' : '#fff'};border-radius:10px;padding:13px 14px` };
+    });
+
+    const navKeys = [['dashboard', 'Dashboard'], ['jobs', 'Jobs'], ['applications', 'Applications'], ['resume', 'Resume']];
+    const navItems = navKeys.map(([k, label]) => ({ label, go: () => this.go(k), style: this.navStyle(v === k || (k === 'jobs' && v === 'detail')) }));
+
+    return {
+      navItems, homeBase: this.HOME, activeResumeLabel: 'resume v' + this.state.activeResume,
+      goHome: () => this.go('dashboard'), goResume: () => this.go('resume'), goApplications: () => this.go('applications'),
+      isDashboard: v === 'dashboard', isJobs: v === 'jobs', isDetail: v === 'detail', isApplications: v === 'applications', isResume: v === 'resume',
+      // dashboard
+      todayLabel: 'Saturday, Aug 23', statCards, statusSegments, newMatches, newCount: newMatches.length,
+      // jobs
+      jobs: list, resultCount: list.length, totalCount: all.length, isEmpty: list.length === 0,
+      filters: { search: f.search, minScore: f.minScore, sort: this.state.sort }, minScoreLabel: f.minScore + '%',
+      onSearch: (e) => this.setFilter('search', e.target.value), onMinScore: (e) => this.setFilter('minScore', Number(e.target.value)),
+      onSort: (e) => this.setState({ sort: e.target.value }), clearFilters: this.clearFilters,
+      filterSelects,
+      isCards: this.state.jobListMode === 'cards', isTable: this.state.jobListMode === 'table',
+      setCards: () => this.setState({ jobListMode: 'cards' }), setTable: () => this.setState({ jobListMode: 'table' }),
+      cardsBtnStyle: this.segStyle(this.state.jobListMode === 'cards'), tableBtnStyle: this.segStyle(this.state.jobListMode === 'table'),
+      // detail
+      detail, back: this.back, statusOptions,
+      // applications
+      isKanban: this.state.trackerMode === 'kanban', isList: this.state.trackerMode === 'list',
+      setKanban: () => this.setState({ trackerMode: 'kanban' }), setList: () => this.setState({ trackerMode: 'list' }),
+      kanbanBtnStyle: this.segStyle(this.state.trackerMode === 'kanban'), listBtnStyle: this.segStyle(this.state.trackerMode === 'list'),
+      kanbanColumns, trackerList,
+      // resume
+      missingKeywords, phrasingSuggestions, formattingNotes, resumeVersions,
+      reviewCount: missingKeywords.length + phrasingSuggestions.length + formattingNotes.length,
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -70,7 +70,9 @@ nothing scrapes them; treat that as planned, not present.
   `CORS_ALLOWED_ORIGINS`. Don't add auth/further endpoints unprompted —
   see SESSIONS.md for what's still explicitly deferred.
 - **Next.js frontend, `frontend/` (App Router, TypeScript, Tailwind,
-  TanStack Query), added 2026-08-22, real job-list UI added 2026-08-23.**
+  TanStack Query), added 2026-08-22, real job-list UI added 2026-08-23,
+  reskinned + extended with a job detail page and an applications tracker
+  2026-08-23 (see below and SESSIONS.md).**
   `frontend/src/types/api.ts` hand-mirrors the backend's Pydantic
   schemas (no shared codegen — kept manually in sync, a known gap);
   `frontend/src/lib/api.ts` is a real fetch client (`getHealth`/
@@ -80,19 +82,17 @@ nothing scrapes them; treat that as planned, not present.
   there's an actual reason Docker helps (see SESSIONS.md). Run via `cd
   frontend && npm install && npm run dev`, needs the API already
   running (`NEXT_PUBLIC_API_URL`, defaults to `http://localhost:8000`).
-  **The job list (`frontend/src/components/`: `JobCard`, `ScoreIndicator`,
-  `SkillChips`, `StatusBadge`, `JobFilters`, `Pagination`) is real, wired
-  to `GET /jobs`'s real `company`/`min_score`/`sort`/`limit`/`offset`
-  params — application status is read-only (`StatusBadge`); the PATCH
-  interaction is Step 5, not built yet.** `ScoreIndicator`'s color
-  gradient is calibrated to this app's real observed score range
-  (green pinned at 0.6, not 1.0 — see SESSIONS.md's Step 3 histogram) —
-  don't "fix" this back to a naive 0-1 scale, it would make nearly every
-  real job render the same dull color. `JobSummary`/`JobDetail` now
-  also carry `locations: list[str]` (added alongside this UI work,
-  since the card needed it and the API never exposed
-  `job_postings.locations` before — populated via the existing
-  `JobPosting.locations` relationship, no migration needed).
+  Note: this dev machine's `.venv` console-script shebangs went stale
+  after the `JobSight`→`HuntLoop` rename — run the API via
+  `PYTHONPATH=src .venv/bin/python -m uvicorn huntloop.api.main:app`,
+  not the `uvicorn` script directly, until the venv is recreated.
+  `ScoreIndicator`'s color gradient is calibrated to this app's real
+  observed score range (green pinned at 0.6, not 1.0 — see SESSIONS.md's
+  Step 3 histogram) — don't "fix" this back to a naive 0-1 scale, it
+  would make nearly every real job render the same dull color.
+  `JobSummary`/`JobDetail` also carry `locations: list[str]` (populated
+  via the existing `JobPosting.locations` relationship, no migration
+  needed).
 - Entrypoint: `python main.py` runs the multi-ATS orchestrator end-to-end
   — queries `companies.ats_platform`, groups by platform, and runs
   `GreenhouseScraper`/`LeverScraper` once each with all tokens for that
@@ -668,11 +668,32 @@ entry — an interactive `StatusControl` on each job card wired to the real
 `PATCH` endpoint via a TanStack Query mutation with optimistic updates,
 rollback-on-failure, and toast feedback, fully verified against the real
 running system (see SESSIONS.md's 2026-08-23 "Interactive status updates
-on job cards" entry for the exact screenshots/psql evidence). This is the
-current state of the project — treat everything above this note (Phase 0
-repo hygiene through the ATS-detection standalone function) as historical
-foundation, not the latest picture. Prometheus/Grafana observability and
-local cron scheduling are also in place, layered on the scraper. Not yet
-started: a job detail-page view, resume-upload UI, any UI surface for
-`get_sponsorship_summary()`, Ashby/Workday spiders, and everything else
-already listed as deferred above — those deferrals still stand.
+on job cards" entry for the exact screenshots/psql evidence). Prometheus/
+Grafana observability and local cron scheduling are also in place,
+layered on the scraper.
+
+**The frontend was reskinned 2026-08-23 (see SESSIONS.md's "Frontend
+reskin against the Claude Design mockup" entry) against
+`design/HuntLoop.dc.html`** — a Claude Design mockup in x-dc/sc-for/sc-if
+runtime format; read it as the visual/layout spec (colors ported into
+`frontend/src/lib/theme.ts`, typography via `next/font/google`'s
+JetBrains Mono, Tailwind theme tokens in `globals.css`), not as literal
+code. **Two screens that didn't exist before this reskin were built as
+part of it**, reusing only the existing three API endpoints: a job detail
+page (`frontend/src/app/jobs/[id]/`, matched skills shown first in green,
+missing second in dashed muted styling) and an applications tracker
+(`frontend/src/app/applications/`, kanban board with native HTML5
+drag-and-drop + a list view, both driving the same `PATCH` mutation now
+shared via `frontend/src/hooks/useApplicationStatus.ts` instead of living
+only in `StatusControl`). The job list gained a cards/table view toggle.
+Per-job H-1B sponsor status, ATS platform, and salary estimate are shown
+in the mockup but not exposed by the real API — deliberately left off
+rather than fabricated; closing that gap needs new backend work, not
+scheduled. Dashboard, Resume Management, and AI resume-review screens,
+plus location-radius/department filters, remain explicitly out of scope
+per that task's own instructions. This reskin is now the current state of
+the frontend — treat everything above this note (Phase 0 repo hygiene
+through the ATS-detection standalone function) as historical foundation,
+not the latest picture. Not yet started: resume-upload UI, any UI surface
+for `get_sponsorship_summary()`, Ashby/Workday spiders, and everything
+else already listed as deferred above — those deferrals still stand.

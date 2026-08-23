@@ -6,7 +6,9 @@ import { useState } from "react";
 import { getJobs } from "@/lib/api";
 import { JobCard } from "@/components/JobCard";
 import { JobFilters, type JobFiltersValue } from "@/components/JobFilters";
+import { JobTable } from "@/components/JobTable";
 import { Pagination } from "@/components/Pagination";
+import { SegmentedToggle } from "@/components/SegmentedToggle";
 
 const PAGE_SIZE = 12;
 
@@ -17,6 +19,7 @@ export default function Home() {
     sort: "-score",
   });
   const [offset, setOffset] = useState(0);
+  const [viewMode, setViewMode] = useState<"cards" | "table">("cards");
 
   const parsedMinScore = filters.minScore === "" ? undefined : Number(filters.minScore);
 
@@ -39,46 +42,64 @@ export default function Home() {
   }
 
   return (
-    <main className="mx-auto flex w-full max-w-4xl flex-1 flex-col gap-6 p-6 sm:p-8">
-      <header>
-        <h1 className="text-2xl font-bold text-neutral-900 dark:text-neutral-50">HuntLoop</h1>
-        <p className="text-sm text-neutral-500 dark:text-neutral-400">
-          Scraped job postings, ranked against your active resume.
-        </p>
-      </header>
+    <main className="flex flex-1 flex-col gap-4">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight text-text">Jobs</h1>
+          <p className="mt-0.5 text-[13px] text-text-subtle">
+            {jobs.isSuccess ? (
+              <>
+                <span className="font-mono font-semibold text-text">{jobs.data.total}</span> postings · scored
+                against your active resume
+              </>
+            ) : (
+              "Scored against your active resume"
+            )}
+          </p>
+        </div>
+        <SegmentedToggle
+          value={viewMode}
+          onChange={setViewMode}
+          options={[
+            { value: "cards", label: "Cards" },
+            { value: "table", label: "Table" },
+          ]}
+        />
+      </div>
 
       <JobFilters value={filters} onChange={handleFiltersChange} />
 
       {jobs.isPending && (
-        <div className="flex flex-col gap-3">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div
-              key={i}
-              className="h-32 animate-pulse rounded-xl border border-neutral-200 bg-neutral-100 dark:border-neutral-800 dark:bg-neutral-900"
-            />
+        <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <div key={i} className="h-40 animate-pulse rounded-xl border border-border bg-surface-alt" />
           ))}
         </div>
       )}
 
       {jobs.isError && (
-        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
           Failed to load jobs: {jobs.error.message}
         </div>
       )}
 
       {jobs.isSuccess && jobs.data.items.length === 0 && (
-        <div className="rounded-xl border border-dashed border-neutral-300 p-10 text-center text-sm text-neutral-500 dark:border-neutral-700 dark:text-neutral-400">
+        <div className="rounded-xl border border-dashed border-border-strong p-10 text-center text-sm text-text-faintest">
           No jobs match these filters. Try lowering the minimum score or clearing the company filter.
         </div>
       )}
 
       {jobs.isSuccess && jobs.data.items.length > 0 && (
         <>
-          <div className="flex flex-col gap-3">
-            {jobs.data.items.map((job) => (
-              <JobCard key={job.id} job={job} />
-            ))}
-          </div>
+          {viewMode === "cards" ? (
+            <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
+              {jobs.data.items.map((job) => (
+                <JobCard key={job.id} job={job} />
+              ))}
+            </div>
+          ) : (
+            <JobTable jobs={jobs.data.items} />
+          )}
           <Pagination total={jobs.data.total} limit={jobs.data.limit} offset={jobs.data.offset} onOffsetChange={setOffset} />
         </>
       )}
