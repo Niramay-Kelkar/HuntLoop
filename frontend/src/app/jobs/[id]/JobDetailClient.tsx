@@ -6,7 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { getJob } from "@/lib/api";
 import { ScoreIndicator } from "@/components/ScoreIndicator";
 import { StatusControl } from "@/components/StatusControl";
-import { avatarColors, formatDate, initials, stripHtml } from "@/lib/theme";
+import { avatarColors, formatDate, formatWage, initials, stripHtml } from "@/lib/theme";
 
 export function JobDetailClient({ jobId }: { jobId: number }) {
   const job = useQuery({
@@ -37,6 +37,7 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
   const matched = detail.matched_skills ?? [];
   const missing = detail.missing_skills ?? [];
   const description = detail.job_description ? stripHtml(detail.job_description) : null;
+  const sponsor = detail.sponsor;
 
   return (
     <div className="flex flex-col gap-4">
@@ -163,7 +164,77 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
                 <span className="text-text-subtle">Department</span>
                 <span className="font-medium text-text">{detail.department ?? "—"}</span>
               </div>
+              <div className="flex justify-between">
+                <span className="text-text-subtle">Salary est.</span>
+                <span className="font-mono font-semibold text-text">
+                  {detail.salary_estimate ? formatWage(detail.salary_estimate.amount) : "—"}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-text-subtle">ATS</span>
+                <span className="font-mono text-xs text-text">{detail.ats_platform ?? "—"}</span>
+              </div>
             </div>
+            {detail.salary_estimate && (
+              <p className="mt-3 border-t border-divider pt-3 text-[11px] leading-relaxed text-text-faintest">
+                {detail.salary_estimate.basis}
+              </p>
+            )}
+          </div>
+
+          <div
+            className="rounded-2xl border p-5"
+            style={
+              sponsor
+                ? { backgroundColor: "#eef7f0", borderColor: "#cfe8d8" }
+                : { backgroundColor: "#faf9f7", borderColor: "#e7e3dd" }
+            }
+          >
+            <div className="mb-3 flex items-center gap-2">
+              <span
+                className="h-[9px] w-[9px] rounded-full"
+                style={{ backgroundColor: sponsor ? "#1f9d55" : "#b0a89d" }}
+              />
+              <h3 className="text-sm font-semibold text-text">H-1B sponsorship</h3>
+            </div>
+            {sponsor ? (
+              <>
+                <div className="flex flex-col gap-2.5 text-[13px]">
+                  <div className="flex justify-between">
+                    <span style={{ color: "#5a7a63" }}>LCAs filed ({sponsor.most_recent_fiscal_year})</span>
+                    <span className="font-mono font-bold text-text">
+                      {sponsor.total_lcas_most_recent_fiscal_year}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span style={{ color: "#5a7a63" }}>Median wage</span>
+                    <span className="font-mono font-semibold text-text">
+                      {sponsor.median_wage !== null ? formatWage(sponsor.median_wage) : "—"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between gap-3">
+                    <span style={{ color: "#5a7a63" }}>Top title</span>
+                    <span className="text-right font-medium text-text">
+                      {sponsor.most_frequent_job_title ?? "—"}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span style={{ color: "#5a7a63" }}>Latest status</span>
+                    <span className="font-mono text-xs" style={{ color: "#1f8f4e" }}>
+                      {sponsor.latest_case_status ?? "—"}
+                    </span>
+                  </div>
+                </div>
+                <p className="mt-3 font-mono text-[11px] leading-relaxed" style={{ color: "#7a9284" }}>
+                  Source: DOL LCA disclosure data.
+                </p>
+              </>
+            ) : (
+              <p className="text-[13px] leading-relaxed text-text-subtle">
+                No H-1B LCA disclosures found for this employer in recent DOL data. Sponsorship isn't
+                guaranteed either way — confirm with the recruiter.
+              </p>
+            )}
           </div>
         </div>
       </div>

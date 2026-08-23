@@ -30,7 +30,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from huntloop.api.routers import health, jobs
+from huntloop.api.routers import dashboard, health, jobs
 
 app = FastAPI(title="HuntLoop API")
 
@@ -46,3 +46,4 @@ app.add_middleware(
 
 app.include_router(health.router)
 app.include_router(jobs.router)
+app.include_router(dashboard.router)

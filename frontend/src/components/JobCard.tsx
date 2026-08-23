@@ -34,9 +34,20 @@ export function JobCard({ job }: { job: JobSummary }) {
         <SkillChipsPreview matchedSkills={job.matched_skills} />
       </div>
 
-      <p className="pointer-events-none relative z-[1] text-xs text-text-subtle">
-        {job.locations.length > 0 ? job.locations.join(" · ") : "Location not listed"}
-      </p>
+      <div className="pointer-events-none relative z-[1] flex items-center gap-2 text-xs text-text-subtle">
+        <span>{job.locations.length > 0 ? job.locations.join(" · ") : "Location not listed"}</span>
+        <span className="text-divider">·</span>
+        <span
+          className="inline-flex items-center gap-1"
+          style={{ color: job.has_sponsor_history ? "#1f8f4e" : "#a89f95" }}
+        >
+          <span
+            className="h-1.5 w-1.5 rounded-full"
+            style={{ backgroundColor: job.has_sponsor_history ? "#1f9d55" : "#c9c2b8" }}
+          />
+          {job.has_sponsor_history ? "Sponsors H-1B" : "No H-1B data"}
+        </span>
+      </div>
 
       <div className="relative z-[1] flex items-center justify-between border-t border-divider pt-2.5">
         <StatusControl jobId={job.id} status={job.application_status} size="sm" />

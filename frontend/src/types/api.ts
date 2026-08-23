@@ -29,10 +29,28 @@ export interface JobSummary {
   missing_skills: string[] | null;
   locations: string[];
   application_status: ApplicationStatus;
+  has_sponsor_history: boolean;
+}
+
+export interface SponsorSummary {
+  matched_employer_name: string;
+  most_recent_fiscal_year: number;
+  total_lcas_most_recent_fiscal_year: number;
+  median_wage: number | null;
+  most_frequent_job_title: string | null;
+  latest_case_status: string | null;
+}
+
+export interface SalaryEstimate {
+  amount: number;
+  basis: string;
 }
 
 export interface JobDetail extends JobSummary {
   job_description: string | null;
+  ats_platform: string | null;
+  sponsor: SponsorSummary | null;
+  salary_estimate: SalaryEstimate | null;
 }
 
 export interface JobListResponse {
@@ -53,4 +71,19 @@ export interface ApplicationStatusResponse {
   applied_at: string | null;
   status_updated_at: string;
   notes: string | null;
+}
+
+export interface ApplicationStatusCounts {
+  not_applied: number;
+  applied: number;
+  interviewing: number;
+  rejected: number;
+  offer: number;
+}
+
+export interface DashboardStats {
+  total_jobs: number;
+  total_companies: number;
+  applications_by_status: ApplicationStatusCounts;
+  new_jobs_last_7_days: number;
 }

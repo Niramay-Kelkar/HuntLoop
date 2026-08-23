@@ -26,6 +26,7 @@ export function JobTable({ jobs }: { jobs: JobSummary[] }) {
               <Th className="w-[70px]">Match</Th>
               <Th>Role</Th>
               <Th>Location</Th>
+              <Th>Sponsor</Th>
               <Th>Status</Th>
             </tr>
           </thead>
@@ -53,6 +54,18 @@ export function JobTable({ jobs }: { jobs: JobSummary[] }) {
                   </td>
                   <td className="px-2 py-2.5 text-[13px] text-text-muted">
                     {job.locations.length > 0 ? job.locations.join(" · ") : "—"}
+                  </td>
+                  <td className="px-2 py-2.5 text-xs">
+                    <span
+                      className="inline-flex items-center gap-1"
+                      style={{ color: job.has_sponsor_history ? "#1f8f4e" : "#a89f95" }}
+                    >
+                      <span
+                        className="h-1.5 w-1.5 rounded-full"
+                        style={{ backgroundColor: job.has_sponsor_history ? "#1f9d55" : "#c9c2b8" }}
+                      />
+                      {job.has_sponsor_history ? "Sponsors H-1B" : "No H-1B data"}
+                    </span>
                   </td>
                   <td className="px-4 py-2.5">
                     <StatusControl jobId={job.id} status={job.application_status} size="sm" />

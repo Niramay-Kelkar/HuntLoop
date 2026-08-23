@@ -36,7 +36,7 @@ nothing scrapes them; treat that as planned, not present.
 - Tests: pytest, config at repo root (`pytest.ini`), tests live in `tests/`.
 - **FastAPI backend service, `src/huntloop/api/`, added 2026-08-22 — has
   real endpoints now: `GET /health`, `GET /jobs`, `GET /jobs/{id}`,
-  `PATCH /jobs/{id}/application`.** Runs as its own `api` service in
+  `PATCH /jobs/{id}/application`, `GET /dashboard/stats`.** Runs as its own `api` service in
   `docker-compose.yml` (own container, port 8000 — deliberately not
   merged into `app`, a separate concern). **`api`'s `DATABASE_URL`
   points at `host.docker.internal:5432` — the real local system
@@ -69,6 +69,24 @@ nothing scrapes them; treat that as planned, not present.
   `http://localhost:3000`/`127.0.0.1:3000` by default, override via
   `CORS_ALLOWED_ORIGINS`. Don't add auth/further endpoints unprompted —
   see SESSIONS.md for what's still explicitly deferred.
+  **`GET /dashboard/stats` (`huntloop.api.routers.dashboard`, added
+  2026-08-23, API only — no frontend page consumes it yet) returns
+  `total_jobs`/`total_companies`/`applications_by_status`/
+  `new_jobs_last_7_days` via a real `DashboardStats` Pydantic schema
+  (`huntloop.api.schemas.dashboard`), not a raw dict.**
+  `applications_by_status` reuses the exact same
+  `COALESCE(job_applications.status, 'not_applied')` pattern
+  `huntloop.api.routers.jobs` already uses for a single job's
+  `application_status` — grouped from `job_postings` with an outer join
+  to `job_applications`, not a bare `GROUP BY status` on
+  `job_applications` alone, so a job with no application row still counts
+  as `not_applied` and the five counts always sum to `total_jobs`.
+  Verified end-to-end against the real running system: every field
+  cross-checked exactly against raw `psql` queries (not the app's own
+  code path) — see SESSIONS.md for the real numbers
+  (`total_jobs=605`, `total_companies=9`, all 605 `not_applied`,
+  `new_jobs_last_7_days=605` since every real `job_postings` row was
+  scraped within the last 7 days as of this entry).
 - **Next.js frontend, `frontend/` (App Router, TypeScript, Tailwind,
   TanStack Query), added 2026-08-22, real job-list UI added 2026-08-23,
   reskinned + extended with a job detail page and an applications tracker
@@ -76,7 +94,19 @@ nothing scrapes them; treat that as planned, not present.
   `frontend/src/types/api.ts` hand-mirrors the backend's Pydantic
   schemas (no shared codegen — kept manually in sync, a known gap);
   `frontend/src/lib/api.ts` is a real fetch client (`getHealth`/
-  `getJobs`/`getJob`/`updateApplicationStatus`), nothing mocked.
+  `getJobs`/`getJob`/`updateApplicationStatus`/`getDashboardStats`),
+  nothing mocked.
+  **Routing, as of the 2026-08-23 dashboard step (see SESSIONS.md's
+  "Real dashboard page" entry): `/` redirects to `/dashboard` (the
+  mockup's home view); the job list itself lives at `/jobs`
+  (`frontend/src/app/jobs/page.tsx`), not `/`.** The top nav
+  (`frontend/src/components/NavBar.tsx`, a client component split out of
+  `layout.tsx` for `usePathname()`-based active-tab highlighting) lists
+  Dashboard/Jobs/Applications. Before this step, `layout.tsx`'s "Jobs"
+  link and the job detail page's "← Back to jobs" link both pointed at
+  `/jobs`, which didn't exist yet (the job list was mounted at `/`) —
+  both silently 404'd; fixed as part of adding the dashboard, not a
+  separate cleanup.
   **Deliberately NOT containerized** — `npm run dev`'s hot reload beats
   a Docker rebuild loop with no compensating benefit yet; revisit once
   there's an actual reason Docker helps (see SESSIONS.md). Run via `cd
@@ -407,7 +437,25 @@ nothing scrapes them; treat that as planned, not present.
   existing join — no per-row aggregate query, for performance). The
   frontend was NOT touched in this step — wiring this real data into the
   job detail page's sponsor sidebar (currently omitted, per the reskin
-  step's known display gap) is the deliberately deferred next step.
+  step's known display gap) was the deliberately deferred next step.
+  **That gap is now closed, 2026-08-23 (see SESSIONS.md's "Wire real
+  sponsor summary/ATS/salary into the frontend" entry) — frontend-only,
+  no backend/API code touched.** `frontend/src/types/api.ts`/`lib/theme.ts`
+  gained the matching types (`SponsorSummary`/`SalaryEstimate`,
+  `has_sponsor_history`) and a `formatWage()` helper.
+  `JobDetailClient.tsx`'s sidebar gained `Salary est.`/`ATS` rows (with
+  the mandatory disclaimer shown directly under them, not summarized) and
+  a second "H-1B sponsorship" card ported 1:1 from the mockup's
+  `sponsorCardStyle`/`sponsors`/`noSponsor` branches, including its exact
+  fallback copy. `JobCard.tsx`/`JobTable.tsx` both gained the mockup's
+  inline sponsor indicator next to location. Verified against the real
+  running system for every real scraped company
+  (checkr/duolingo/figma/palantir/wealthfront, all resolved sponsor
+  matches) — the `sponsor === null` fallback render path itself was
+  verified via a deliberate in-browser fetch-response override (no real
+  company currently lacks a match, since Ashby/Workday spiders are
+  unbuilt and kraken has 0 scraped postings), not against real
+  unmatched-company data. `pytest` unaffected (58/58, unchanged).
 - **`normalize_employer_name()` (`src/huntloop/matching/normalize.py`) is
   mechanical normalization only** — uppercase, strip periods/commas,
   collapse whitespace, drop a trailing legal-entity suffix
@@ -742,14 +790,21 @@ missing second in dashed muted styling) and an applications tracker
 drag-and-drop + a list view, both driving the same `PATCH` mutation now
 shared via `frontend/src/hooks/useApplicationStatus.ts` instead of living
 only in `StatusControl`). The job list gained a cards/table view toggle.
-Per-job H-1B sponsor status, ATS platform, and salary estimate are shown
-in the mockup but not exposed by the real API — deliberately left off
-rather than fabricated; closing that gap needs new backend work, not
-scheduled. Dashboard, Resume Management, and AI resume-review screens,
-plus location-radius/department filters, remain explicitly out of scope
-per that task's own instructions. This reskin is now the current state of
-the frontend — treat everything above this note (Phase 0 repo hygiene
-through the ATS-detection standalone function) as historical foundation,
-not the latest picture. Not yet started: resume-upload UI, any UI surface
-for `get_sponsorship_summary()`, Ashby/Workday spiders, and everything
-else already listed as deferred above — those deferrals still stand.
+Per-job H-1B sponsor status, ATS platform, and salary estimate were shown
+in the mockup but not exposed by the real API at reskin time — since
+closed (2026-08-23, see the sponsor-summary entries above and
+SESSIONS.md): the API now returns all three and the job detail
+page/sponsor sidebar/list-view sponsor indicator all consume them for
+real. Resume Management and AI resume-review screens, plus
+location-radius/department filters, remain explicitly out of scope per
+that task's own instructions. **Dashboard is also no longer out of
+scope** — `frontend/src/app/dashboard/page.tsx` (added 2026-08-23, see
+SESSIONS.md's "Real dashboard page" entry) is real, wired to
+`GET /dashboard/stats`, and is the app's home view (`/` redirects there
+— see the routing note above). This reskin (plus the sponsor-data and
+dashboard follow-ups) is now the current state of the frontend — treat
+everything above this note (Phase 0 repo hygiene through the
+ATS-detection standalone function) as historical foundation, not the
+latest picture. Not yet started: resume-upload UI, Ashby/Workday
+spiders, and everything else already listed as deferred above — those
+deferrals still stand.

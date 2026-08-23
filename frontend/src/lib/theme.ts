@@ -76,6 +76,12 @@ export function formatDate(dateString: string | null): string | null {
   });
 }
 
+/** Whole-dollar wage/salary amounts as compact "$168k" strings, matching
+ * design/HuntLoop.dc.html's mock sponsor/salary figures. */
+export function formatWage(amount: number): string {
+  return `$${Math.round(amount / 1000)}k`;
+}
+
 /** Scraped job descriptions may contain raw or entity-escaped HTML (see
  * CLAUDE.md's text_cleaning note) - strip tags for safe plain-text display
  * rather than rendering untrusted external HTML. */

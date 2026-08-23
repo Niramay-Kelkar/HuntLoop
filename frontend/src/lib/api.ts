@@ -13,6 +13,7 @@
 import type {
   ApplicationStatusResponse,
   ApplicationStatusUpdate,
+  DashboardStats,
   HealthResponse,
   JobDetail,
   JobListResponse,
@@ -58,6 +59,10 @@ export function getJobs(params: ListJobsParams = {}): Promise<JobListResponse> {
 
 export function getJob(id: number): Promise<JobDetail> {
   return apiFetch<JobDetail>(`/jobs/${id}`);
+}
+
+export function getDashboardStats(): Promise<DashboardStats> {
+  return apiFetch<DashboardStats>("/dashboard/stats");
 }
 
 export function updateApplicationStatus(

@@ -3359,3 +3359,243 @@ Postgres, nothing mocked):**
 **Next:** Wiring this into the frontend (the sponsor sidebar on the job
 detail page, using this now-real data instead of the omitted fields from
 the reskin step) is the explicitly deferred next step.
+
+## 2026-08-23 — Wire real sponsor summary/ATS/salary into the frontend (closes Step 9's deferral)
+
+Frontend-only step, no backend/API code touched - wires Step 9's real
+`GET /jobs/{id}` fields (`ats_platform`, `sponsor`, `salary_estimate`)
+and `GET /jobs` list items' `has_sponsor_history` into the UI the reskin
+step deliberately left as a display gap (see the reskin entry above).
+
+`frontend/src/types/api.ts` gained `SponsorSummary`/`SalaryEstimate`
+interfaces (hand-mirroring `huntloop.api.schemas.jobs`, same manual-sync
+convention as everything else in this file) and `has_sponsor_history` on
+`JobSummary` plus `ats_platform`/`sponsor`/`salary_estimate` on
+`JobDetail`. `frontend/src/lib/api.ts` needed no changes - it's a
+type-only pass-through of the JSON response. `frontend/src/lib/theme.ts`
+gained one small helper, `formatWage()` (whole-dollar amount → compact
+`"$168k"` string, matching `design/HuntLoop.dc.html`'s mock sponsor/
+salary figures).
+
+`frontend/src/app/jobs/[id]/JobDetailClient.tsx`'s Company sidebar card
+gained two rows (`Salary est.`, `ATS`, both `"—"` when null) plus a
+disclaimer line under the card whenever `salary_estimate` is present -
+the mockup's `basis` string is shown directly, not summarized, so it
+can't be mistaken for a real posted salary. A second sidebar card,
+"H-1B sponsorship" (ported 1:1 from the mockup's `detail.sponsorCardStyle`/
+`sponsors`/`noSponsor` branches - green-tinted card with LCAs filed
+(by fiscal year)/median wage/top title/latest status plus a "Source: DOL
+LCA disclosure data" line when `sponsor` is non-null, a muted card with
+the mockup's exact fallback copy ("No H-1B LCA disclosures found for
+this employer in recent DOL data. Sponsorship isn't guaranteed either
+way — confirm with the recruiter.") when it's `null`. `JobCard.tsx` and
+`JobTable.tsx` (the cards/table list views) both gained the mockup's
+inline sponsor indicator next to location - a colored dot plus "Sponsors
+H-1B"/"No H-1B data" label, `JobTable.tsx` as a new "Sponsor" column
+between Location and Status matching the mockup's table header order.
+`KanbanBoard.tsx`/`ApplicationsList.tsx` (the applications tracker) were
+deliberately left untouched - the task scoped this to the job list and
+detail page only, and the mockup's own tracker screens don't show a
+sponsor indicator either.
+
+**Verified against the real running system (real API on :8000 against
+local system Postgres, real Next.js dev server, nothing mocked except
+one deliberate in-browser fetch-response override for (b)):**
+
+- **(a)** Screenshot of `/jobs/1064` (a real Palantir job, resolved
+  sponsor match) - sidebar shows `LCAs filed (2025): 113`, `Median wage:
+  $150k`, `Top title: Software Engineer`, `Latest status: Certified`,
+  matching `GET /jobs/1064`'s real response exactly.
+- **(b)** The real system has no job posting today for a company with an
+  *unresolved* sponsor match - all 5 companies with actual scraped
+  `job_postings` rows (checkr/duolingo/figma/palantir/wealthfront) matched
+  successfully in Step 8; the 4 that didn't (adobe/brex/ramp/kraken) have
+  zero scraped postings to link to (Ashby/Workday spiders unbuilt, and
+  kraken's real Lever board has 0 open postings - see CLAUDE.md). To
+  verify the fallback render path against something real rather than
+  guessing, patched `window.fetch` in the live browser tab (via
+  `javascript_tool`, no backend/DB touched) to force job 1064's *real*
+  API response's `sponsor`/`salary_estimate`/`ats_platform` to `null` and
+  `has_sponsor_history` to `false` before a client-side navigation to
+  that same route, then screenshotted the result: the sponsor card
+  correctly switches to the muted style with the exact mockup fallback
+  copy, and `Salary est.`/`ATS` both correctly render `"—"`. This is a
+  request-level UI test, not a data-integrity claim - it confirms the
+  `sponsor === null` branch renders correctly, not that any real company
+  is currently unmatched.
+- **(c)** Zoomed screenshot of the Company sidebar card confirms
+  "Estimated from DOL wage filings for this employer, not job-specific"
+  renders as fully legible standalone text under the Salary est. row, not
+  clipped, truncated, or hidden behind a tooltip/hover state.
+- **(d)** Screenshots of both the Cards and Table job-list views (`/`,
+  real data, 605 real postings) show the sponsor indicator rendering
+  correctly for every real company with scraped postings
+  (palantir/checkr/duolingo/figma/wealthfront all showed "Sponsors H-1B"
+  in the visible rows, consistent with (b)'s finding that no scraped
+  company currently lacks a match).
+- **(e)** `pytest`: 58/58 passing, unchanged from Step 9's count - this
+  step touched no backend files.
+- **(f)** This entry plus this note in CLAUDE.md.
+
+Not touched, per the task's explicit scope: any backend/API code, the
+applications tracker screens, and the still-deferred items already
+listed in CLAUDE.md (resume-upload UI, Ashby/Workday spiders, etc.).
+
+## 2026-08-23 — GET /dashboard/stats aggregate-stats endpoint (API only)
+
+New endpoint, `huntloop.api.routers.dashboard`, added alongside the
+existing `health`/`jobs` routers (registered in `huntloop.api.main`, same
+pattern). Returns four things: `total_jobs` (`COUNT(*)` on
+`job_postings`), `total_companies` (`COUNT(*)` on `companies`),
+`applications_by_status` (every `job_postings` row bucketed into one of
+the five `ApplicationStatus` values), and `new_jobs_last_7_days`
+(`job_postings` rows with `scraped_at` in the last 7 days from the
+current time). Real Pydantic response schema
+(`huntloop.api.schemas.dashboard.DashboardStats`/
+`ApplicationStatusCounts`), not a raw dict - same convention as every
+other endpoint in this API.
+
+`applications_by_status` deliberately reuses the exact
+`COALESCE(job_applications.status, 'not_applied')` pattern
+`huntloop.api.routers.jobs` already uses for a single job's
+`application_status` - a `job_postings` row with no `job_applications`
+row counts as `not_applied`, the same as it does everywhere else in this
+API. That's also why this is grouped from `job_postings` (with an outer
+join to `job_applications`), not just a `GROUP BY status` on
+`job_applications` alone - the latter would silently omit every job with
+no application row at all, undercounting `not_applied` and making the
+breakdown not sum to `total_jobs`. Confirmed real production
+`job_applications` has 2 rows, both already explicitly
+`status='not_applied'` (leftover from Step 5's manual StatusControl
+testing) - a real case this convention has to get right, not just a
+hypothetical one: an explicit `not_applied` row and an absent row both
+had to land in the same bucket, and did.
+
+**Verified, all against the real running system (real API on :8000, real
+local system Postgres, nothing mocked):**
+
+- **(a)** `GET /dashboard/stats`'s real response:
+  ```json
+  {
+    "total_jobs": 605,
+    "total_companies": 9,
+    "applications_by_status": {
+      "not_applied": 605, "applied": 0, "interviewing": 0, "rejected": 0, "offer": 0
+    },
+    "new_jobs_last_7_days": 605
+  }
+  ```
+- **(b)** Independently cross-checked via raw `psql` (not the app's ORM
+  code path) against the same real database: `SELECT COUNT(*) FROM
+  job_postings` → 605; `SELECT COUNT(*) FROM companies` → 9; a manual
+  `LEFT JOIN`/`COALESCE`/`GROUP BY` query on `job_postings`/
+  `job_applications` → `not_applied: 605` (all others 0); `SELECT
+  COUNT(*) FROM job_postings WHERE scraped_at >= now() - interval '7
+  days'` → 605 - all of `job_postings.scraped_at` falls within
+  2026-08-22 16:36:31–16:36:42 (the Phase 2 Step 6 scrape run), which is
+  inside the 7-day window as of today (2026-08-23), so 605/605 counting
+  as "new" is correct, not a bug. Every number matched the endpoint
+  exactly.
+- **(c)** `pytest`: 61/61 passing (58 pre-existing + 3 new in
+  `tests/test_api_dashboard.py`:
+  `test_dashboard_stats_empty_db_returns_zeros`,
+  `test_dashboard_stats_reflects_real_counts` (4 seeded jobs across 2
+  companies, one deliberately scraped 30 days ago to exercise the 7-day
+  cutoff excluding it, 2 applications in different statuses, asserts the
+  breakdown sums to `total_jobs`), and
+  `test_dashboard_stats_not_applied_counts_explicit_status_too` (an
+  explicit `job_applications` row with `status='not_applied'` must count
+  the same as a job with no row at all - the exact real-data case found
+  in (b), exercised directly rather than only spot-checked). Real
+  production row counts (`companies=9`, `job_postings=605`,
+  `job_sources=2`, `job_locations=929`, `job_skills=0`,
+  `job_metadata=605`, `lca_disclosures=1431321`,
+  `sponsor_name_overrides=1`, `resume_versions=1`, `job_applications=2`)
+  confirmed identical before and after the full run.
+- **(d)** This entry plus the CLAUDE.md update below.
+
+Not built, per the task's explicit scope: any frontend dashboard page -
+this is API only.
+
+## 2026-08-23 — Real dashboard page, wired to GET /dashboard/stats (closes Dashboard track)
+
+Frontend-only step, no backend/API code touched - builds the mockup's
+Dashboard screen against Step 11's real endpoint (nothing mocked), and
+fixes a real navigation gap this surfaced along the way.
+
+**Navigation bug found and fixed as part of this step:** the mockup's
+nav has four items (Dashboard/Jobs/Applications/Resume, Resume already
+out of scope per the reskin step); this app's `layout.tsx` only had
+Jobs/Applications, and both `layout.tsx`'s "Jobs" link and
+`JobDetailClient.tsx`'s "← Back to jobs" link pointed at `/jobs` - a
+route that never existed (the real job-list UI has lived at `/` itself
+since Step 3/the reskin, not `/jobs`). Both links were silently 404ing
+before this step; confirmed by hitting `/jobs` directly pre-fix. Fixed
+by moving the job-list page from `frontend/src/app/page.tsx` to a real
+`frontend/src/app/jobs/page.tsx` (verbatim, same component renamed
+`JobsPage`), making the mockup-consistent choice of `/dashboard` as the
+new home view (`app/page.tsx` now does a plain
+`redirect("/dashboard")`, matching the mockup's `goHome: () =>
+this.go('dashboard')` - clicking the logo also now goes to
+`/dashboard`), and extracting the top nav into
+`frontend/src/components/NavBar.tsx` (a client component, needed for
+`usePathname()`-based active-tab highlighting - `layout.tsx` itself
+stays a server component for its `metadata` export). `NavBar` now lists
+Dashboard/Jobs/Applications, highlighting Jobs as active for both `/jobs`
+and any `/jobs/[id]` detail route.
+
+`frontend/src/app/dashboard/page.tsx` fetches `GET /dashboard/stats` via
+TanStack Query (`getDashboardStats()`, added to `lib/api.ts`; matching
+`DashboardStats`/`ApplicationStatusCounts` types added to `types/api.ts`,
+same hand-mirrored-from-Pydantic convention as everything else). Three
+stat cards (Jobs tracked, Companies, New this week) plus an
+"Applications by status" card (a proportional stacked bar plus a
+per-status row list) - styled 1:1 from the mockup's dashboard section
+(white cards, JetBrains Mono uppercase labels + colored dot, big mono
+bold value, gray sub-label; the status bar/list reuses
+`STATUS_META`/`STATUS_ORDER` from `lib/theme.ts`, the same source of
+truth the Kanban board and status controls already use, so status colors
+can't drift between screens). The mockup's fourth dashboard element,
+"New matches this week" (a mini job list), was deliberately **not**
+built - `GET /dashboard/stats` doesn't return per-job data, and the task
+explicitly required no mock data; adding a real version of that panel
+would need either a new endpoint or an extra `GET /jobs` call this step
+wasn't scoped to make an judgment call on, so it's left out rather than
+faked.
+
+Loading state is a 3-card pulse skeleton (same convention as the jobs
+page's own skeleton); error state is the same red-bordered inline
+message pattern used elsewhere in this app; an explicit `total_jobs ===
+0` check on the status card avoids a `NaN`-from-divide-by-zero on the
+bar widths for a genuinely empty database, though this app's real data
+never hits that path today.
+
+**Verified against the real running system (real API on :8000, real
+local system Postgres, real Next.js dev server, nothing mocked):**
+
+- **(a)** Screenshot of `/dashboard` shows `Jobs tracked: 605`,
+  `Companies: 9`, `New this week: 605`, and `Applications by status:
+  not_applied 605 / applied 0 / interviewing 0 / offer 0 / rejected 0` -
+  matches `GET /dashboard/stats`'s real response (hit directly via
+  `curl` immediately before) exactly, field for field.
+- **(b)** Confirmed navigation end-to-end from a fresh load: opening
+  `http://localhost:3000/` redirects to `/dashboard` (Dashboard tab
+  highlighted); clicking Jobs loads the real job list at `/jobs` (Cards
+  view, 605 real postings, previously a 404); clicking Applications loads
+  the real kanban tracker at `/applications`; opening a real job detail
+  page (`/jobs/1064`) and clicking "← Back to jobs" correctly returns to
+  `/jobs` (previously also a 404) - all four screenshotted, all working.
+- **(c)** Loading skeleton reviewed in code (matches the jobs page's
+  existing pulse-skeleton pattern - not screenshotted mid-flight, since
+  against localhost the real fetch resolves too fast to reliably capture
+  the transient frame, but the same pattern already used elsewhere in
+  this app isn't a blank flash there either) and the zero-division guard
+  confirmed by inspection; the always-populated real dataset doesn't
+  exercise the true-empty path today.
+- **(d)** `pytest`: 61/61 passing, unchanged from Step 11's count - this
+  step touched no backend files.
+- **(e)** This entry plus the CLAUDE.md update below.
+
+Not touched, per the task's explicit scope: any backend/API code. The
+"New matches this week" mockup panel is a deliberate, noted omission
+(see above), not an oversight.
