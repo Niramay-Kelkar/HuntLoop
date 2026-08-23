@@ -34,6 +34,65 @@ nothing scrapes them; treat that as planned, not present.
   hardcode credentials — `.env.example` documents the required shape.
 - Migrations: Alembic, config at repo root (`alembic.ini`, `alembic/`).
 - Tests: pytest, config at repo root (`pytest.ini`), tests live in `tests/`.
+- **FastAPI backend service, `src/huntloop/api/`, added 2026-08-22 — has
+  real endpoints now: `GET /health`, `GET /jobs`, `GET /jobs/{id}`,
+  `PATCH /jobs/{id}/application`.** Runs as its own `api` service in
+  `docker-compose.yml` (own container, port 8000 — deliberately not
+  merged into `app`, a separate concern). **`api`'s `DATABASE_URL`
+  points at `host.docker.internal:5432` — the real local system
+  Postgres — NOT the docker-compose `db` service; `api` has no
+  `depends_on: db` at all, it never talks to that service.** Run
+  locally via `PYTHONPATH=src uvicorn huntloop.api.main:app --reload`.
+  `huntloop.api.routers.jobs` computes match score at query time via
+  pgvector against the active resume (same pattern as every prior ad
+  hoc score query) and reads precomputed `matched_skills`/
+  `missing_skills` from `job_postings` (Step 5) — doesn't call Groq
+  itself. `job_applications` (migration `7d31cf7fed9c`) is one row per
+  job (upserted via PATCH, not a history table); a job with no row is
+  `not_applied` by default, never backfilled with a dummy row.
+  **`huntloop.db_models.Vector` also schema-qualifies its distance
+  operators now (`OPERATOR(public.<=>)` etc.), not just its DDL** — a
+  bare `<=>`/`<->`/`<#>`/`<+>` doesn't resolve under
+  `tests/conftest.py`'s isolated schema even with both operands cast to
+  `public.vector`, confirmed directly via `psql` before fixing (see
+  SESSIONS.md) — this is required for any future code comparing
+  `Vector` columns via SQLAlchemy, not optional. **A SQLAlchemy
+  `Enum(SomePythonEnum)` column needs `values_callable=lambda cls:
+  [e.value for e in cls]`** if the enum's DB labels are lowercase
+  `.value`s (as `ApplicationStatus`'s are) — without it, SQLAlchemy maps
+  the Python member *name* instead and every read raises `LookupError`
+  (caught by actually hitting the endpoint, not by writing the
+  migration). **`CORSMiddleware` is configured** (added 2026-08-22 once
+  `frontend/` needed it — a browser's CORS preflight `OPTIONS` 405'd
+  with none configured, invisible to every prior server-to-server check
+  since CORS is browser-only enforcement) — allows
+  `http://localhost:3000`/`127.0.0.1:3000` by default, override via
+  `CORS_ALLOWED_ORIGINS`. Don't add auth/further endpoints unprompted —
+  see SESSIONS.md for what's still explicitly deferred.
+- **Next.js frontend, `frontend/` (App Router, TypeScript, Tailwind,
+  TanStack Query), added 2026-08-22, real job-list UI added 2026-08-23.**
+  `frontend/src/types/api.ts` hand-mirrors the backend's Pydantic
+  schemas (no shared codegen — kept manually in sync, a known gap);
+  `frontend/src/lib/api.ts` is a real fetch client (`getHealth`/
+  `getJobs`/`getJob`/`updateApplicationStatus`), nothing mocked.
+  **Deliberately NOT containerized** — `npm run dev`'s hot reload beats
+  a Docker rebuild loop with no compensating benefit yet; revisit once
+  there's an actual reason Docker helps (see SESSIONS.md). Run via `cd
+  frontend && npm install && npm run dev`, needs the API already
+  running (`NEXT_PUBLIC_API_URL`, defaults to `http://localhost:8000`).
+  **The job list (`frontend/src/components/`: `JobCard`, `ScoreIndicator`,
+  `SkillChips`, `StatusBadge`, `JobFilters`, `Pagination`) is real, wired
+  to `GET /jobs`'s real `company`/`min_score`/`sort`/`limit`/`offset`
+  params — application status is read-only (`StatusBadge`); the PATCH
+  interaction is Step 5, not built yet.** `ScoreIndicator`'s color
+  gradient is calibrated to this app's real observed score range
+  (green pinned at 0.6, not 1.0 — see SESSIONS.md's Step 3 histogram) —
+  don't "fix" this back to a naive 0-1 scale, it would make nearly every
+  real job render the same dull color. `JobSummary`/`JobDetail` now
+  also carry `locations: list[str]` (added alongside this UI work,
+  since the card needed it and the API never exposed
+  `job_postings.locations` before — populated via the existing
+  `JobPosting.locations` relationship, no migration needed).
 - Entrypoint: `python main.py` runs the multi-ATS orchestrator end-to-end
   — queries `companies.ats_platform`, groups by platform, and runs
   `GreenhouseScraper`/`LeverScraper` once each with all tokens for that
@@ -589,3 +648,31 @@ parsing/HTTP tests, CI linting/build/deploy steps, any FK from
 architectural decisions above), and an LLM-extraction fallback for career
 pages that resist both static fetch and rendering. Nothing beyond what's
 listed above should be assumed built.
+
+**Since the above (see SESSIONS.md for full detail on each), a full
+sponsorship-matching + API + frontend stack was built on top of Phase 2's
+scraping foundation, and the Frontend/UI MVP is now closed out
+(2026-08-23):** DOL LCA disclosures ingested (1,431,321 rows) and fuzzy-
+matched to companies (`find_matching_employers()`/
+`get_sponsorship_summary()`); embedding-based resume-to-job match scoring
+(pgvector, `all-MiniLM-L6-v2`) with a Groq-based skills-matching engine
+(matched/missing skills per job) and a daily-cron-integrated sanity
+filter; a FastAPI backend (`src/huntloop/api/`) exposing `GET /jobs`,
+`GET /jobs/{id}`, and `PATCH /jobs/{id}/application` over real Postgres
+data, with `job_applications` (status/`applied_at`/`status_updated_at`/
+`notes`) as a real upserted-not-history table; and a Next.js frontend
+(`frontend/`, App Router + TanStack Query + Tailwind) rendering the real
+job list with company/min-score filtering, sorting, and pagination, a
+calibrated score indicator, matched/missing skill chips, and — as of this
+entry — an interactive `StatusControl` on each job card wired to the real
+`PATCH` endpoint via a TanStack Query mutation with optimistic updates,
+rollback-on-failure, and toast feedback, fully verified against the real
+running system (see SESSIONS.md's 2026-08-23 "Interactive status updates
+on job cards" entry for the exact screenshots/psql evidence). This is the
+current state of the project — treat everything above this note (Phase 0
+repo hygiene through the ATS-detection standalone function) as historical
+foundation, not the latest picture. Prometheus/Grafana observability and
+local cron scheduling are also in place, layered on the scraper. Not yet
+started: a job detail-page view, resume-upload UI, any UI surface for
+`get_sponsorship_summary()`, Ashby/Workday spiders, and everything else
+already listed as deferred above — those deferrals still stand.

@@ -225,6 +225,86 @@ docker-compose up --build   # run the scraper (and keep db running)
 `docker-compose down -v` tears everything down, including the `pgdata`
 volume, for a clean slate.
 
+## API service
+
+A FastAPI backend, `src/huntloop/api/main.py` - a separate service from
+the scraper/orchestrator (`app`), not merged into it. Its own `api`
+service in `docker-compose.yml`, connected directly to the real host
+Postgres (via `host.docker.internal`, same pattern used for the
+embeddings backfill) rather than the docker-compose `db` service - see
+that file's comment on `api` for why.
+
+Endpoints:
+
+- `GET /health` - basic liveness check.
+- `GET /jobs` - paginated list of job postings, each with its
+  embedding-based match score against the active resume, precomputed
+  `matched_skills`/`missing_skills`, and application status (defaults to
+  `not_applied` if no `job_applications` row exists yet). Query params:
+  `company` (case-insensitive filter), `min_score` (0-1, requires an
+  active resume), `sort` (`score` or `-score`, default `-score` - best
+  matches first), `limit`/`offset`.
+- `GET /jobs/{id}` - single job, same fields plus the full
+  `job_description`.
+- `PATCH /jobs/{id}/application` - upserts the application status for a
+  job (`{"status": "applied", "notes": "..."}`) - one row per job, not a
+  history; `applied_at` is set the first time status moves away from
+  `not_applied` and never overwritten by later status changes.
+
+Run it via Docker:
+
+```bash
+docker-compose up --build -d api
+curl http://localhost:8000/health        # {"status":"ok"}
+curl http://localhost:8000/jobs?limit=5  # real job postings + match scores
+open http://localhost:8000/docs          # interactive OpenAPI docs
+```
+
+Or locally, without Docker (same `.venv`/`.env` as everything else):
+
+```bash
+PYTHONPATH=src uvicorn huntloop.api.main:app --reload
+```
+
+**CORS**: the API allows `http://localhost:3000`/`http://127.0.0.1:3000`
+by default (the Next.js dev server's own default origin) via
+`CORSMiddleware` - override with the comma-separated
+`CORS_ALLOWED_ORIGINS` env var if the frontend runs somewhere else.
+Browser requests need this; server-to-server calls (curl, `httpx`, etc.)
+are unaffected either way, since CORS is a browser-enforced restriction.
+
+## Frontend
+
+A Next.js (App Router) app in `frontend/` - TypeScript, Tailwind CSS,
+TanStack Query for data fetching. Skeleton stage: one page proving real
+connectivity to the API (`GET /health`, `GET /jobs`), not a real
+job-list UI yet. `frontend/src/types/api.ts` and `frontend/src/lib/api.ts`
+mirror the backend's real Pydantic schemas/endpoints already, ready for
+that UI; `frontend/src/components/` is an empty placeholder for it.
+
+**Not containerized (yet) - deliberately.** At this skeleton stage the
+frontend has no stable build to containerize and will iterate on every
+run for a while; `npm run dev`'s hot reload (via Turbopack) is
+meaningfully faster to develop against than a Docker image rebuild loop
+would be, with no compensating benefit yet (nothing depends on it being
+containerized, and it isn't part of the cron/scraper pipeline). Revisit
+once there's a real UI and/or this needs to run somewhere Docker
+actually helps (a deploy, a teammate's machine without Node installed).
+
+Run it locally, alongside the API (which must already be running -
+either via Docker, per above, or `uvicorn ... --reload`):
+
+```bash
+cd frontend
+npm install
+npm run dev
+open http://localhost:3000
+```
+
+By default it talks to `http://localhost:8000` - override with
+`NEXT_PUBLIC_API_URL` in `frontend/.env.local` (see
+`frontend/.env.local.example`) if the API is running somewhere else.
+
 ## Observability stack (optional, opt-in)
 
 Prometheus + Pushgateway + Grafana, for local metrics on scraping

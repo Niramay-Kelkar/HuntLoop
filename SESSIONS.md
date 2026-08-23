@@ -2591,3 +2591,454 @@ or UI surface, curating/tuning the sanity-filter threshold further if
 real data ever shows a false positive or a missed anomaly above 20 that
 the filter should have caught, and the 70%-threshold/LLM-suggestion
 logic explicitly deferred since Step 3.
+
+---
+
+## 2026-08-22 — FastAPI backend service (skeleton only)
+
+**Did:** Added `src/huntloop/api/` - a FastAPI app (`main.py`) with a
+single `GET /health` endpoint (`routers/health.py`) returning
+`{"status": "ok"}`, plus the project structure for what's coming:
+`routers/` (package, `health.py` the only router so far),
+`schemas/` (empty package, ready for future Pydantic models - nothing to
+define a schema for yet), and `dependencies.py` (a `get_db()` DB-session
+dependency, not used by any route yet - `/health` is deliberately
+DB-independent). No real job/application endpoints, per this step's
+explicit scope. `fastapi`/`uvicorn` were already in `requirements.txt`
+(added a prior session, unused until now) - no new dependencies needed.
+
+Added a new `api` service to `docker-compose.yml` - its own container
+(`build: .`, same Dockerfile/image as `app`, since both already need the
+same dependencies installed), its own port (8000), connected to the same
+`db` service, with its own healthcheck (`python -c
+"import urllib.request..."` rather than curl/wget - the
+`python:3.13-slim` base image has neither installed). Deliberately not
+merged into the existing `app` service - separate concern, separate
+container, per the task.
+
+**Verified:**
+
+- **(a)** Tested locally first (`uvicorn huntloop.api.main:app`, no
+  Docker) before touching docker-compose - `/health` returned
+  `{"status":"ok"}`, confirmed before moving on. Then for real via
+  Docker: `docker compose up -d api` - `huntloop-api-1` came up and
+  reported **healthy**; `curl http://localhost:8000/health` returned
+  `{"status":"ok"}` through the actual published port.
+- **(b)** `curl http://localhost:8000/docs` returned 200; fetched
+  `/openapi.json` directly and confirmed it lists exactly one path,
+  `/health`, under title "HuntLoop API".
+- **(c)** Confirmed the addition is purely additive, not just by
+  assumption: `git diff docker-compose.yml` has zero removed lines (only
+  the new `api` service block added); `docker compose run --rm app
+  python -c "..."` still runs the scraper service fine; `crontab -l`
+  unchanged; `git status` on `main.py`, `scripts/run_orchestrator_cron.sh`,
+  and `scripts/backfill_skills_matching.py` all show zero diff - none of
+  those files were touched; `docker compose --profile observability
+  config` still validates cleanly.
+- **(d)** Full suite: 40/40 passing. Real production row counts
+  reconfirmed unchanged (companies=9, job_postings=605,
+  lca_disclosures=1431321, resume_versions=1,
+  sponsor_name_overrides=1) - this step never touched real data (the
+  Docker `api`/`db` containers used for verification are the separate,
+  smaller docker-compose Postgres instance on port 5433, not local
+  system Postgres on 5432).
+
+**Decided:** No real endpoints, no auth, no CORS config, no versioning -
+all explicitly out of scope for a skeleton step. `docker-compose down`
+(no `-v`) used for cleanup after verification, so the separate
+docker-compose `pgdata` volume was left intact.
+
+**Next:** First real endpoint(s) - most likely something surfacing
+job_postings + their Step 3/5 match scores/skills, once there's a
+concrete UI or API-consumer need - are natural next work, not started
+here.
+
+---
+
+## 2026-08-22 — Real API endpoints: GET /jobs, GET /jobs/{id}, PATCH /jobs/{id}/application
+
+**Did:**
+
+1. **Fixed the `api` service's DB connection.** `docker-compose.yml`'s
+   `api` now points `DATABASE_URL` at `host.docker.internal:5432` (the
+   real local system Postgres, using the `POSTGRES_USER`/
+   `POSTGRES_PASSWORD`/`POSTGRES_DB` vars already in `.env` - confirmed
+   those match the real `DATABASE_URL`'s credentials exactly, not just
+   assumed) instead of the docker-compose `db` service - same pattern
+   already used for `scripts/backfill_embeddings.py`. Added
+   `extra_hosts: ["host.docker.internal:host-gateway"]` for Linux
+   portability (harmless on Mac, where Docker Desktop already resolves
+   it natively). `api` no longer has `depends_on: db` at all - it never
+   talks to that service now, confirmed by `docker compose up -d api`
+   starting only `api`, not `db`.
+2. Added `job_applications` (migration `7d31cf7fed9c`,
+   `huntloop.db_models.JobApplication`/`ApplicationStatus`): `id`,
+   `job_posting_id` (FK, UNIQUE - one row per job, upserted, not a
+   history table), `status` (a real Postgres enum -
+   `not_applied`/`applied`/`interviewing`/`rejected`/`offer`),
+   `applied_at`, `status_updated_at` (auto-bumped via the column's
+   `onupdate`), `notes`.
+3. Built the three real endpoints (`huntloop.api.routers.jobs`) with
+   proper Pydantic schemas (`huntloop.api.schemas.jobs`:
+   `JobSummary`/`JobDetail`/`JobListResponse`/
+   `ApplicationStatusUpdate`/`ApplicationStatusResponse`) - real response
+   models, not raw dicts, so `/docs` actually describes the response
+   shape. Match score is computed at query time via pgvector (same
+   approach as every prior ad hoc score query), matched/missing skills
+   are read from the precomputed `job_postings` columns (Step 5),
+   application status defaults to `not_applied` via `COALESCE` when no
+   `job_applications` row exists (never backfilled with a dummy row just
+   to represent "not applied yet").
+
+**Two real bugs found and fixed (not by reasoning alone - by actually
+running things):**
+
+- **Enum value/name mismatch**: SQLAlchemy's `Enum(SomePythonEnum)`
+  defaults to mapping the Python enum's *member name* (`NOT_APPLIED`) to
+  the DB, not `.value` (`not_applied`) - but the Postgres enum type
+  (created by the migration with literal lowercase labels) and the
+  column's `server_default` both use `.value`. Every `GET /jobs` request
+  raised `LookupError: 'not_applied' is not among the defined enum
+  values` - caught immediately by actually hitting the endpoint, not by
+  writing the migration or model in isolation. Fixed with
+  `values_callable=lambda cls: [e.value for e in cls]` on the column's
+  `Enum(...)`.
+- **pgvector operator resolution under the test schema's search_path**:
+  writing real tests (`tests/test_api_jobs.py`) surfaced a second,
+  related instance of the incident-class bug from Step 3 - `<=>` (and
+  `<->`/`<#>`/`<+>`) are defined in `public`, and an unqualified
+  reference to any of them doesn't resolve under
+  `tests/conftest.py`'s isolated schema (search_path deliberately never
+  includes `public`), even when both operands are explicitly cast to
+  `public.vector`. Confirmed directly via `psql` before fixing: a bare
+  `<=>` failed with "operator does not exist" regardless of explicit
+  casts; Postgres's schema-qualified-operator syntax,
+  `OPERATOR(public.<=>)`, resolved correctly regardless of search_path,
+  including coercing the right operand's "unknown"-typed bind parameter
+  without needing search_path help for that either. Fixed at the same
+  place as the earlier DDL fix - `huntloop.db_models.Vector` now
+  overrides `cosine_distance()`/`l2_distance()`/`max_inner_product()`/
+  `l1_distance()` to emit `OPERATOR(public.<op>)` instead of the bare
+  operator pgvector's base `Comparator` emits. Also fixed the unrelated
+  `cache_ok` SAWarning noticed along the way (`Vector` subclass wasn't
+  explicitly inheriting it) - one-line fix, no behavior change.
+
+**Also fixed while testing**: Postgres's default `NULLS FIRST` for
+`ORDER BY ... DESC` would have put not-yet-embedded jobs (null
+match_score) at the *top* of the default "best matches first" sort -
+caught by a real test asserting sort order, not assumed correct.
+`list_jobs()` now uses `.nulls_last()` explicitly on both sort
+directions.
+
+**Verified:**
+
+- **(a)** `GET /jobs?limit=2` through the real `api` Docker container
+  returned `"total": 605` - the real production job count, confirmed
+  matching `SELECT count(*) FROM job_postings` on the real 5432
+  instance, not Docker's smaller one.
+- **(b)** Hit all three endpoints for real (pasted in the conversation,
+  not just described): `GET /jobs` list with real scores/skills/status;
+  `GET /jobs/{id}` full detail including the raw HTML
+  `job_description`; `PATCH /jobs/{id}/application` creating then
+  updating a real application row.
+- **(c)** `GET /jobs` and `GET /jobs/{id}` both reflected the PATCH'd
+  status (`applied`, then `interviewing`) immediately afterward.
+- **(d)** `company=checkr` returned only Checkr jobs (case-insensitive,
+  confirmed with `CHECKR` too); `min_score=0.5` returned only jobs
+  scoring >=0.5, correctly sorted descending; default sort (`-score`)
+  and explicit ascending sort (`score`) both confirmed against real
+  data.
+- **(e)** Added `tests/test_api_jobs.py` (13 new tests, using a new
+  `api_client` fixture in `tests/conftest.py` that overrides FastAPI's
+  `get_db` dependency to use the isolated test schema, never the real
+  `DATABASE_URL` the app's own `huntloop.api.dependencies` module points
+  at) - covers sort order (both directions, including the nulls-last
+  fix), company/min_score filtering, default `not_applied` status,
+  job detail with skills, 404s, the upsert-not-duplicate PATCH
+  behavior, `applied_at` staying fixed across later status changes, and
+  the `min_score`-without-active-resume 400 case. Full suite: 53/53
+  passing (40 previous + 13 new). Real production row counts
+  reconfirmed unchanged after all manual testing
+  (companies=9, job_postings=605, lca_disclosures=1431321,
+  resume_versions=1, sponsor_name_overrides=1,
+  job_applications=0 - the one test PATCH made against real data via
+  Docker was cleaned up afterward, not left sitting in the real table).
+
+**Decided:** `min_score` without an active resume returns 400 rather
+than silently filtering everything out (NULL comparisons are never
+true in SQL, which would otherwise look like "no jobs match" instead of
+"this filter can't be applied right now"). PATCH always replaces
+`notes` wholesale with whatever the payload has (including clearing it)
+rather than distinguishing "field omitted" from "field explicitly
+null" - simplest correct behavior for a two-field update body, not
+worth `exclude_unset` complexity here.
+
+**Next:** No further endpoints planned - GET/PATCH for jobs +
+applications was the full scope of this step. Natural future work (not
+started): endpoints for resume management, a combined-ranking endpoint,
+auth, pagination metadata beyond total/limit/offset (e.g. next/prev
+links) if a real frontend ever needs them.
+
+---
+
+## 2026-08-22 — Next.js frontend scaffold (connectivity check only)
+
+**Did:** Scaffolded `frontend/` via `create-next-app` (App Router,
+TypeScript, Tailwind CSS, ESLint) and added `@tanstack/react-query`.
+Structure set up for what's coming: `src/types/api.ts` (hand-mirrors the
+backend's real Pydantic schemas - `JobSummary`/`JobDetail`/
+`JobListResponse`/`ApplicationStatus`/etc. - no shared codegen yet, kept
+manually in sync for now), `src/lib/api.ts` (a real fetch client -
+`getHealth()`, `getJobs()`, `getJob()`, `updateApplicationStatus()` -
+hitting the actual API, nothing mocked), `src/components/` (empty
+placeholder). `src/app/providers.tsx` wraps the app in a
+`QueryClientProvider`; `src/app/page.tsx` is the one real page for this
+step - calls `GET /health` and `GET /jobs` via TanStack Query and
+renders "API status: {status}" / "{total} jobs found", nothing else. No
+real job-list/filtering/status-update UI - explicitly out of scope.
+
+**A real, blocking bug was found and fixed along the way, not by
+inspection - by actually loading the page in a browser:** the first
+real load showed "API status: unreachable (Failed to fetch)" despite
+`curl` against the same API succeeding seconds earlier. Traced via the
+browser's network panel (not guessed): the browser sent a CORS preflight
+`OPTIONS /health` that got a `405` - `huntloop.api.main` had no
+`CORSMiddleware` configured, since every consumer of the API until now
+was server-to-server (`curl`, `httpx`, pytest's `TestClient`), which
+CORS doesn't restrict (it's a browser-only enforcement mechanism, so
+this gap was invisible to every check done before there was an actual
+browser-based client). Fixed by adding `CORSMiddleware` to
+`huntloop/api/main.py`, allowing `http://localhost:3000`/
+`http://127.0.0.1:3000` by default (the Next.js dev server's own
+default origin), overridable via a new `CORS_ALLOWED_ORIGINS` env var.
+This is a real, necessary fix - without it, the task's own verification
+requirement (real rendered data from the real API) is impossible to
+satisfy, not an optional nicety.
+
+**Docker decision: NOT containerized, deliberately - reasoning, not a
+default.** At this skeleton stage the frontend has no stable build and
+will change on every future step; `npm run dev`'s Turbopack hot reload
+is meaningfully faster to iterate against than a Docker image rebuild
+loop, with no compensating benefit yet (nothing else depends on it being
+containerized - it isn't part of the cron/scraper pipeline, and no
+teammate/deploy target needs it today). Documented as a revisit-later
+decision (once there's a real UI, or a reason Docker actually helps),
+not a permanent choice.
+
+**Verified:**
+
+- **(a)** Brought up the real API (`uvicorn huntloop.api.main:app`) and
+  the real frontend (`npm run dev`), navigated to
+  `http://localhost:3000` in an actual Chrome tab (via claude-in-chrome,
+  not curl - curl can't show client-rendered TanStack Query data), and
+  took a real screenshot: **"API status: ok"** (green) and **"605 jobs
+  found"** - the real production job count, matching
+  `SELECT count(*) FROM job_postings` on the real 5432 instance.
+  Confirmed the failure mode first (a real screenshot showing
+  "unreachable (Failed to fetch)"), diagnosed it via the browser's own
+  network panel (`OPTIONS` -> 405), fixed it, then reloaded and
+  confirmed the fix with a second real screenshot - not assumed fixed
+  from reading the code change alone.
+- **(b)** Confirmed non-interference concretely: `main.py`,
+  `scripts/run_orchestrator_cron.sh`, and
+  `scripts/backfill_skills_matching.py` all show zero git diff;
+  `crontab -l` unchanged; `docker compose config` still validates. The
+  `docker-compose.yml` diff present is entirely the prior (still
+  uncommitted) `api`-service-addition task, untouched further here.
+- **(c)** Full backend suite: 53/53 passing (the CORS middleware change
+  to `huntloop/api/main.py` didn't break anything).
+- Cleaned up after testing: closed the browser tab, stopped the local
+  `uvicorn`/`npm run dev` processes started for verification - nothing
+  left running.
+
+**Decided:** No real job-list/filtering/status-update UI, no auth, no
+shared TS/Python schema codegen (types are hand-kept-in-sync for now,
+noted as a known gap) - all explicitly out of scope for this skeleton
+step, per the task.
+
+**Next:** The real job-list UI (consuming the already-real
+`src/lib/api.ts`/`src/types/api.ts`) is the natural next step, not
+started here. Also not started: containerizing the frontend (see the
+Docker decision above for when that'd make sense), any shared-schema
+codegen to replace the hand-mirrored TypeScript types.
+
+---
+
+## 2026-08-23 — Real job-list UI, replacing the Step 3 placeholder page
+
+**Did:** Built the real card-based job list
+(`frontend/src/app/page.tsx` + `frontend/src/components/`:
+`JobCard`, `ScoreIndicator`, `SkillChips`, `StatusBadge`, `JobFilters`,
+`Pagination`), wired to the real `GET /jobs` query params (`company`,
+`min_score`, `sort`, `limit`/`offset`) via TanStack Query
+(`keepPreviousData` so paging/filtering never blank-flashes - the
+previous page's cards stay visible, slightly dimmed only by the browser's
+own repaint timing, while the next page loads). Status shown read-only
+(`StatusBadge`) - the update interaction is explicitly Step 5, not built
+here.
+
+**A real, necessary backend gap was found and fixed before the UI could
+even be built - not by inspection, by trying to build the "location(s)"
+requirement and discovering the API had nothing to bind it to.**
+`GET /jobs`/`GET /jobs/{id}` never exposed `job_postings.locations`
+(the `job_locations` table) at all - Step 4's schemas only had
+`department`, not real location strings. Added `locations: list[str]` to
+`JobSummary` (inherited by `JobDetail`), populated in
+`huntloop.api.routers.jobs` via the existing `JobPosting.locations`
+relationship (`[loc.location_name for loc in job.locations]`) - same
+minimal-necessary-backend-change precedent as the CORS fix in the
+previous entry, not scope creep. Added a real regression test
+(`test_list_jobs_includes_locations_and_empty_list_when_none`) plus a
+`locations` assertion in the existing detail test; mirrored the field
+into `frontend/src/types/api.ts`.
+
+**Score indicator design decision, calibrated to real data, not a
+generic 0-1 scale:** `ScoreIndicator`'s red-to-green gradient pins "full
+green" at 0.6, not 1.0 - real observed scores (all-MiniLM-L6-v2 cosine
+similarity between the active resume and real scraped job descriptions)
+cluster between ~0.03 and ~0.59 (see Step 3's histogram, SESSIONS.md);
+a naive 0-1 scale would render nearly every real job the same dull
+color, defeating "genuinely scannable at a glance." Confirmed this
+mattered in practice during verification: the real highest-scoring job
+(59%) renders solid green, the real lowest-scoring job in the whole
+605-row dataset (Wealthfront "Fraud Operations Specialist", 3% - the
+same job flagged as the correct bottom result back in Step 3) renders
+clearly red, with a genuine gradient in between - not two flat buckets.
+
+**Skill chips**: matched = solid green pill, missing = dashed neutral
+outline - deliberately different *shapes*, not just different colors
+(colorblind-safer, and reads correctly even in the screenshots' dark
+theme). Capped at 5 visible per section with a "+N more" overflow chip -
+real `missing_skills` lists run to 20-30+ items for a badly-matched job
+(confirmed in Step 4/5), so showing all of them would blow out card
+height.
+
+**Verified, all against the real API + real data, via claude-in-chrome
+(actual rendered screenshots, not curl/described output):**
+
+- **(a)** Real screenshots at both score extremes: the real top-scoring
+  job (Palantir "Software Engineer - Defense Applications", 59%, green
+  bar) and, after sorting ascending, the real lowest-scoring job in the
+  full 605-row dataset (Wealthfront "Fraud Operations Specialist", 3%,
+  red bar) - confirming the color treatment spans the real range, not
+  just a narrow slice. A mid/low-score Checkr job ("Enterprise Account
+  Executive", 27%, amber bar) showed the matched/missing chip styles
+  side by side clearly ("AI tools" solid green vs. "B2B sales" etc.
+  dashed-outline, +8 more overflow) - zoomed screenshot pasted in the
+  conversation.
+- **(b)** Filtering: `company=palantir` narrowed 605 -> 308 real results,
+  confirmed by screenshot before/after; combined with `min_score=0.52`
+  narrowed further to 27. Sorting: switching "Sort by score" to "Worst
+  match first" (via the form_input tool, since a native `<select>`
+  needed direct option selection, not click+arrow-key which didn't
+  register) correctly reordered to show the real lowest-scoring job
+  first, confirmed against the exact score (3%) known from Step 3's
+  original score-distribution investigation - not just "looks sorted,"
+  independently cross-checked against a fact already established in an
+  earlier session.
+- **(c)** Pagination: real "1-12 of 308" / "Page 1 of 26" style counts
+  matching `total`/`limit`/`offset` from the real API; clicking "Next"
+  loaded genuinely different jobs (screenshot before/after), "Previous"
+  correctly disabled on page 1.
+- **(d)** Empty state: `min_score=0.99` (impossible against real data)
+  rendered the dashed-border "No jobs match these filters..." message
+  cleanly, no blank flash, no loading spinner stuck.
+- **(e)** Backend suite: 54/54 passing (53 previous + 1 new locations
+  test). Real production row counts reconfirmed unchanged
+  (companies=9, job_postings=605, lca_disclosures=1431321,
+  resume_versions=1, sponsor_name_overrides=1, job_applications=0) -
+  this step only reads.
+
+**Decided:** No status-update interaction (explicitly Step 5). No
+company-name autocomplete/dropdown - a plain text input, matching the
+backend's exact-case-insensitive-match `company` param exactly, rather
+than inventing a `/companies` endpoint this step didn't ask for.
+
+**Next:** Step 5 - wiring `PATCH /jobs/{id}/application` into the UI so
+status becomes editable, not just displayed - is the natural next step,
+not started here.
+
+## 2026-08-23 — Interactive status updates on job cards (Step 5, closes Frontend/UI MVP)
+
+**Did:** Replaced the read-only `StatusBadge` on each `JobCard` with a new
+`StatusControl` component (`frontend/src/components/StatusControl.tsx`) -
+a styled native `<select>` (same pill look as the old badge, but a real
+control) wired to the real `PATCH /jobs/{id}/application` endpoint via a
+TanStack Query `useMutation`. Backend untouched, per the task's explicit
+constraint - this was frontend wiring only.
+
+Optimistic UI: `onMutate` cancels in-flight `["jobs"]` queries, snapshots
+every cached query page via `getQueriesData`, and updates all of them
+(`setQueriesData`) so the change is visible immediately and stays
+consistent across every cached filter/sort/page combination, not just the
+one on screen. `onError` restores every snapshotted page verbatim and
+shows an error toast; `onSuccess` shows a success toast; `onSettled`
+always calls `invalidateQueries(["jobs"])` to reconcile with the server's
+real state regardless of outcome.
+
+Added a minimal hand-built toast system (`frontend/src/components/
+Toast.tsx`, React Context, no new dependency) - a fixed bottom-right
+stack, auto-dismissing after 3.5s - wired into the provider tree via
+`frontend/src/app/providers.tsx` (`ToastProvider` now wraps children
+inside `QueryClientProvider`). `StatusBadge.tsx`'s color/label maps
+(`STATUS_STYLES`/`STATUS_LABELS`) were exported so `StatusControl` reuses
+the exact same visual language rather than duplicating it - `StatusBadge`
+itself is unchanged and still used elsewhere.
+
+**Verified, all against the real running system (real API on :8000, real
+frontend on :3000, real Postgres on :5432 via psql, real screenshots via
+claude-in-chrome - nothing mocked):**
+
+- **(a)** Before/after screenshots of a real status change: Checkr
+  "Enterprise Account Executive" (job id 1257, 27% match, verified via
+  psql to have zero prior `job_applications` row) showed "Not applied" in
+  the dropdown before, "Applied" (styled blue, matching `StatusBadge`'s
+  existing color map) immediately after selecting it via
+  `mcp__claude-in-chrome__form_input` (click+arrow-key doesn't reliably
+  register on a native `<select>`, per the prior UI-building step's
+  finding).
+- **(b)** Direct `psql` query against `localhost:5432`/`jobsight` (not
+  the UI) confirmed the change actually persisted:
+  `job_applications` gained a real row for `job_posting_id=1257` with
+  `status='applied'` and a non-null `applied_at` (`2026-08-23
+  02:55:34.246952`) - the optimistic UI state and the database agree.
+- **(c)** Changed status again through the real UI (`applied` ->
+  `interviewing`) and re-queried: `status` updated to `interviewing`,
+  `status_updated_at` advanced to `02:56:02.834868`, but `applied_at`
+  stayed exactly `02:55:34.246952` - the "set once, preserved across
+  later changes" behavior (built and unit-tested in Step 2 at the API
+  level) holds when triggered through the real UI, not just direct API
+  calls.
+- **(d)** Killed the real API process (`kill` on the uvicorn pid) mid-
+  session, then attempted another status change through the UI. A real
+  screenshot captured a red toast reading "Failed to update status:
+  Failed to fetch" in the bottom-right, and the dropdown correctly
+  reverted to its last real value ("Interviewing") rather than sticking
+  on the failed optimistic "Applied" selection - a genuine `fetch`
+  failure exercising `onError`'s rollback path, not simulated. A
+  follow-up `psql` query confirmed the database was untouched by the
+  failed attempt (`status_updated_at` unchanged from before the kill).
+- **(e)** Backend suite: 54/54 passing, unchanged from the pre-task
+  baseline (backend wasn't touched, per the task's constraint, but this
+  was verified rather than assumed).
+- Cleanup: the test `job_applications` row for job 1257 was deleted after
+  verification; real production row counts reconfirmed unchanged before
+  and after (`job_postings=605`, `companies=9`, `job_applications=0`
+  both times) - this task only ever touched one throwaway test row, now
+  gone. Both the manually-started API and frontend dev servers were
+  stopped at the end.
+
+**Decided:** A styled native `<select>` over a custom dropdown/button
+group - it's keyboard-accessible and screen-reader-friendly for free, and
+reusing `StatusBadge`'s existing color map meant zero new visual design
+was needed to make it look like "the badge, but interactive." A hand-
+built toast system over a new npm dependency (e.g. `react-hot-toast`) -
+the requirement was just "clear success/failure feedback," and a ~50-line
+Context-based stack covers that without adding a dependency for
+something this small.
+
+**Next:** This closes the Frontend/UI MVP scope agreed on for this
+project phase. Nothing else is queued for the frontend right now -
+future frontend work (e.g. a detail-page view, resume upload UI, or the
+sponsorship-summary surface) is unplanned, not started, and not implied
+by anything in this entry.

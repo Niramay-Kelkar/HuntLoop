@@ -92,3 +92,26 @@ def db_session(pipeline):
     session = pipeline.Session()
     yield session
     session.close()
+
+
+@pytest.fixture()
+def api_client(db_session):
+    """A FastAPI TestClient for huntloop.api.main.app, with its DB session
+    dependency overridden to use the isolated test schema (db_session)
+    instead of huntloop.api.dependencies.get_db's real module-level
+    engine, which is bound to the real DATABASE_URL - so API requests
+    made through this client never touch real production data, same
+    guarantee as every other fixture here."""
+    from fastapi.testclient import TestClient
+
+    from huntloop.api.dependencies import get_db
+    from huntloop.api.main import app
+
+    def _override_get_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = _override_get_db
+    try:
+        yield TestClient(app)
+    finally:
+        app.dependency_overrides.pop(get_db, None)

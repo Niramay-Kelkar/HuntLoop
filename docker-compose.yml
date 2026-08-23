@@ -35,6 +35,42 @@ services:
       db:
         condition: service_healthy
 
+  # FastAPI backend service, added 2026-08-22 - a separate concern from
+  # `app` (the scraper/orchestrator), deliberately not merged into it.
+  # Real endpoints as of 2026-08-22 - see src/huntloop/api/main.py.
+  #
+  # DATABASE_URL deliberately points at host.docker.internal:5432 - the
+  # real local system Postgres where the actual scraped/matched data
+  # lives - NOT the docker-compose `db` service (a separate, smaller
+  # instance, see the two-Postgres-instances note in CLAUDE.md). Same
+  # host.docker.internal pattern already used for the embeddings
+  # backfill (scripts/backfill_embeddings.py, run via `docker compose
+  # run` with a DATABASE_URL override - see SESSIONS.md). extra_hosts
+  # below is only needed on Linux (Docker Desktop on Mac/Windows already
+  # resolves host.docker.internal natively) but is harmless everywhere,
+  # so it's included for portability rather than assuming Mac.
+  # Consequently `api` no longer depends on the `db` service at all -
+  # it never talks to it.
+  api:
+    build: .
+    command: ["uvicorn", "huntloop.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file:
+      - .env
+    environment:
+      PYTHONPATH: /app/src
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@host.docker.internal:5432/${POSTGRES_DB}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8000:8000"
+    healthcheck:
+      # python, not curl/wget - the python:3.13-slim base image this
+      # shares with `app` doesn't include either.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   # Observability stack (Prometheus + Pushgateway + Grafana), gated behind
   # the "observability" profile so a plain `docker-compose up` for regular
   # dev work doesn't start any of it. Infrastructure only, per design:

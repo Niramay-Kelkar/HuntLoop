@@ -3,6 +3,8 @@ db_models.py
 Defines SQLAlchemy ORM models for job data pipeline.
 """
 
+import enum
+
 from sqlalchemy import (
     Column,
     Integer,
@@ -11,6 +13,8 @@ from sqlalchemy import (
     Date,
     DateTime,
     Boolean,
+    Enum,
+    Float,
     ForeignKey,
     JSON,
     Numeric,
@@ -32,19 +36,46 @@ EMBEDDING_DIM = 384
 
 class Vector(_Vector):
     """pgvector's Vector type, but always emits a schema-qualified
-    `public.vector(n)` in DDL instead of the bare `vector(n)` the base
-    class emits. Needed for tests/conftest.py's isolated-schema fixture:
-    its search_path deliberately never includes `public` (see that
-    file's comment for why - adding it broke test isolation instead), so
-    an unqualified `vector` type reference wouldn't resolve there even
-    though the `vector` extension (CREATE EXTENSION vector) is installed
-    and lives in `public` on both this project's Postgres instances.
-    Schema-qualifying only affects DDL (get_col_spec) - value
-    binding/result processing is inherited unchanged from pgvector's
-    Vector, so this is a safe drop-in everywhere, not just for tests."""
+    `public.vector(n)` in DDL, and schema-qualified `OPERATOR(public.<op>)`
+    syntax for distance comparisons, instead of the bare `vector(n)` /
+    `<=>` etc. the base class emits. Needed for tests/conftest.py's
+    isolated-schema fixture: its search_path deliberately never includes
+    `public` (see that file's comment for why - adding it broke test
+    isolation instead), so an unqualified `vector` type OR an unqualified
+    `<=>`/`<->`/etc. operator wouldn't resolve there - confirmed directly
+    (2026-08-22, see SESSIONS.md): even with both operands explicitly
+    cast to `public.vector`, a bare `<=>` still failed with "operator
+    does not exist" under a search_path without `public`, while
+    `OPERATOR(public.<=>)` resolved correctly regardless of search_path
+    (Postgres's schema-qualified-operator syntax bypasses name lookup via
+    search_path entirely, including for the right operand's "unknown"-
+    typed bind parameter). Both fixes only affect DDL/SQL generation -
+    value binding/result processing are inherited unchanged from
+    pgvector's Vector, so this is a safe drop-in everywhere, not just
+    for tests."""
+
+    # Explicit even though the base class already sets this - subclassing
+    # otherwise triggers a "will not produce a cache key" SAWarning on
+    # every query using this type.
+    cache_ok = True
 
     def get_col_spec(self, **kw):
         return f"public.{super().get_col_spec(**kw)}"
+
+    class Comparator(_Vector.Comparator):
+        def l2_distance(self, other, /):
+            return self.op("OPERATOR(public.<->)", return_type=Float)(other)
+
+        def max_inner_product(self, other, /):
+            return self.op("OPERATOR(public.<#>)", return_type=Float)(other)
+
+        def cosine_distance(self, other, /):
+            return self.op("OPERATOR(public.<=>)", return_type=Float)(other)
+
+        def l1_distance(self, other, /):
+            return self.op("OPERATOR(public.<+>)", return_type=Float)(other)
+
+    comparator_factory = Comparator
 
 
 # ----------------------------------------------------------------------
@@ -278,4 +309,72 @@ class ResumeVersion(Base):
         return (
             f"<ResumeVersion(version_number={self.version_number}, "
             f"is_active={self.is_active})>"
+        )
+
+
+# ----------------------------------------------------------------------
+# 🔟 Job Application Table
+# ----------------------------------------------------------------------
+class ApplicationStatus(str, enum.Enum):
+    """A job's application status, as tracked by the user - not the
+    job's own is_active/scraped state. Default is not_applied for any
+    job_postings row with no job_applications row yet (see
+    huntloop.api.routers.jobs, which applies that default at query time
+    - a job_postings row with no application isn't required to have one
+    inserted just to represent "not applied yet")."""
+
+    NOT_APPLIED = "not_applied"
+    APPLIED = "applied"
+    INTERVIEWING = "interviewing"
+    REJECTED = "rejected"
+    OFFER = "offer"
+
+
+class JobApplication(Base):
+    """
+    Tracks the user's application status for a job posting - separate
+    from job_postings itself (which only tracks whether the posting is
+    still live/scraped). One row per job_posting_id at most
+    (job_posting_id is unique - "the" application status for a job, not
+    a history of every status change); PATCH /jobs/{id}/application
+    (huntloop.api.routers.jobs) upserts this row rather than always
+    inserting a new one. A job_postings row with no matching
+    job_applications row is treated as not_applied by the API, not
+    backfilled with one - see ApplicationStatus.
+    """
+    __tablename__ = "job_applications"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_posting_id = Column(
+        Integer,
+        ForeignKey("job_postings.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    status = Column(
+        # values_callable is required here: SQLAlchemy's Enum otherwise
+        # maps a Python Enum's *member name* (e.g. "NOT_APPLIED") to/from
+        # the DB by default, not its .value - but the Postgres enum type
+        # (created by the alembic migration with literal lowercase labels
+        # like 'not_applied') and server_default below both use .value.
+        # Without this, reading any row back raises LookupError: '...'
+        # is not among the defined enum values - caught by actually
+        # hitting GET /jobs, not just by writing the migration.
+        Enum(ApplicationStatus, name="application_status", values_callable=lambda cls: [e.value for e in cls]),
+        nullable=False,
+        default=ApplicationStatus.NOT_APPLIED,
+        server_default=ApplicationStatus.NOT_APPLIED.value,
+    )
+    applied_at = Column(DateTime, nullable=True)
+    status_updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+    notes = Column(Text, nullable=True)
+
+    job_posting = relationship("JobPosting")
+
+    def __repr__(self):
+        return (
+            f"<JobApplication(job_posting_id={self.job_posting_id}, "
+            f"status={self.status})>"
         )
