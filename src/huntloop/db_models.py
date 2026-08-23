@@ -108,6 +108,13 @@ class JobPosting(Base):
     # separately (scripts/backfill_job_embeddings.py), not computed at
     # insert time by JobDataPipeline yet.
     embedding = Column(Vector(EMBEDDING_DIM), nullable=True)
+    # Precomputed matched/missing skills vs. the active resume (see
+    # huntloop.skills_matching, scripts/backfill_skills_matching.py).
+    # Stored, not computed live per view - nullable because not every
+    # row has been backfilled (or a backfill attempt may have failed for
+    # that specific row; see that script for how failures are handled).
+    matched_skills = Column(JSON, nullable=True)
+    missing_skills = Column(JSON, nullable=True)
 
     # Foreign Keys
     company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"))

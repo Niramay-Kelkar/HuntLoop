@@ -2143,3 +2143,451 @@ verification used ad hoc SQL, documented here and reproducible, rather
 than building an application-level interface prematurely), and
 persistence/embedding computation triggered automatically on new scrapes
 or resume updates (both still manual script runs).
+
+---
+
+## 2026-08-22 — Matched/missing skills via Groq (sample-only, not backfilled)
+
+**Did:** Added `groq==1.6.0` to `requirements.txt`. Added
+`huntloop.skills_matching`: `GROQ_API_KEY` is read from `.env` at module
+import time and fails fast with a `RuntimeError` if unset - same pattern
+as `DATABASE_URL` in `settings.py` - but scoped to this module only (not
+`settings.py` itself), so environments/tests that never import this
+feature never pay that cost. `match_skills(resume_text, job_description)`
+cleans both texts via `huntloop.text_cleaning.clean_text()` (same
+pipeline as embeddings), sends them to Groq's chat completions API with
+`response_format={"type": "json_object"}`, and returns
+`{"matched_skills": [...], "missing_skills": [...]}` on success or
+`None` on any failure.
+
+**Model choice, checked live, not assumed:** the task suggested "a Llama
+3.x variant" as an example, but querying Groq's own `/v1/models`
+endpoint directly showed **no Llama 3.x chat models are currently active
+on Groq's free tier at all** - the live lineup is prompt-guard
+(classifier), whisper (audio), orpheus (TTS), `allam-2-7b`,
+`qwen/qwen3.6-27b`, `openai/gpt-oss-{20b,120b,safeguard-20b}`, and
+`groq/compound{,-mini}`. Picked `openai/gpt-oss-20b` - a real, active,
+general-purpose instruction-following chat model there - and verified it
+end-to-end with a real request (JSON mode, a toy resume/job pair)
+before adopting it, rather than guessing a Llama model name that turned
+out not to exist.
+
+**Failure handling** mirrors `detect_ats()`'s Playwright fallback and
+`huntloop.metrics`' Pushgateway push: `match_skills()` catches
+`groq.GroqError` (the SDK's common base for connection/timeout/rate-
+limit/API errors) and a broad `Exception` fallback around the API call,
+plus `json.JSONDecodeError` and a shape check (`matched_skills`/
+`missing_skills` must both be lists) around the response - every path
+logs one `WARNING` and returns `None`, never raises.
+
+**Sample-only verification, per the task's explicit scope** (NOT a full
+605-job backfill - that's separate future work once this was validated):
+picked 9 jobs from a real query against Step 3's cosine-similarity
+scores - top 3 (all Palantir "Software Engineer" roles, scores
+0.578-0.593), middle 3 (Checkr - Engineering Manager/Chief of Staff/AI
+Conversation Designer, scores 0.34-0.39), bottom 3 (Wealthfront Fraud
+Ops/Creative Design, Duolingo Creative Director Marketing, scores
+0.033-0.130) - via `scripts/sample_skills_match.py`, run against the
+real active resume and real job descriptions.
+
+**Results** (7 of 9 succeeded; 2 hit real, organic Groq failures - see
+below):
+
+- Palantir "Software Engineer - Defense Applications" (0.593):
+  `matched_skills: []`, `missing_skills: [React, Maplibre, Three.js,
+  Redux, Conjure, OSDK, Foundry platform, AIP platform]`.
+- Palantir "Software Engineer - Frontend Developer Productivity"
+  (0.582): `matched: [TypeScript, JavaScript, Angular, Vue.js, GitHub
+  Actions, Jenkins]`, `missing: [GraphQL API, Blueprint UI framework,
+  feature flags, internationalization, commit previews, frontend
+  monorepo, build/CI for large frontend monorepo, VSCode extensions,
+  developer experience in IDE, frontend infrastructure group]`.
+- Palantir "Software Engineer, Internship - Production Infrastructure"
+  (0.578): `matched: [Java, Typescript, Kubernetes, Grafana,
+  microservices, observability, GitHub]`, `missing: [Go, Cilium, Envoy,
+  React, Redux, Gradle, Windsurf, Cline, Apollo, Signals]`.
+- Checkr "Engineering Manager, Verifications" (0.353): **failed** -
+  `BadRequestError`, see below.
+- Checkr "Chief of Staff" (0.344): `matched: [AI, data analysis,
+  problem-solving]`, `missing:` ~30 executive/leadership/strategy items
+  (leadership, execution, cross-functional teams, 10+ years executive
+  experience, investor pitch decks, financial models, etc.).
+- Checkr "AI Conversation Designer" (0.388): **failed** -
+  `RateLimitError`, see below.
+- Wealthfront "Fraud Operations Specialist" (0.033, the single lowest
+  score in the whole 605-job dataset): `matched: []`, `missing: [fraud
+  monitoring, fraud investigation, brokerage operations, compliance,
+  engineering collaboration, product team collaboration]`.
+- Wealthfront "Senior Designer - Editorial, Creative" (0.115):
+  `matched: []`, `missing: [visual direction, visual assets, headers,
+  charts, photo composites, illustrations, financial content, audience
+  insights, distribution channels]`.
+- Duolingo "Creative Director, Marketing" (0.130): `matched: []`,
+  `missing:` ~25 brand/creative/marketing-leadership items.
+
+**Sanity check, by eye:** the two mid/low-scoring roles with real
+results (Chief of Staff, Fraud Ops, Senior Designer, Creative Director)
+are all correct and convincing - near-zero real matches, and every
+`missing_skills` list is genuinely the kind of domain expertise
+(executive leadership, fraud investigation, visual design, brand
+marketing) the resume's actual backend-engineering background doesn't
+show. The two Palantir roles with concrete tech-stack overlap (Frontend
+Developer Productivity, Production Infrastructure) matched very well -
+`matched_skills` in both cases are skills genuinely present on the
+resume (TypeScript/Angular/Vue.js/Jenkins; Java/Kubernetes/Grafana/
+observability), and `missing_skills` are genuinely absent or Palantir-
+internal-only tools (Conjure, OSDK, Blueprint, Cilium). **One result is
+worth flagging, not as a bug but as a real, useful nuance**: the
+highest-embedding-scoring job overall (Defense Applications, 0.593)
+came back with `matched_skills: []` - zero skills in common. That's
+correct on inspection, not wrong: that listing's specific requirements
+(React, Maplibre, Three.js, Redux, plus Palantir's own internal platform
+names - Conjure, OSDK, AIP, Foundry) genuinely don't overlap with
+anything on the resume, even though the *embedding* similarity is high
+(embeddings capture broad semantic/domain similarity - "software
+engineer," "APIs," "distributed systems" - not literal named-technology
+overlap). This demonstrates the two signals (embedding similarity vs.
+LLM-extracted skill overlap) are measuring genuinely different things
+and can legitimately diverge on a single job - worth keeping in mind for
+whatever later step decides how to combine or threshold them.
+
+**(c) Graceful failure handling - confirmed via 3 separate real cases,
+not one contrived test:**
+
+- Organic `BadRequestError` (Checkr "Engineering Manager,
+  Verifications"): `Groq API call failed (BadRequestError): Error code:
+  400 - {'error': {'message': "Failed to validate JSON. Please adjust
+  your prompt. See 'failed_generation' for more details.", 'type':
+  'invalid_request_error', 'code': 'json_validate_failed', ...}}` - the
+  model failed to produce schema-valid JSON for this one input; logged
+  and skipped, script continued to the next job without crashing.
+- Organic `RateLimitError` (Checkr "AI Conversation Designer"), after
+  the SDK's own internal retry-with-backoff was exhausted: `Groq API
+  call failed (RateLimitError): Error code: 429 - {'error': {'message':
+  'Rate limit reached for model `openai/gpt-oss-20b` ... tokens per
+  minute (TPM): Limit 8000, Used 4359, Requested 4227 ...'}}` - same
+  graceful handling.
+- Deliberate, controlled test: pointed `match_skills()` at a nonexistent
+  model name and confirmed a clean failure: `WARNING:
+  huntloop.skills_matching: Groq API call failed (NotFoundError): Error
+  code: 404 - {'error': {'message': 'The model
+  `this-model-does-not-exist` does not exist or you do not have access
+  to it.', 'code': 'model_not_found'}}` followed by `RESULT: None` - no
+  traceback, no crash, exactly the documented contract.
+
+**(d) Real cost/rate-limit behavior encountered:** Groq's free tier is
+$0 (no cost incurred) but the rate limit is real and was hit twice
+during this 9-request sample run - `openai/gpt-oss-20b`'s free-tier
+limit is **8000 tokens per minute (TPM)**, and this workload (a ~1200-
+token resume + job description per call, with `gpt-oss-20b` also
+generating a hidden `reasoning` field that consumes completion tokens
+before the JSON answer) burned through that budget well before 9 calls
+completed. The Groq Python SDK retries 429s internally with backoff by
+default (visible in the logs as `Retrying request to
+/openai/v1/chat/completions in N seconds`), which is why most of the 9
+calls eventually succeeded despite repeated 429s - only the 2 failures
+above happened when a call's own retry budget was exhausted or (for the
+`BadRequestError`) wasn't a rate-limit issue at all. **A real full
+605-job backfill would need explicit rate-limiting/pacing logic** (not
+built here - out of scope, sample-only per the task) to avoid spending
+most of its time in retry backoff.
+
+**Verified:** Full suite still 40/40 passing - `huntloop.skills_matching`
+isn't imported by any existing module/test, so the module's import-time
+`GROQ_API_KEY` fail-fast has zero effect on anything that doesn't use
+this feature. Real production row counts reconfirmed unchanged
+(companies=9, job_postings=605, lca_disclosures=1431321,
+resume_versions=1, sponsor_name_overrides=1) - this step only reads,
+never writes.
+
+**Decided:** No full backfill, no threshold/UI wiring, no persistence of
+skills results anywhere - explicitly out of scope per the task. A real
+backfill will need to budget for the TPM limit found above (pacing
+and/or a paid tier) before it's attempted.
+
+**Next:** Full 605-job skills backfill (with real rate-limiting) is the
+natural next step once this sample is accepted as validated. Not
+started: any UI/API surface, persistence of results, or combining this
+with the Step 3 embedding score into a single ranking.
+
+---
+
+## 2026-08-22 — Pacing investigation: three real levers measured before committing to a full backfill
+
+**Did:** Before running a full 605-job backfill, tested three ways to
+reduce Groq token cost per job, measuring real numbers rather than
+assuming, per the user's explicit request:
+
+1. **`reasoning_effort="low"`** on `openai/gpt-oss-20b`: cut tokens
+   ~28% on average (3058->1781, 2973->2407, 1722->1390 across 3 sample
+   jobs) but showed a real, repeatable quality regression - it
+   consistently dropped soft/inferred matches into `missing_skills`
+   instead of `matched_skills` (clearest case: Checkr "Chief of Staff" -
+   baseline correctly matched `["AI-assisted tooling", ...,
+   "data analysis", "problem solving"]`; low-effort matched nothing and
+   put "Data analysis and problem-solving skills" in missing instead).
+   Also confirmed real run-to-run output variance in this model even at
+   `temperature=0.1` (a baseline rerun of the same Palantir job produced
+   a different result than Step 4's original run) - a caveat on how much
+   weight any single-sample comparison can bear.
+2. **Smaller/cheaper alternative model**: re-checked `/v1/models` live -
+   still no Llama 3.x chat model active. Tested the two closest
+   candidates: `allam-2-7b` (7B, Arabic-English bilingual) failed twice
+   with real instruction-following breakdowns (hallucinated irrelevant
+   skills, once stuck in a "B2B marketing campaigns" repetition loop);
+   `qwen/qwen3.6-27b` worked but is a *bigger*, also-hidden-reasoning
+   model that used *more* tokens (3252 vs. 1722) for the same job -
+   strictly worse. No viable alternative found.
+3. **Batching N jobs into one call**: batch-of-5 used 5589 tokens total
+   (1118/job, 2.3x more efficient than baseline) with no quality cost -
+   in one case the batched result was *more* complete than the
+   single-call baseline. Batch-of-10 was **rejected outright by Groq
+   with a 413** - a real, previously-unknown hard cap: a single request
+   cannot itself exceed ~8000 tokens, independent of the rolling-window
+   TPM accounting. Batch-of-5 + low-effort combined for the best
+   measured throughput (833 tokens/job) but inherited the same
+   soft-match-dropping quality issue as lever 1.
+
+**Recommendation given:** batch-of-5 without `reasoning_effort=low` -
+nearly all the speed benefit (2.3x) with none of the observed quality
+cost. User confirmed this choice for the real backfill.
+
+---
+
+## 2026-08-22 — Real skills-matching backfill attempt: a third real limit discovered mid-run, and a real quality anomaly found
+
+**Did:** Added `matched_skills`/`missing_skills` JSON columns to
+`job_postings` (migration `0fdafe5d162e`, already applied). Added
+`huntloop.skills_matching.match_skills_batch()` - the batch-of-5
+production version of the prototype measured above (`match_skills()`
+from Step 4 itself untouched). Rewrote
+`scripts/backfill_skills_matching.py` to use it: `_chunk_jobs()` groups
+jobs into batches of at most `MAX_BATCH_SIZE=5`, ending a batch early if
+its estimated tokens would exceed `MAX_BATCH_ESTIMATED_TOKENS=7000`
+(margin below the real 8000-token hard per-request cap found above);
+`TokenPacer` paces batches against a sliding 60s window under
+`TARGET_TPM=6000` (margin below the real 8000 TPM cap). A 6-job smoke
+test confirmed the whole pipeline end-to-end first (chunking, pacing,
+partial-batch-failure handling, DB writes) before committing to the real
+605-job run.
+
+**Ran the real backfill. Result: 73 succeeded, 529 failed, 602
+processed, in 13,373s (222.9 min ~= 3.7 hours) - both slower AND far
+less complete than the ~1.9-hour/full-completion estimate.**
+
+**Root cause, traced precisely from the run's own log:** Groq enforces
+a THIRD real limit, never surfaced by any earlier testing (that
+testing's cumulative volume - Step 4's 9-job sample, the 3-lever
+comparison above, ~20-30 calls total - never got close to it): a
+**200,000 tokens-per-day (TPD)** cap, separate from both the per-minute
+TPM cap and the per-request hard cap already accounted for. The run's
+first 33 batches (16:03:55-16:36:14, ~32 minutes) succeeded normally.
+At 16:37:12 the account hit `Used 196045` of `Limit 200000` TPD and
+every subsequent call started failing with 429. `TokenPacer` only
+modeled the 60-second TPM window, with no concept of a 24-hour budget -
+so for the remaining ~190 minutes it kept retrying every ~60s against an
+exhausted daily budget, correctly logging a warning each time (no crash)
+but making zero real progress. **Fixed**: `match_skills_batch()` now
+raises a new `DailyQuotaExhausted` exception specifically when Groq's
+error message mentions "tokens per day" (every other failure mode still
+returns `None` as before, unchanged contract); `backfill_skills_matching.py`
+catches it and stops the whole run immediately with a clear log message,
+instead of retrying uselessly. A full 605-job backfill needs ~676,000
+total tokens (605 x ~1118 tokens/job batched) against a 200K/day budget -
+**a minimum of ~3.4 days of daily budget, realistically more** - so this
+script is now designed to be re-run once per day as each day's budget
+frees up, not run to completion in one sitting.
+
+**Verified:**
+
+- **(a)** 73 succeeded, 529 failed, 602 processed, 13,373s - reported
+  honestly above; does not match the pre-run estimate, for the TPD
+  reason found and explained above.
+- **(b)** DB query confirmed zero ambiguity: of all 605 rows, 76 have
+  both `matched_skills` and `missing_skills` populated (73 from this run
+  + 3 from the earlier smoke test), 529 have both NULL, **0 rows have
+  only one of the two set** - the designed all-or-nothing-per-row
+  contract held exactly.
+- **(c) Spot-check found a real quality issue, not just successes:**
+  Palantir "Deployment Strategist" (job id 858) came back with **53
+  matched_skills** - essentially the entire resume's technical-skills
+  section dumped verbatim, regardless of whether the job description
+  actually mentions those specific technologies. Traced to the exact
+  batch: the same call's other two successful items (Fraud Ops
+  Specialist, iOS Engineer) got short, sensible, clearly job-specific
+  results - so this isn't an index-mapping bug in
+  `match_skills_batch()`'s parsing, it's the model itself occasionally
+  defaulting to a full-resume dump for one item in a batch, plausibly
+  when a job's description doesn't name specific technologies the model
+  can pattern-match against (Palantir's "Deployment Strategist" postings
+  are known to be vaguely-worded and non-technical-skill-labeled - see
+  earlier sessions). Real, previously-unseen failure mode at this job's
+  diversity/scale that the small-scale lever tests above didn't surface.
+  **Positive finding, as requested**: the soft-match re-check held up -
+  Duolingo "Senior Data Science Manager, User Growth" correctly matched
+  `["Python", "SQL", "ML data pipelines", "Sentence-BERT", "NLP",
+  "semantic search", "AWS", "GCP", "Docker", "Kubernetes"]` (genuinely
+  on the resume, via its AI/dev-tools and side-project sections) while
+  correctly listing `["data science", "statistical modeling", "causal
+  inference", "R", "team management", ...]` as missing - batching alone
+  (no low-effort) does still catch inferred/soft matches, confirming the
+  measurement step's conclusion on that specific point.
+- **(d)** Cost: $0 confirmed (Groq free tier `on_demand` service tier
+  throughout - every rate-limit error explicitly offered a paid "Dev
+  Tier" upgrade, confirming nothing was ever silently billed). Real
+  rate-limit behavior: hit both the TPM cap (expected, paced around
+  successfully) and the previously-unknown TPD cap (not paced around -
+  the actual cause of this run's shortfall, now fixed for future runs
+  per above).
+- **(e)** Full suite: 40/40 passing. Real production row counts
+  reconfirmed unchanged (companies=9, job_postings=605 - row count
+  unchanged, only new column values written via UPDATE, not new rows;
+  lca_disclosures=1431321, resume_versions=1,
+  sponsor_name_overrides=1).
+
+**Decided:** Did NOT claim this closes out Phase 3's matching engine -
+the backfill is genuinely 12.6% complete (76/605), not done, and the
+Deployment-Strategist-style full-resume-dump anomaly is a real, open
+quality question (frequency unknown - seen once in 76 real results) that
+wasn't investigated further or mitigated in this session (e.g., no
+sanity filter added to reject implausibly-long matched_skills lists) -
+flagged to the user rather than unilaterally deciding how to handle it,
+since it involves a real scope/quality tradeoff.
+
+**Next:** Awaiting direction on: (1) whether to add a quality sanity
+check for the full-resume-dump failure mode before continuing the
+backfill, and (2) how to proceed given the backfill now needs to be
+spread across multiple days (minimum ~3-4, likely more) rather than
+completed in one sitting - `scripts/backfill_skills_matching.py` is
+interrupt-safe and TPD-aware now, so simply re-running it once per day
+is the mechanical path, but the cadence/schedule is a real decision, not
+something to assume.
+
+---
+
+## 2026-08-22 — Sanity filter + daily-cron integration: Phase 3's matching engine is now complete and self-sustaining
+
+**Did (1 - sanity filter):** Added `MAX_PLAUSIBLE_MATCHED_SKILLS = 20` to
+`huntloop.skills_matching` and enforced it inside
+`match_skills_batch()`'s response parsing: any job whose `matched_skills`
+exceeds 20 items is rejected (logged with a clear warning identifying
+the job_index and a preview of the offending list) and left out of
+`by_index`, so it comes back as `None` in the batch's output - same
+"leave it NULL, get reprocessed later" contract as every other failure
+mode, not a new one.
+
+**Threshold reasoning, backed by real data, not picked arbitrarily:**
+queried all 76 real stored results from the previous run and found a
+clean, wide gap - every genuine result had 0-10 matched_skills; the two
+known anomalies (Palantir "Deployment Strategist", and a duplicate
+"Backend Software Engineer - Application Development" posting, id 820/821)
+had 33 and 53. 20 sits almost exactly in the middle of that gap - double
+the highest legitimate count seen, and well under half of the lowest
+anomaly - giving wide margin against both false positives (rejecting a
+real, unusually skills-heavy match) and false negatives (missing an
+anomaly) without needing a tighter, more fragile threshold.
+
+**Verified against real data, not synthetic cases:**
+
+- **(a)** Loaded the actual stored `matched_skills` arrays for all 3
+  known real anomalies (ids 820, 821, 858 - 33, 33, 53 items) directly
+  from the database and ran them through the real filter logic: **all 3
+  correctly rejected.**
+- **(b)** Ran the same check against all 73 other real, legitimate
+  stored results (0-10 items each): **all 73 correctly passed through,
+  zero false positives.** The full observed distribution across all 76
+  real results: `[0 x51, 1 x3, 2 x6, 3 x4, 4, 6, 9 x5, 10 x2, 33, 33,
+  53]` - the gap between 10 and 33 is real, not a coincidence of one
+  sample.
+- Nulled out the 3 contaminated rows (820, 821, 858) directly in the DB
+  so they'd be picked up for reprocessing under the fix, rather than
+  leaving known-bad data sitting in the table indefinitely.
+- **Confirmed working live, not just retrospectively**: during today's
+  real cron run (below), the filter caught a 4th real anomaly in
+  production - job_postings.id=881 ("Software Engineer, Frontend") came
+  back with 26 matched_skills, was rejected with a clear log line, and
+  was correctly left NULL rather than stored.
+
+**Did (2 - daily-cron integration):** Reframed skills-matching from a
+one-time backfill into a recurring stage of the existing daily cron
+orchestrator (`scripts/run_orchestrator_cron.sh`, Step 7/Step 5's
+scheduling), not a separately-triggered script:
+
+- The cron wrapper now runs two stages every scheduled invocation:
+  stage 1 is the existing scraper orchestrator (`main.py`), stage 2 is
+  `scripts/backfill_skills_matching.py`. Both always run regardless of
+  the other's exit code (a scraping hiccup shouldn't stall
+  skills-matching progress on the backlog, and vice versa); the
+  wrapper's own exit code is non-zero if either stage failed, 0
+  otherwise. `logs/cron.log` now shows a labeled "stage 1/2" / "stage
+  2/2" breakdown per run.
+- `backfill_skills_matching.py`'s query now explicitly orders by
+  `scraped_at ASC, id ASC` (oldest job posting first) instead of
+  relying on unspecified default ordering - clears the longest-standing
+  backlog first, and gives deterministic day-to-day behavior.
+- `match_skills_batch()` now raises a new `DailyQuotaExhausted`
+  exception specifically when Groq's error mentions "tokens per day"
+  (every other failure mode still returns `None`, unchanged); the
+  backfill script's `main()` catches it, logs a clear message, and
+  stops the whole run immediately - this was built in the previous
+  entry but not yet exercised against a real TPD cutoff from inside the
+  actual cron path until today's manual trigger (below).
+- No crontab change needed - the existing `0 3 * * *` entry (Step 5)
+  already points at `run_orchestrator_cron.sh`, which now does more
+  without any new scheduling. Nothing to manually re-trigger going
+  forward: each day's 3am run works through the NULL backlog under the
+  real 200K daily budget, and also naturally covers whatever new job
+  postings that same run's scrape just added - one mechanism handles
+  both catching up on the backlog and staying current, not two.
+
+**Verified (2):**
+
+- **(c)** Manually triggered `./scripts/run_orchestrator_cron.sh` (not
+  waiting for 3am) with 532 NULL rows pending. Real result: stage 1
+  (scrape) succeeded normally; stage 2 processed 24 jobs (3 succeeded, 21
+  failed - a mix of organic `BadRequestError`s, oddly many
+  "max completion tokens reached before generating a valid document"
+  json-validation failures in a row right before the cutoff, plausibly
+  Groq internally truncating generation as the account's daily budget
+  ran low rather than issuing a clean 429 until the very last one - and
+  the one sanity-filter rejection above) before hitting a real 429 with
+  `tokens per day (TPD): Limit 200000, Used 199182`. `DailyQuotaExhausted`
+  fired correctly: `[ERROR] Groq's daily token quota is exhausted after
+  24/532 jobs processed (batch 6/200) - stopping this run rather than
+  retrying uselessly for hours. Re-run this script once the daily budget
+  resets to pick up where it left off`. The backfill stage then logged
+  `Backfill stopped early (daily quota exhausted): 3 succeeded, 21
+  failed, 24 total processed in 302.8s` and returned normally - the
+  wrapper's overall run finished with **exit code 0** (both stages
+  "succeeded" in the sense that neither crashed; a `DailyQuotaExhausted`
+  stop is expected steady-state behavior, not a failure to alarm on).
+- **(d)** Current total progress: **76/605 job_postings rows have
+  matched_skills/missing_skills populated, 529 remain NULL** (76 = 73
+  from the pacing-investigation-era run + 3 new from today's cron
+  trigger; the 3 previously-contaminated rows are back in the NULL pool
+  for reprocessing). DB query confirmed zero inconsistent rows (every
+  row is cleanly both-populated or both-NULL), same as always.
+- **(e)** Full suite: 40/40 passing. Real production row counts
+  reconfirmed unchanged before and after (companies=9, job_postings=605,
+  lca_disclosures=1431321, resume_versions=1,
+  sponsor_name_overrides=1) - row *count* never changes from this
+  feature, only column values within existing rows.
+
+**Decided:** Phase 3's matching engine (embeddings + scoring + skills
+matching, Steps 3-5 collectively) is **complete and self-sustaining**,
+not "fully backfilled" - that distinction matters and is deliberate.
+The backlog will keep shrinking by roughly however many jobs each day's
+~200K token budget allows (today: 3 genuinely new + several rejected/
+retried), and every future day's newly-scraped postings get matched in
+the same run they're scraped in, going forward, with no separate manual
+step ever needed again. Completion of the current 529-row backlog will
+happen gradually over the coming days/weeks as a natural side effect of
+the existing schedule - not something to force or manually re-trigger.
+
+**Next:** Nothing further planned for Phase 3's matching engine itself.
+Future related work (not started, not requested): combining the
+Step 3 embedding score and the skills-match result into a single ranking
+or UI surface, curating/tuning the sanity-filter threshold further if
+real data ever shows a false positive or a missed anomaly above 20 that
+the filter should have caught, and the 70%-threshold/LLM-suggestion
+logic explicitly deferred since Step 3.

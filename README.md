@@ -94,19 +94,30 @@ LOG_LEVEL=WARNING python main.py
 
 ## Scheduled runs
 
-The orchestrator (`main.py`) can run on a schedule via `cron`, so postings
-stay fresh without a manual `python main.py` each time. This is local-only
-automation for a dev machine that's actually on/awake at the scheduled
-time — it is not a substitute for real deployment scheduling (e.g. GitHub
-Actions against a hosted Postgres), which is a separate, later step once
-there's a publicly reachable database.
+The scraper orchestrator (`main.py`) and the skills-matching backfill
+(`scripts/backfill_skills_matching.py`) both run on the same daily
+schedule via `cron`, so postings stay fresh and newly-scraped (or
+still-backlogged) jobs get matched against the active resume without any
+manual step. This is local-only automation for a dev machine that's
+actually on/awake at the scheduled time — it is not a substitute for
+real deployment scheduling (e.g. GitHub Actions against a hosted
+Postgres), which is a separate, later step once there's a publicly
+reachable database.
 
 `scripts/run_orchestrator_cron.sh` is the entrypoint cron calls. It's a
 thin wrapper, not a parallel code path: it `cd`s into the repo (cron's
-working directory isn't otherwise predictable), then runs
-`.venv/bin/python main.py` — the exact same script, same `.venv`, same
-`.env`/`DATABASE_URL` a manual run uses. Nothing about credentials or
-config is duplicated for the scheduled path.
+working directory isn't otherwise predictable), then runs each stage
+with `.venv/bin/python` — the exact same scripts, same `.venv`, same
+`.env`/`DATABASE_URL`/`GROQ_API_KEY` a manual run uses. Nothing about
+credentials or config is duplicated for the scheduled path. Both stages
+always run, regardless of whether the other succeeded — a scraping
+hiccup shouldn't stall skills-matching progress on the backlog, and vice
+versa. The skills-matching stage works through whatever job_postings
+rows still have `matched_skills IS NULL` (oldest-scraped first),
+respecting Groq's real 200,000-tokens-per-day free-tier budget, and
+simply stops itself cleanly for the day once that budget is exhausted —
+picking back up automatically on the next scheduled run. That's expected
+steady-state behavior, not a failure.
 
 **Enable it** (runs daily at 3:00 AM local time):
 
@@ -134,23 +145,30 @@ crontab -l | grep -v 'run_orchestrator_cron.sh' | crontab -
 **Where to check whether a scheduled run happened, and what it did:**
 
 - `logs/cron.log` — append-only, wrapper-level marker log. One
-  start/end pair per run, with a timestamp and the exit code, e.g.:
+  start/end pair per run, with a per-stage breakdown and the exit code
+  of each, e.g.:
   ```
-  === HuntLoop scheduled orchestrator run started 2026-08-22 03:00:01 PDT ===
-  ...
-  === run finished with exit code 0 at 2026-08-22 03:00:47 PDT ===
+  === HuntLoop scheduled run started 2026-08-22 03:00:01 PDT ===
+  --- stage 1/2: scraper orchestrator (main.py) ---
+  --- stage 1/2 finished with exit code 0 ---
+  --- stage 2/2: skills-matching backfill (scripts/backfill_skills_matching.py) ---
+  --- stage 2/2 finished with exit code 0 ---
+  === run finished with exit code 0 (scrape=0, skills=0) at 2026-08-22 03:04:12 PDT ===
   ```
-  A non-zero exit code (or an `ERROR: .venv/bin/python not found` line,
-  if the venv itself is missing) means the run failed. Check this file
-  first — it's the fastest way to answer "did last night's run happen,
-  and did it succeed."
+  A non-zero overall exit code (or an `ERROR: .venv/bin/python not
+  found` line, if the venv itself is missing) means at least one stage
+  failed. Check this file first — it's the fastest way to answer "did
+  last night's run happen, and did it succeed." Note that the skills-
+  matching stage stopping early with a `Backfill stopped early (daily
+  quota exhausted)` line is normal, not a failure — it still exits 0.
 - `logs/huntloop.log` — the same rotating, shared-logging file every
   manual run also writes to (see "Logging" above; 5MB cap, 3 backups).
   Scheduled runs show up in it exactly like manual ones — same format,
-  same per-company INFO/WARNING lines, same Scrapy stats dump at the end.
-  This is where to look for *what* happened during a run (which
-  companies were scraped, which were skipped and why, item counts),
-  not just whether it succeeded.
+  same per-company INFO/WARNING lines, same Scrapy stats dump at the end
+  for stage 1, and the same per-job/per-batch INFO/WARNING lines for
+  stage 2 (including which jobs got a skills match, which were rejected
+  by the sanity filter, and why). This is where to look for *what*
+  happened during a run, not just whether it succeeded.
 
 The scheduled job assumes Postgres is already reachable at
 `DATABASE_URL` when it fires (same requirement as a manual run — this

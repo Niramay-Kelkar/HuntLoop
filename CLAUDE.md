@@ -174,8 +174,10 @@ nothing scrapes them; treat that as planned, not present.
   row to `is_active=False` (never deletes it), and marks the new row
   active.
 - **Embedding-based match scoring exists, added 2026-08-22 (Step 3, see
-  SESSIONS.md) — scoring mechanism only, no 70%-threshold wiring,
-  skills-list, or LLM-suggestion logic yet.** `huntloop.embeddings`
+  SESSIONS.md) — scoring mechanism only, no 70%-threshold wiring or
+  LLM-suggestion logic yet (a Groq-based matched/missing skills-list
+  does now exist as a separate piece — see the next bullet).**
+  `huntloop.embeddings`
   wraps `sentence-transformers`' `all-MiniLM-L6-v2` (CPU-only, 384-dim -
   confirmed against the model's own published config, matches
   `EMBEDDING_DIM` in `db_models.py`); `huntloop.text_cleaning.clean_text()`
@@ -213,6 +215,60 @@ nothing scrapes them; treat that as planned, not present.
   top/bottom-5 ranking (top 5 all Palantir "Software Engineer" roles;
   bottom 5 fraud-ops/creative/marketing roles) — see SESSIONS.md for the
   full numbers.
+- **Matched/missing skills-list via Groq exists (`huntloop.skills_matching`),
+  added 2026-08-22. Phase 3's matching engine (embeddings + scoring +
+  skills matching) is complete and self-sustaining as of 2026-08-22 —
+  not "fully backfilled" (529/605 job_postings rows are still NULL as of
+  this entry and that number only shrinks gradually), but no manual
+  step is needed for it to keep shrinking or to keep up with newly-
+  scraped jobs. See SESSIONS.md for full detail on both entries below.**
+  `GROQ_API_KEY` required in `.env`, fails fast at import time of this
+  module only (not `settings.py`). **Model is `openai/gpt-oss-20b`, not
+  a Llama variant** — checked live against `/v1/models` before picking
+  anything; no Llama 3.x chat models are active on Groq's free tier.
+  Re-check `/v1/models` before assuming any model name still exists —
+  the free-tier lineup already changed once during this project.
+  `job_postings.matched_skills`/`missing_skills` (JSON, nullable,
+  migration `0fdafe5d162e`) are precomputed and stored, not recomputed
+  live. `match_skills()` (single job/call, Step 4) is untouched;
+  `match_skills_batch()` (resume once + 5 job descriptions per call) is
+  the real production path — batching is genuinely ~2.3x more
+  token-efficient with no quality cost, measured before adopting it.
+  **Three separate real Groq limits exist, all found only by actually
+  running things at increasing scale, not by reading docs — don't
+  assume any is the only one:** (1) 8000 TPM rolling per-minute cap;
+  (2) an ~8000-token **hard cap on a single request**, independent of
+  the rolling window (why batches are capped at size 5, not just
+  token-estimated); (3) a **200,000 tokens-per-day (TPD) cap** —
+  `match_skills_batch()` raises `DailyQuotaExhausted` specifically for
+  this (every other failure still returns `None`), and
+  `backfill_skills_matching.py` stops the whole run cleanly on that
+  signal (confirmed working live: a real cron trigger hit a genuine TPD
+  429 and stopped itself after processing 24 jobs, exit code 0 — not a
+  crash, not a hang). **Skills-matching is now a stage of the daily cron
+  orchestrator (`scripts/run_orchestrator_cron.sh`, same `0 3 * * *`
+  crontab entry as Step 5/7 — no separate schedule)** — stage 1 is the
+  existing scraper (`main.py`), stage 2 processes `matched_skills IS
+  NULL` rows oldest-`scraped_at`-first under the real daily budget, then
+  stops itself when exhausted; both stages always run regardless of the
+  other's outcome. This is the only mechanism now — it both works down
+  the backlog over time and keeps every future day's newly-scraped
+  postings matched, with nothing to manually re-trigger ever again.
+  **Sanity filter**: `MAX_PLAUSIBLE_MATCHED_SKILLS = 20` in
+  `huntloop.skills_matching`, enforced inside `match_skills_batch()` —
+  rejects (logs + leaves NULL for reprocessing) any job whose
+  `matched_skills` exceeds 20 items, since a real failure mode surfaced
+  where the model dumps the entire resume's skills section verbatim
+  instead of genuinely matching (seen at 26, 33, 33, and 53 items across
+  4 real occurrences so far, most recently caught live in production,
+  not just in the original discovery). Threshold chosen from real data —
+  every genuine result observed has been 0-10 items; 20 sits in the
+  middle of a clean, wide gap between that and the lowest known anomaly
+  (26) — validated against all 76 real stored results with zero false
+  positives before being trusted. Don't loosen this threshold without
+  re-checking the real data distribution first, and don't assume
+  `matched_skills` values that predate 2026-08-22 in the DB are
+  trustworthy without checking their length against it.
 
 ## Key architectural decisions (already made — don't re-litigate)
 
