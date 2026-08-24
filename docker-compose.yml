@@ -59,6 +59,16 @@ services:
     environment:
       PYTHONPATH: /app/src
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@host.docker.internal:5432/${POSTGRES_DB}
+    # POST /resumes/upload (added 2026-08-23, see CLAUDE.md/SESSIONS.md)
+    # writes to data/resumes/ inside the container - data/resumes/ is
+    # both gitignored and dockerignored (real personal data, never baked
+    # into the image), so without this mount an uploaded file would only
+    # exist in the container's own writable layer: invisible on the host
+    # and gone the next time the container is recreated. This mount makes
+    # uploads land in the same real data/resumes/ directory
+    # scripts/ingest_resume.py has always read from/written to manually.
+    volumes:
+      - ./data/resumes:/app/data/resumes
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:

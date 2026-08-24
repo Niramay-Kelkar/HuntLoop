@@ -17,6 +17,7 @@ import type {
   HealthResponse,
   JobDetail,
   JobListResponse,
+  ResumeVersionSummary,
 } from "@/types/api";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -73,4 +74,32 @@ export function updateApplicationStatus(
     method: "PATCH",
     body: JSON.stringify(payload),
   });
+}
+
+export function getResumes(): Promise<ResumeVersionSummary[]> {
+  return apiFetch<ResumeVersionSummary[]>("/resumes");
+}
+
+// Real multipart upload (POST /resumes/upload) - deliberately bypasses
+// apiFetch, which always sends Content-Type: application/json. A
+// multipart/form-data request needs the browser-generated boundary in
+// its own Content-Type header (set automatically when the body is a
+// FormData and no Content-Type is specified manually), so this can't
+// share that helper.
+export async function uploadResume(file: File): Promise<ResumeVersionSummary> {
+  const formData = new FormData();
+  formData.append("file", file);
+  const response = await fetch(`${API_BASE_URL}/resumes/upload`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`POST /resumes/upload failed: ${response.status} ${body}`);
+  }
+  return response.json() as Promise<ResumeVersionSummary>;
+}
+
+export function activateResume(id: number): Promise<ResumeVersionSummary> {
+  return apiFetch<ResumeVersionSummary>(`/resumes/${id}/activate`, { method: "PATCH" });
 }

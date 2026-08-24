@@ -4,6 +4,7 @@ requests
 beautifulsoup4
 fastapi
 uvicorn
+python-multipart
 sqlalchemy
 alembic==1.19.1
 asyncpg

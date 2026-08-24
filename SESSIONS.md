@@ -3599,3 +3599,278 @@ local system Postgres, real Next.js dev server, nothing mocked):**
 Not touched, per the task's explicit scope: any backend/API code. The
 "New matches this week" mockup panel is a deliberate, noted omission
 (see above), not an oversight.
+
+## 2026-08-23 — Resume management API endpoints (GET /resumes, POST /resumes/upload, PATCH /resumes/{id}/activate)
+
+New endpoints on top of the existing `resume_versions` table, reusing
+Phase 3 Step 2/3's extraction and embedding logic unchanged rather than
+reimplementing either.
+
+**Extraction logic was moved, not duplicated**: `extract_text()` (the
+pdfplumber-based PDF-to-text function `scripts/ingest_resume.py` has had
+since Phase 3 Step 2) now lives in a new shared module,
+`huntloop.resume_ingestion` (also home to `save_uploaded_pdf()` and
+`RESUMES_DIR`), and `scripts/ingest_resume.py` imports it from there -
+same behavior, one copy of the logic instead of two, so the manual
+script and the new API endpoint can never drift apart. `RESUMES_DIR`
+resolves `data/resumes/` the same repo-root-relative way
+`huntloop.logging_config` resolves `logs/`.
+
+`huntloop.embeddings.embed_text()` (Phase 3 Step 3, unchanged) is
+imported **lazily**, inside the two functions that actually call it
+(`upload_resume`, and `activate_resume`'s missing-embedding branch), not
+at module level - it requires torch, which this project's local dev
+venv still can't run (confirmed again: `ModuleNotFoundError`), and
+`huntloop.api.main` imports every router together, so a module-level
+import here would have broken importing the *entire* API locally - GET
+/health, /jobs, /dashboard/stats included, not just the two endpoints
+that need the model. Confirmed this stays true after wiring the router
+in: `PYTHONPATH=src .venv/bin/python -c "from huntloop.api.main import
+app"` still succeeds locally, listing all 8 routes.
+
+`POST /resumes/upload`: validates a `.pdf` filename and non-empty body,
+writes the upload to `data/resumes/v{version}_{filename}` (version-
+prefixed so same-named uploads can't collide/overwrite each other),
+extracts text, 422s with no DB row created if extraction yields nothing
+(same "might be a scanned image" message `scripts/ingest_resume.py`
+already used), embeds it, deactivates whatever was active, inserts the
+new row active, and resets skills-matching (see below) - all in one
+transaction, committed once. `PATCH /resumes/{id}/activate`: 404s if the
+id doesn't exist; is a no-op (returns the row as-is, touches nothing
+else) if it's already active - specifically so reactivating the current
+version doesn't needlessly wipe `matched_skills`/`missing_skills` for no
+real change; computes and stores an embedding first if the target
+row's `embedding` is NULL (defensive - "shouldn't happen for versions
+created via Step 2" per the task, but checked); otherwise deactivates
+the old active row, activates the target, and resets skills-matching.
+`GET /resumes` returns every version (newest first) with a short
+`text_preview` (first ~200 chars of `clean_text()`-cleaned
+`extracted_text`, not the raw text with `(cid:N)` artifacts) -
+deliberately not the full extracted text, per the task's own scope note
+("that's detail-only if needed" - no detail endpoint was built, since
+none was asked for).
+
+**Point 4 (verify the live match-score query resolves the active resume
+dynamically, don't assume) - read `huntloop.api.routers.jobs`'s
+`_active_resume_embedding()` again as part of this step**: it's a plain
+`db.query(ResumeVersion).filter_by(is_active=True).first()` issued fresh
+on every `GET /jobs`/`GET /jobs/{id}` call - no caching, no stored
+resume id anywhere. Already correct; nothing to fix. Proven, not just
+read: `tests/test_api_resumes.py::
+test_activating_a_different_resume_changes_live_match_scores` activates
+a different resume version *mid-test*, on the same running `api_client`
+(no process restart), and asserts `GET /jobs`' scores for two jobs
+genuinely flip (one job's embedding matches version A exactly and is
+orthogonal to B, the other job the reverse) - a hardcoded or
+cached-at-import resume reference would leave those scores unchanged
+after the activation call and fail this exact assertion. It also
+reactivates the original version within the same test and asserts the
+scores revert, proving the resolution is genuinely dynamic in both
+directions, not a one-way cache invalidation.
+
+**A real bug was found and fixed while doing the real end-to-end
+verification (point (c) below), not caught by the test suite alone -
+worth reading in full:** `_reset_skills_matching()`'s first version did
+`update(JobPosting).values(matched_skills=None, missing_skills=None)` -
+plain Python `None`. Against real Postgres, this stores the *JSON
+scalar* `null` in the column (`matched_skills IS NULL` → `false`,
+`matched_skills::text` → `'null'`), not a real SQL `NULL`. The bug is
+invisible from the ORM side: reading the column back still deserializes
+JSON `'null'` to Python `None` (`json.loads('null') == None`), so
+`assert row.matched_skills is None` - the assertion both new tests
+originally had - passes either way and does not catch it. The real
+consequence: `scripts/backfill_skills_matching.py`'s own reprocessing
+query, `.filter(JobPosting.matched_skills.is_(None))`, generates SQL
+`... WHERE matched_skills IS NULL` - which would never match a row
+holding JSON `null` - so the entire "the daily cron naturally
+reprocesses them" requirement this step was built for would have
+silently never fired for any job touched by this endpoint. Found by
+querying real Postgres directly after a real upload (`SELECT
+matched_skills IS NULL, matched_skills::text FROM job_postings WHERE
+id=1064` → `f`, `'null'`), not by trusting the endpoint's 200 response.
+Fixed by binding `sqlalchemy.null()` instead of Python `None` -
+confirmed via a rolled-back transaction against real Postgres that this
+produces a genuine SQL NULL (`sql_null=True`) before trusting it. Both
+`tests/test_api_resumes.py` tests that exercise the reset now also
+assert `db_session.query(JobPosting).filter(JobPosting.matched_skills
+.is_(None)).count()` directly - the exact ORM call
+`backfill_skills_matching.py` itself uses - specifically so this class
+of bug can't reappear silently again. The 605 real `job_postings` rows
+this bug had already touched (written as JSON `null` during the real
+upload verification below, before the fix) were corrected to genuine
+SQL `NULL` via a direct `UPDATE ... SET matched_skills = NULL,
+missing_skills = NULL` before re-verifying.
+
+**Verified, all against the real running system - the `api` Docker
+service (real torch/sentence-transformers, same convention
+`scripts/backfill_embeddings.py` established) pointed at the real local
+system Postgres, not the isolated test schema:**
+
+- Building `api` first hit a real, unrelated obstacle: Docker Desktop's
+  build VM ran out of disk space (`No space left on device`) partway
+  through installing torch's CUDA dependency wheels - `docker system df`
+  showed 41GB of stale build cache and 16GB of dangling images from
+  earlier sessions. Fixed via `docker builder prune -af` and `docker
+  image prune -af` (freed ~57GB combined) before the build could
+  succeed. `docker-compose.yml`'s `api` service also gained a
+  `./data/resumes:/app/data/resumes` volume mount, added as part of this
+  step - `data/resumes/` is both gitignored and dockerignored (real
+  personal data, see CLAUDE.md), so without this mount an upload would
+  only exist in the container's own writable layer, invisible on the
+  host and lost on container recreation; this makes uploads land in the
+  same real `data/resumes/` directory `scripts/ingest_resume.py` has
+  always used.
+- **(a)** Uploaded a real, genuinely different resume PDF (a
+  hand-built, valid, real PDF - not the applicant's actual second resume,
+  since only one exists - containing marketing-oriented text, built the
+  same way as the test suite's `_minimal_pdf_bytes` helper) via `POST
+  /resumes/upload`. Response: `{"id": 4, "version_number": 2,
+  "is_active": true, "text_preview": "Marketing Manager. Skilled in
+  social media marketing, ..."}`. Confirmed directly via `psql`: the new
+  row (`id=4`) has `is_active=t`, a real stored embedding, and
+  `file_path=/app/data/resumes/v2_marketing_test_resume.pdf`, visible on
+  the host at `data/resumes/v2_marketing_test_resume.pdf` via the new
+  volume mount; the prior active row (`id=3`, the real resume) flipped
+  to `is_active=f`.
+- **(b)** Real match scores for two real jobs, before vs. after the
+  swap: job 1064 ("Software Engineer - Defense Applications", Palantir)
+  went `0.5931313810685691` → `0.09633215633024184`; job 1071
+  ("... Frontend Developer ...", Palantir) went `0.582365368745648` →
+  `0.11000782817695476` - both real, substantial drops, exactly as
+  expected for a marketing-oriented resume matched against
+  software-engineering postings. The top 5 jobs by score also
+  genuinely changed to marketing-titled roles (e.g. "Lead Product
+  Marketing Manager, Cash" at 0.425) - not just lower engineering
+  scores, a real re-ranking.
+- **(c)** `matched_skills`/`missing_skills` genuinely reset to SQL
+  `NULL` (not the JSON-`null` bug above) for all 605 real `job_postings`
+  rows - confirmed via `SELECT COUNT(*) FILTER (WHERE matched_skills IS
+  NULL), COUNT(*) FILTER (WHERE matched_skills IS NOT NULL) FROM
+  job_postings` → `605, 0` (down from 76 real rows that had been
+  populated by the daily cron before this step; those will naturally get
+  reprocessed and repopulated by the next cron run against whichever
+  resume ends up active - see the note on real row counts below).
+- **(d)** Reactivated the original resume (`PATCH
+  /resumes/3/activate`) - response `is_active: true`, `version_number:
+  1`. Confirmed via `psql`: `id=3` back to `is_active=t`, `id=4` back to
+  `is_active=f`. Both real job scores reverted to their exact original
+  values (`0.5931313810685691` and `0.582365368745648`) - proof the
+  dynamic resolution genuinely works in both directions, on the real
+  system, not just in the test suite.
+- **(e)** Full suite: 72/72 passing (61 pre-existing + 11 new in
+  `tests/test_api_resumes.py`). Real production row counts confirmed
+  before and after this step's Docker-based verification:
+  `companies=9`, `job_postings=605`, `job_sources=2`,
+  `job_locations=929`, `lca_disclosures=1431321`,
+  `sponsor_name_overrides=1`, `job_applications=2` - all unchanged.
+  `resume_versions` is 2 (up from 1), expected - the real upload from
+  (a) is now genuine version history, never deleted, same convention
+  `scripts/ingest_resume.py` already established. `matched_skills` is
+  genuinely `0`/605 non-NULL at the end of this step (down from 76) -
+  also expected, not a regression: this step's own real activation
+  swaps are exactly what's supposed to trigger that reset, and the
+  existing daily cron (Phase 3 Step 5.5) will naturally repopulate it
+  against the now-reactivated original resume on its next run, with no
+  manual step needed - that's the entire point of wiring the reset in.
+- **(f)** This entry plus the CLAUDE.md update below.
+
+Not built, per the task's explicit scope: a `GET /resumes/{id}` detail
+endpoint (full extracted text was explicitly noted as "detail-only if
+needed", not asked for), and no frontend changes (API only).
+`python-multipart` was added to `requirements.txt` - required for
+FastAPI's `UploadFile`/`File()` multipart form parsing, missing before
+this step since nothing had used file uploads yet.
+
+## 2026-08-24 — Real resume management page, wired to Step 13's endpoints (closes resume version-management track)
+
+Frontend-only step, no backend/API code touched - builds the mockup's
+Resume screen's right-hand column (upload + version history) against
+Step 13's real `GET /resumes`/`POST /resumes/upload`/`PATCH
+/resumes/{id}/activate`, nothing mocked. The mockup's left column (AI
+resume review - missing keywords, phrasing suggestions, formatting
+notes) is explicitly **not** built - that backend doesn't exist yet, per
+this task's own scope; the page is a single, full-width upload +
+version-history layout rather than the mockup's two-column grid, since
+there's no real content for the second column yet and a visibly empty
+column would look broken rather than "not started."
+
+`frontend/src/types/api.ts` gained `ResumeVersionSummary`
+(hand-mirroring `huntloop.api.schemas.resumes`); `frontend/src/lib/api.ts`
+gained `getResumes()`, `activateResume(id)` (both plain `apiFetch()`
+calls), and `uploadResume(file)` - deliberately **not** going through
+`apiFetch()`, since that helper always sends `Content-Type:
+application/json`, which would break a `multipart/form-data` upload (the
+browser needs to set that header itself, with its own boundary, when the
+body is a `FormData`).
+
+`frontend/src/app/resumes/page.tsx`: a dashed dropzone card (click-to-
+browse via a hidden file input, plus real HTML5 drag-and-drop) that
+client-side rejects non-`.pdf` files before ever hitting the network,
+and a version-history card listing every real `resume_versions` row
+(newest first, matching the API's own order) with a green "ACTIVE" badge
+and a "Make active" button on every other row. `frontend/src/components/
+NavBar.tsx` gained a fourth tab, "Resume" (→ `/resumes`), alongside
+Dashboard/Jobs/Applications - matching the mockup's nav order (Resume
+last, before the not-yet-built items are added).
+
+**Loading/confirmation feedback, per the task's explicit requirement
+that upload isn't instant:** while `uploadResume()`'s mutation is
+pending, the dropzone swaps to a spinner + "Uploading & processing…" /
+"Extracting text and computing an embedding for this resume — this can
+take a few seconds," and the whole dropzone is inert
+(`pointer-events-none`) so a second upload can't be fired mid-flight.
+Both upload success and each "Make active" activation show a toast
+confirmation (reusing the existing `useToast()` provider from Step 5 -
+"Version N uploaded and is now active" / "Version N is now active"), and
+a failure of either shows a distinct error toast rather than failing
+silently. A successful upload or activation invalidates `["resumes"]`,
+`["jobs"]`, `["job"]`, and `["dashboard-stats"]` together - a resume
+swap changes every job's live `match_score` and resets
+`matched_skills`/`missing_skills` (Step 13), so the jobs list/detail
+pages and the dashboard stat cards all need to stop showing stale data
+from before the swap, not just the resumes list itself.
+
+**Verified against the real running system (real `api` Docker service -
+built in Step 13, already had the resume endpoints - pointed at the real
+local system Postgres, real Next.js dev server, real browser file
+upload via a hand-built real PDF, nothing mocked):**
+
+- **(a)** Screenshotted the upload flow mid-flight: dropzone showing the
+  spinner and "Uploading & processing…" copy, version list unchanged and
+  inert beneath it. A few seconds later (real PDF extraction + real
+  `sentence-transformers` embedding inside the container), the dropzone
+  reset to idle and version history showed a real new `v3` row, ACTIVE,
+  with its real extracted-text preview ("DevOps Engineer. Skilled in
+  Kubernetes, Terraform, AWS, CI/CD pipelines, Docker, Ansible,
+  monitoring with Prometheus and Grafana...") - a hand-built, genuinely
+  valid PDF uploaded through the real file input (no PDF-authoring
+  library dependency, same construction technique as
+  `tests/test_api_resumes.py`'s `_minimal_pdf_bytes` helper), not a
+  fixture swapped in some other way.
+- **(b)** Activated a different, already-existing version (`v2`, the
+  real Marketing-Manager test resume from Step 13) via its "Make active"
+  button - screenshotted the active indicator moving from `v3` to `v2`
+  instantly (`v3`/`v1` both grew "Make active" buttons). Bonus proof,
+  same standard as Step 13: two real jobs' `match_score` (queried
+  directly via `curl` before/after, and confirmed live in the browser -
+  job 1064's detail-page ring read `10%`) dropped to the exact same
+  values Step 13's real verification recorded for this same resume
+  (`0.5931313810685691` → `0.09633215633024184` and
+  `0.582365368745648` → `0.11000782817695476`) - reproducible, not
+  coincidental. Reactivated the real original resume (`v1`) afterward
+  via the UI; both scores reverted to their exact original values, and a
+  toast ("Version 1 is now active") confirmed the swap on screen.
+- **(c)** Confirmed navigation end-to-end from a fresh load: opening
+  `http://localhost:3000/` redirects to `/dashboard` with all four tabs
+  (Dashboard/Jobs/Applications/Resume) visible; clicking "Resume" loads
+  `/resumes` with the real version history rendered.
+- **(d)** `pytest`: 72/72 passing, unchanged from Step 13's count - this
+  step touched no backend files.
+- **(e)** This entry plus the CLAUDE.md update below.
+
+Real production row counts confirmed before/after: unchanged except
+`resume_versions` (2 → 3, the real new `v3` upload from (a) - expected,
+version history is never deleted, same convention every prior resume
+step established). Not touched, per the task's explicit scope: any
+backend/API code, and the AI resume-review UI (missing keywords/
+phrasing/formatting notes) - still a separate, not-yet-started phase.

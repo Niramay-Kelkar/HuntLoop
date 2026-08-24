@@ -87,3 +87,11 @@ export interface DashboardStats {
   applications_by_status: ApplicationStatusCounts;
   new_jobs_last_7_days: number;
 }
+
+export interface ResumeVersionSummary {
+  id: number;
+  version_number: number;
+  uploaded_at: string;
+  is_active: boolean;
+  text_preview: string;
+}

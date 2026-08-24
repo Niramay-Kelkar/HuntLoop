@@ -16,11 +16,12 @@ Ingestion only, per this step's scope: no embeddings, no matching, no
 LLM-suggestion or skills-extraction logic. That's all later work once
 this data exists to build on.
 
-Text extraction uses pdfplumber (not pypdf) - it's layout-aware
-(built on pdfminer.six), which handles multi-column resume sections and
-irregular whitespace far better than pypdf's more basic extraction; a
-mis-ordered/garbled extraction here would silently corrupt everything
-built on top of it later, so this step favors the more careful extractor.
+Text extraction (pdfplumber-based - layout-aware, handles multi-column
+resume sections and irregular whitespace far better than pypdf's more
+basic extraction) lives in huntloop.resume_ingestion.extract_text(),
+shared with the real POST /resumes/upload API endpoint added later (see
+huntloop.api.routers.resumes, CLAUDE.md) so both call the same logic
+rather than maintaining two copies.
 """
 import logging
 import os
@@ -29,30 +30,14 @@ import sys
 SRC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
 sys.path.insert(0, SRC_DIR)
 
-import pdfplumber
 from sqlalchemy import create_engine, func
 from sqlalchemy.orm import sessionmaker
 
 from huntloop.db_models import ResumeVersion
+from huntloop.resume_ingestion import extract_text
 from huntloop.settings import DATABASE_URL
 
 logger = logging.getLogger(__name__)
-
-
-def extract_text(pdf_path: str) -> str:
-    """Extract text from every page of the PDF, joined with blank lines
-    between pages. A page with no extractable text (e.g. a scanned image
-    with no text layer) contributes nothing rather than raising - the
-    caller decides what to do with a suspiciously short result."""
-    pages_text = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for page_number, page in enumerate(pdf.pages, start=1):
-            text = page.extract_text()
-            if text:
-                pages_text.append(text)
-            else:
-                logger.warning(f"No extractable text on page {page_number} of {pdf_path}")
-    return "\n\n".join(pages_text)
 
 
 def ingest_resume(session, pdf_path: str) -> ResumeVersion:

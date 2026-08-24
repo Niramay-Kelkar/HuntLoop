@@ -36,12 +36,25 @@ nothing scrapes them; treat that as planned, not present.
 - Tests: pytest, config at repo root (`pytest.ini`), tests live in `tests/`.
 - **FastAPI backend service, `src/huntloop/api/`, added 2026-08-22 — has
   real endpoints now: `GET /health`, `GET /jobs`, `GET /jobs/{id}`,
-  `PATCH /jobs/{id}/application`, `GET /dashboard/stats`.** Runs as its own `api` service in
+  `PATCH /jobs/{id}/application`, `GET /dashboard/stats`, `GET
+  /resumes`, `POST /resumes/upload`, `PATCH /resumes/{id}/activate`.**
+  Runs as its own `api` service in
   `docker-compose.yml` (own container, port 8000 — deliberately not
   merged into `app`, a separate concern). **`api`'s `DATABASE_URL`
   points at `host.docker.internal:5432` — the real local system
   Postgres — NOT the docker-compose `db` service; `api` has no
-  `depends_on: db` at all, it never talks to that service.** Run
+  `depends_on: db` at all, it never talks to that service.** `api` also
+  has a `./data/resumes:/app/data/resumes` volume mount, added
+  2026-08-23 for `POST /resumes/upload` — `data/resumes/` is gitignored
+  *and* dockerignored (real personal data), so without this mount an
+  upload would only exist in the container's own writable layer and be
+  lost on recreation; this makes uploads land in the same real
+  `data/resumes/` directory `scripts/ingest_resume.py` already used.
+  Building `api` requires real disk headroom in Docker Desktop's build
+  VM (torch's CUDA-dependency wheels alone are ~2GB downloaded) — hit a
+  real `No space left on device` build failure from accumulated build
+  cache/dangling images during that step; `docker builder prune -af` +
+  `docker image prune -af` fixed it (see SESSIONS.md). Run
   locally via `PYTHONPATH=src uvicorn huntloop.api.main:app --reload`.
   `huntloop.api.routers.jobs` computes match score at query time via
   pgvector against the active resume (same pattern as every prior ad
@@ -261,7 +274,65 @@ nothing scrapes them; treat that as planned, not present.
   Each `scripts/ingest_resume.py` run inserts a new `resume_versions` row
   with an auto-incremented `version_number`, flips any previously-active
   row to `is_active=False` (never deletes it), and marks the new row
-  active.
+  active. **`extract_text()` now lives in `huntloop.resume_ingestion`
+  (also home to `save_uploaded_pdf()`/`RESUMES_DIR`), added 2026-08-23 —
+  `scripts/ingest_resume.py` imports it from there instead of defining
+  its own copy, so it can't drift from the real API endpoint below.**
+  **A real resume-management API now exists on top of this table
+  (`huntloop.api.routers.resumes`, added 2026-08-23, see SESSIONS.md's
+  "Resume management API endpoints" entry) — `GET /resumes` (version
+  history with a short `text_preview`, not the full text), `POST
+  /resumes/upload` (real PDF upload → extract → embed → insert active →
+  deactivate the old active row), and `PATCH /resumes/{id}/activate`
+  (reactivate an existing version, computing its embedding first if
+  somehow missing; a no-op if it's already active).** Both
+  activation-changing endpoints reset `matched_skills`/`missing_skills`
+  to NULL on every `job_postings` row, so the existing daily cron
+  (Step 5.5) naturally reprocesses everything against whichever resume
+  is now active — **this reset must bind `sqlalchemy.null()`, not plain
+  Python `None`, in the `update(JobPosting).values(...)` call.** Binding
+  `None` on this `JSON` column stores the literal JSON scalar `null`,
+  not a real SQL `NULL` (`matched_skills IS NULL` is `false`,
+  `matched_skills::text` is `'null'`) — found live against real
+  Postgres, not caught by the ORM-level `assert row.matched_skills is
+  None` (which passes either way, since `json.loads('null') == None`
+  too). That silently breaks `scripts/backfill_skills_matching.py`'s own
+  `.filter(JobPosting.matched_skills.is_(None))` reprocessing query —
+  those rows would never be picked up again. Don't revert this to plain
+  `None`; `tests/test_api_resumes.py` asserts the same
+  `.filter(...is_(None))` count directly, not just the ORM-level value,
+  specifically to catch this class of bug again. **`GET /jobs`'s
+  match-score query already resolves "the active resume" dynamically at
+  query time** (`ResumeVersion.filter_by(is_active=True).first()`, fresh
+  per request, no caching) — re-confirmed by reading that code again
+  during this step and by a real test
+  (`test_activating_a_different_resume_changes_live_match_scores`) that
+  swaps the active version mid-test and asserts live scores change on
+  the very next request. `huntloop.embeddings.embed_text()` is imported
+  **lazily** inside these two endpoints (not at module level) since it
+  needs torch, unavailable in this project's local dev venv (see
+  below) — a module-level import would break importing the whole API
+  locally, not just these two endpoints, since `huntloop.api.main`
+  imports every router together. **The frontend now has a real
+  `/resumes` page wired to this API, added 2026-08-24 (see SESSIONS.md's
+  "Real resume management page" entry) — frontend-only, no backend
+  changes.** `frontend/src/app/resumes/page.tsx`: a dropzone (click or
+  drag-and-drop, client-side `.pdf`-only validation) driving
+  `uploadResume()`, and a version-history list driving `activateResume()`
+  per non-active row — both wired to `lib/api.ts`'s real
+  `getResumes`/`uploadResume`/`activateResume`. `uploadResume()`
+  deliberately bypasses the shared `apiFetch()` helper (which always
+  sets `Content-Type: application/json`) since a `multipart/form-data`
+  upload needs the browser to set its own boundary-bearing header. A
+  successful upload or activation invalidates `["resumes"]`, `["jobs"]`,
+  `["job"]`, and `["dashboard-stats"]` together — a resume swap changes
+  every job's live score and resets its skills match, so all of those
+  views need to stop showing stale data, not just the resumes list.
+  `NavBar.tsx` gained a fourth tab, "Resume", alongside
+  Dashboard/Jobs/Applications. The mockup's AI-resume-review column
+  (missing keywords/phrasing suggestions/formatting notes) is
+  deliberately **not** built — no backend for it exists yet; still a
+  separate, not-yet-started phase.
 - **Embedding-based match scoring exists, added 2026-08-22 (Step 3, see
   SESSIONS.md) — scoring mechanism only, no 70%-threshold wiring or
   LLM-suggestion logic yet (a Groq-based matched/missing skills-list
@@ -795,16 +866,21 @@ in the mockup but not exposed by the real API at reskin time — since
 closed (2026-08-23, see the sponsor-summary entries above and
 SESSIONS.md): the API now returns all three and the job detail
 page/sponsor sidebar/list-view sponsor indicator all consume them for
-real. Resume Management and AI resume-review screens, plus
-location-radius/department filters, remain explicitly out of scope per
-that task's own instructions. **Dashboard is also no longer out of
-scope** — `frontend/src/app/dashboard/page.tsx` (added 2026-08-23, see
-SESSIONS.md's "Real dashboard page" entry) is real, wired to
-`GET /dashboard/stats`, and is the app's home view (`/` redirects there
-— see the routing note above). This reskin (plus the sponsor-data and
-dashboard follow-ups) is now the current state of the frontend — treat
+real. AI resume-review screens and location-radius/department filters
+remain explicitly out of scope per that task's own instructions.
+**Dashboard is also no longer out of scope** — `frontend/src/app/
+dashboard/page.tsx` (added 2026-08-23, see SESSIONS.md's "Real dashboard
+page" entry) is real, wired to `GET /dashboard/stats`, and is the app's
+home view (`/` redirects there — see the routing note above). **Neither
+is Resume version management** — `frontend/src/app/resumes/page.tsx`
+(added 2026-08-24, see SESSIONS.md's "Real resume management page"
+entry) is real, wired to Step 13's `GET /resumes`/`POST /resumes/
+upload`/`PATCH /resumes/{id}/activate`, and is reachable via `NavBar`'s
+fourth tab. This reskin (plus the sponsor-data, dashboard, and resume-
+management follow-ups) is now the current state of the frontend — treat
 everything above this note (Phase 0 repo hygiene through the
 ATS-detection standalone function) as historical foundation, not the
-latest picture. Not yet started: resume-upload UI, Ashby/Workday
-spiders, and everything else already listed as deferred above — those
-deferrals still stand.
+latest picture. Not yet started: the AI resume-review UI (missing
+keywords/phrasing suggestions/formatting notes — no backend for it
+exists yet), Ashby/Workday spiders, and everything else already listed
+as deferred above — those deferrals still stand.
