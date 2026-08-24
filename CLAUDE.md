@@ -248,18 +248,68 @@ nothing scrapes them; treat that as planned, not present.
   IF NOT EXISTS` as a no-op indefinitely. Don't assume a future fresh
   Postgres install (a new dev machine, a rebuilt volume) has any of this
   done — re-check `\dx` and re-run this same sequence if not.
-- Scheduling: `scripts/run_orchestrator_cron.sh` + a local crontab entry
-  (`0 3 * * *`, daily) run `main.py` unattended — added 2026-08-22, see
-  SESSIONS.md. The wrapper is a thin `cd` + `.venv/bin/python main.py`
-  call; it does not duplicate `.env`/`DATABASE_URL` or point at a
-  different DB than manual runs. `logs/cron.log` (new, also gitignored
-  under `logs/`) is a lightweight start/exit-code/end marker log,
-  separate from and in addition to the existing rotating
-  `logs/huntloop.log` — see README's "Scheduled runs" section for
-  enable/disable/where-to-check. This is local-only automation; GitHub
-  Actions scheduling against a hosted Postgres (Supabase/Neon) is a
-  deliberately separate, later deployment step — don't build it
-  unprompted.
+- **Scheduling is launchd, not cron, as of 2026-08-24 (see SESSIONS.md's
+  "Migrate scraping schedule from cron to launchd" entry) — the original
+  crontab entry (`0 3 * * *`) was confirmed to never fire reliably on
+  this machine: `logs/cron.log` showed only 2 real runs ever, both at
+  times that don't match 3am (10:39am and 9:45pm on 2026-08-22), both
+  clearly manual/ad hoc, not cron-triggered. Root cause: cron does not
+  run missed jobs when the Mac is asleep, and this laptop sleeps
+  overnight with no wake schedule — 3am reliably never happened.**
+  `~/Library/LaunchAgents/com.huntloop.scraper.plist` (a per-user
+  LaunchAgent, gitignored-equivalent — it lives outside the repo, in
+  home directory config, same as any other machine-local launchd job)
+  runs the *same, unmodified* `scripts/run_orchestrator_cron.sh` wrapper
+  (both its scraper + skills-matching stages — skills-matching wasn't
+  touched in this step, it's being replaced by a continuous worker in a
+  later step) via `StartCalendarInterval` (`Hour=3, Minute=0`), same
+  time-of-day the crontab used. **`man launchd.plist` confirms — not
+  assumed — that unlike cron, launchd runs a missed
+  `StartCalendarInterval` job the next time the machine wakes, coalescing
+  multiple missed firings into one**, which is the actual reason this
+  migration is expected to be reliable where cron wasn't; this still
+  requires the machine to wake at some point in each 24h window (a Mac
+  fully asleep for days would still not run it) — `pmset -g sched` shows
+  this machine already has other apps' scheduled wake events registered,
+  but no HuntLoop-specific `pmset` wake was configured in this step, since
+  that requires `sudo` and is a separate, larger-blast-radius change
+  (affects battery/other scheduled wakes) than what was asked; revisit
+  only if launchd's wake-and-catch-up behavior alone proves insufficient
+  in practice. The plist's `StandardOutPath`/`StandardErrorPath` both
+  point at `logs/launchd.log` (new) — normally near-empty, since the
+  wrapper script already redirects its own stdout/stderr internally into
+  `logs/cron.log`; `logs/launchd.log` only catches failures *before* the
+  wrapper's own redirection takes effect (exactly how a real failure was
+  caught during setup — see below). `logs/cron.log`'s format and
+  `logs/huntloop.log` are completely unchanged — only the trigger
+  mechanism changed, not what runs or how it logs. **Verified end-to-end
+  for real, not just "job loaded"**: `launchctl kickstart -p
+  gui/<uid>/com.huntloop.scraper` force-fired the job immediately
+  (evidence given `StartCalendarInterval` doesn't need to be awaited
+  minute-by-minute to prove the job itself runs correctly under launchd —
+  only the trigger differs from a real 3am firing, not the executed
+  program/environment/logging); real `job_postings` row count went
+  605→606 with `scraped_at` updated to the run's real timestamp, and
+  stage 2 (skills-matching) processed real batches against the real Groq
+  API, all visible in `logs/cron.log` with the exact same log format as
+  every prior cron-triggered run. **Hit and fixed one real, non-obvious
+  blocker along the way**: the first kickstart failed immediately with
+  `Operation not permitted` (`shell-init: error retrieving current
+  directory` / bash unable to even read the script) — macOS TCC privacy
+  protection blocks processes spawned by launchd from accessing
+  `~/Desktop` (and Documents/Downloads) by default, unlike an interactive
+  Terminal session which already has that access; this repo happens to
+  live under `~/Desktop/HuntLoop`. Fixed by granting Full Disk Access to
+  `/bin/bash` (System Settings → Privacy & Security → Full Disk Access) —
+  required on this machine specifically because the repo is under
+  Desktop; not needed if a repo lived somewhere TCC doesn't gate. The old
+  crontab entry (`crontab -l` had exactly this one line, nothing else) was
+  removed via `crontab -r` only after the launchd version was confirmed
+  working — both were never running simultaneously in production, only
+  momentarily during this verification. This is still local-only
+  automation; GitHub Actions scheduling against a hosted Postgres
+  (Supabase/Neon) remains a deliberately separate, later deployment step —
+  don't build it unprompted.
 - **Resume ingestion exists (`resume_versions` table + `scripts/
   ingest_resume.py`), added 2026-08-22.** `data/resumes/` holds the
   actual PDF(s) and is gitignored + dockerignored (personal data, same
@@ -405,9 +455,10 @@ nothing scrapes them; treat that as planned, not present.
   `backfill_skills_matching.py` stops the whole run cleanly on that
   signal (confirmed working live: a real cron trigger hit a genuine TPD
   429 and stopped itself after processing 24 jobs, exit code 0 — not a
-  crash, not a hang). **Skills-matching is now a stage of the daily cron
-  orchestrator (`scripts/run_orchestrator_cron.sh`, same `0 3 * * *`
-  crontab entry as Step 5/7 — no separate schedule)** — stage 1 is the
+  crash, not a hang). **Skills-matching is now a stage of the daily
+  orchestrator (`scripts/run_orchestrator_cron.sh`, same schedule as
+  Step 5/7 — no separate schedule; that schedule is now launchd-driven,
+  not cron-driven, see the Scheduling bullet above)** — stage 1 is the
   existing scraper (`main.py`), stage 2 processes `matched_skills IS
   NULL` rows oldest-`scraped_at`-first under the real daily budget, then
   stops itself when exhausted; both stages always run regardless of the
@@ -429,6 +480,103 @@ nothing scrapes them; treat that as planned, not present.
   re-checking the real data distribution first, and don't assume
   `matched_skills` values that predate 2026-08-22 in the DB are
   trustworthy without checking their length against it.
+- **A hybrid keyword + embedding-similarity relevance pre-filter exists,
+  added 2026-08-24 (see SESSIONS.md) — `job_postings.is_relevant`
+  (nullable `Boolean`, migration `0900f3514ad2`), meant to flag whether
+  a posting is a software-engineering/technical role at all before
+  resume-matching or skills-analysis spend effort on it. Flags only —
+  never deletes/filters rows out of `job_postings`.** Logic lives in
+  `huntloop.relevance_filter`: `INCLUDE_KEYWORDS`/`EXCLUDE_KEYWORDS`
+  matched against `job_title` (built by reading all 425 real distinct
+  titles in the live dataset, not a generic guess — e.g. bare `"analyst"`
+  and `"technical"` were deliberately left out after the real data showed
+  them mostly attached to non-technical titles here, and `"finance"`/
+  `"financial"` were tried as excludes and dropped after they'd have
+  wrongly overridden the one real technical title containing "Finance",
+  `Data Scientist, Finance`, to irrelevant), combined with cosine
+  similarity between each job's `title+description` embedding
+  (`huntloop.embeddings.embed_texts()`, same all-MiniLM-L6-v2 model as
+  resume/job-match scoring) and one fixed `REFERENCE_TEXT` describing the
+  *category* of technical work — deliberately not a resume, since this
+  filter must behave the same regardless of which resume is active.
+  **`EMBEDDING_SIMILARITY_THRESHOLD = 0.29`, chosen from real measured
+  similarities** (`scripts/calibrate_relevance_threshold.py`, run once
+  against the exact real known-relevant/known-irrelevant rows named in
+  this task) — known-irrelevant real titles (Wealthfront Fraud
+  Operations Specialist, Checkr Chief of Staff, Duolingo Creative
+  Director) topped out at 0.2547; known-relevant real titles (3 real
+  Palantir Software Engineer variants, Palantir Platform Engineer,
+  Duolingo Senior Data Science Manager) started at 0.3240 — a clean,
+  non-overlapping gap, 0.29 sitting at its midpoint. Combination:
+  `is_relevant = (keyword_include OR embedding_similarity >= 0.29) AND
+  NOT keyword_exclude` — keyword-exclude is an unconditional override
+  (a title explicitly naming a non-technical function like legal/sales/
+  marketing/tax/recruiting is a higher-confidence signal than a generic
+  word like "engineer" appearing elsewhere in the same title, e.g.
+  "Embedded Legal Engineer", "Marketing Engineer"), while include and
+  embedding-similarity are OR'd since keywords alone would miss
+  obliquely-worded technical titles and embedding similarity alone would
+  need an unnecessarily conservative threshold on its own. **Deliberately
+  does NOT reuse the existing `job_postings.embedding` column** — that
+  one is computed from `job_description` alone for resume-match scoring
+  (a separate, already-documented purpose); this filter computes its own
+  `title+description` embedding on the fly per job during the backfill
+  run instead of storing one, to avoid any risk of silently changing
+  resume-match semantics. `scripts/backfill_relevance.py` (same
+  batch-of-100/`IS NULL`/interrupt-safe pattern as `scripts/
+  backfill_embeddings.py`) classified all 606 real rows in one pass (368
+  relevant, 238 not, 0 left NULL) — verified against every known example
+  named in the task via direct `psql` query, all correct. Two accepted
+  MVP-level imprecisions found during spot-checking and left as-is
+  (embedding-only false positives, no keyword involved): `"GRC Program
+  Manager"` and `"Product Designer"` — not blockers, worth revisiting
+  only if it turns out to matter in practice.
+  **Wired into the live insert path as of 2026-08-24 (see SESSIONS.md's
+  "Wire the relevance pre-filter into the live scrape pipeline" entry) —
+  `JobDataPipeline.process_item()` (`src/huntloop/pipelines.py`) now
+  calls `classify_relevance()` for every newly-inserted row, so
+  `is_relevant` is populated at insert time, not left NULL for a later
+  manual backfill.** `REFERENCE_TEXT`/`EMBEDDING_SIMILARITY_THRESHOLD`/
+  `classify_relevance` were reused completely unchanged — nothing
+  re-derived or re-tuned in this step. The reference-text embedding is
+  cached once per `JobDataPipeline` instance (`self._reference_embedding`)
+  — computed at most twice per full `main.py` run (one pipeline instance
+  per spider/platform, confirmed via `main.py`'s `process.crawl()` call
+  pattern), never once per row. `huntloop.relevance_filter.
+  cosine_similarity()` is a small extracted helper (pure vector math,
+  not tuned logic) now shared by the pipeline and both relevance
+  scripts, replacing three separate copies.
+  **A real, load-bearing environment constraint governs this wiring, and
+  was resolved via an explicit user decision, not a silent choice**: the
+  embedding half needs torch, but the actual daily-scheduled scraper
+  (the `launchd` job from the prior step) runs `main.py` via this
+  machine's local `.venv`, which — as established repeatedly elsewhere
+  in this doc — cannot run torch at all here. `JobDataPipeline` therefore
+  **degrades gracefully**: if `sentence-transformers`/torch isn't
+  importable, it logs one warning per spider run (not per row) and
+  leaves `is_relevant` NULL for that run's inserts, rather than crashing
+  the scrape; the same applies to an isolated per-row embedding failure
+  (any other exception), which leaves just that row's `is_relevant`
+  NULL rather than rolling back its whole insert. **Consequence worth
+  knowing**: real `launchd`-triggered scheduled scrapes (local `.venv`,
+  no torch) currently still leave newly-inserted rows' `is_relevant`
+  NULL — this only actually classifies at insert time when `main.py`
+  runs somewhere torch is available (e.g. `docker compose run --rm app
+  python main.py`, as used to verify this step). Closing that gap for
+  real scheduled runs means either migrating the daily automation to run
+  via Docker, or continuing to periodically run `scripts/
+  backfill_relevance.py` — a decision deliberately left open, not made
+  in this step. Verified end-to-end for real via `docker compose run
+  --rm app python main.py` against the real local Postgres: 5 genuinely
+  new rows inserted (606→611), all 5 had `is_relevant` populated
+  immediately (confirmed via direct `psql` query); re-running
+  `scripts/backfill_relevance.py` immediately after found **0 rows left
+  to classify** — the insert-time path and the batch-backfill path fully
+  agree. `pytest`: 72/72 passing, including one new assertion
+  (`test_process_item_inserts_job_posting`) directly exercising the
+  graceful-degradation path (this test env also has no torch). Don't
+  touch skills-matching/Groq/queue work when extending this — that's a
+  deliberately separate, later step.
 
 ## Key architectural decisions (already made — don't re-litigate)
 

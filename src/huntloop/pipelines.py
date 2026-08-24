@@ -22,6 +22,7 @@ from .db_models import (
 from sqlalchemy import create_engine
 
 from . import metrics
+from .relevance_filter import REFERENCE_TEXT, classify_relevance, cosine_similarity
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,14 @@ class JobDataPipeline:
         self.database_url = database_url
         self.engine = create_engine(self.database_url, echo=False)
         self.Session = sessionmaker(bind=self.engine)
+        # Cached per pipeline instance (one instance per spider run - see
+        # from_crawler) so the reference embedding is computed at most
+        # once per spider, not once per inserted row. _relevance_embedding_unavailable
+        # is a separate cache for the "torch/sentence-transformers isn't
+        # installed in this environment" case (see _get_reference_embedding)
+        # so a scrape run only logs that warning once, not per item.
+        self._reference_embedding = None
+        self._relevance_embedding_unavailable = False
 
     @classmethod
     def from_crawler(cls, crawler):
@@ -42,6 +51,55 @@ class JobDataPipeline:
 
     def close_spider(self, spider):
         logger.info("JobDataPipeline closed")
+
+    def _get_reference_embedding(self):
+        """Lazily compute and cache REFERENCE_TEXT's embedding once per
+        spider run (see __init__). Returns None if sentence-transformers/
+        torch isn't installed in this environment (this project's local
+        .venv doesn't have it - see huntloop.embeddings' docstring and
+        CLAUDE.md) - callers treat that as "can't classify this row right
+        now", not a fatal error, so a torch-less environment still
+        completes a real scrape; unclassified rows are picked up later
+        by scripts/backfill_relevance.py."""
+        if self._reference_embedding is not None:
+            return self._reference_embedding
+        if self._relevance_embedding_unavailable:
+            return None
+        try:
+            from .embeddings import embed_texts
+        except ImportError:
+            logger.warning(
+                "sentence-transformers/torch not installed in this environment - "
+                "job_postings.is_relevant will be left NULL for this run's inserts "
+                "and needs a later scripts/backfill_relevance.py run."
+            )
+            self._relevance_embedding_unavailable = True
+            return None
+        self._reference_embedding = embed_texts([REFERENCE_TEXT])[0]
+        return self._reference_embedding
+
+    def _classify_relevance(self, job_title, job_description):
+        """Returns True/False, or None if it can't be classified right
+        now (see _get_reference_embedding) - a None here leaves
+        is_relevant NULL on the row, same as before this row existed."""
+        if not job_title:
+            return None
+        reference_embedding = self._get_reference_embedding()
+        if reference_embedding is None:
+            return None
+        from .embeddings import embed_texts
+
+        try:
+            job_embedding = embed_texts([f"{job_title}\n{job_description or ''}"])[0]
+        except Exception:
+            # An isolated embedding failure for this one row shouldn't
+            # roll back the whole insert - leave is_relevant NULL for it
+            # (same as the "unavailable" case above), same defensive
+            # principle as the surrounding process_item try/except.
+            logger.warning(f"Relevance embedding failed for {job_title!r} - leaving is_relevant NULL", exc_info=True)
+            return None
+        similarity = cosine_similarity(reference_embedding, job_embedding)
+        return classify_relevance(job_title, similarity)
 
     def process_item(self, item, spider):
         logger.warning(f"[PIPELINE TRIGGERED] Processing item: {item.get('job_title')}")
@@ -94,6 +152,8 @@ class JobDataPipeline:
                 return item
 
             # 4️⃣ Create JobPosting entry
+            is_relevant = self._classify_relevance(item.get("job_title"), item.get("job_description"))
+
             job_post = JobPosting(
                 job_title=item.get("job_title"),
                 job_url=item.get("job_url"),
@@ -101,7 +161,8 @@ class JobDataPipeline:
                 job_description=item.get("job_description"),
                 date_posted=item.get("date_posted"),
                 company_id=company.id,
-                source_id=source.id
+                source_id=source.id,
+                is_relevant=is_relevant,
             )
 
             session.add(job_post)

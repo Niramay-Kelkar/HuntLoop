@@ -153,6 +153,14 @@ class JobPosting(Base):
     # that specific row; see that script for how failures are handled).
     matched_skills = Column(JSON, nullable=True)
     missing_skills = Column(JSON, nullable=True)
+    # Hybrid keyword + embedding-similarity relevance pre-filter (see
+    # huntloop.relevance_filter, scripts/backfill_relevance.py) - flags
+    # whether a posting looks like a software-engineering/technical role
+    # at all, before resume-matching or skills-analysis spend any effort
+    # on it. Nullable - not every row has been classified yet; a NULL
+    # here is "not yet classified", not "unknown/irrelevant". Flags only,
+    # never filters rows out of this table.
+    is_relevant = Column(Boolean, nullable=True)
 
     # Foreign Keys
     company_id = Column(Integer, ForeignKey("companies.id", ondelete="CASCADE"))
