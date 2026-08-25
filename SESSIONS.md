@@ -4232,3 +4232,278 @@ automation is migrated to run via Docker (a separate infra decision, not
 made here) or `scripts/backfill_relevance.py` continues to be run
 periodically to catch them; this is a known, called-out consequence of
 the graceful-degradation choice above, not an oversight.
+
+## 2026-08-24 — Move the daily scrape to run via Docker (closes Step C's known gap)
+
+Retires the `.venv`/Docker split for the daily scraper: `scripts/
+run_orchestrator_cron.sh`'s stage 1 (`main.py`) now runs inside the
+`app` Docker image instead of the local `.venv`, the same environment
+every other embedding-dependent script in this project already needs
+(`scripts/backfill_embeddings.py`, `scripts/backfill_relevance.py`,
+`scripts/calibrate_relevance_threshold.py`). This closes the gap flagged
+in the prior step: since `is_relevant` classification needs
+`sentence-transformers`/torch, and this machine's local `.venv` cannot
+run torch at all, real `launchd`-triggered scheduled scrapes were
+leaving newly-inserted rows' `is_relevant` NULL (graceful degradation,
+not a crash) until a manual Docker-run backfill caught them. Now the
+daily scrape itself runs somewhere torch is available, so that path is
+no longer expected to trigger for the daily scrape specifically.
+
+**What actually changed - only `scripts/run_orchestrator_cron.sh`'s
+stage 1 invocation and `docker-compose.yml`'s `app` service. The
+launchd plist itself is untouched** (it only ever invoked the wrapper
+script, so there was nothing in it to change). Stage 1 went from:
+```
+"$PYTHON" "$REPO_ROOT/main.py"
+```
+to:
+```
+docker compose run --rm --build -e DATABASE_URL="$DB_URL_FOR_DOCKER" app python main.py
+```
+Stage 2 (`scripts/backfill_skills_matching.py`) is completely untouched
+- still runs via the local `.venv` exactly as before. It only talks to
+Groq over HTTP, no torch dependency, so there was no reason to move it,
+and the task's scope was explicit about leaving relevance-classification
+logic and skills-matching/queue work alone in this step.
+
+**Two real environment gaps, checked directly rather than assumed away
+(per the task's explicit "verify this explicitly, don't assume it
+carries over" instruction):**
+
+1. **launchd's job environment does not inherit an interactive shell's
+   PATH.** Confirmed directly via `launchctl print
+   gui/<uid>/com.huntloop.scraper` before writing any fix: this job's
+   own default environment shows `PATH => /usr/bin:/bin:/usr/sbin:/sbin`
+   - no `/usr/local/bin`, which is where Docker Desktop's `docker` CLI
+   is symlinked on this machine (`which docker` -> `/usr/local/bin/docker`
+   -> resolves to `/Applications/Docker.app/Contents/Resources/bin/docker`).
+   Verified the actual consequence by simulating launchd's exact minimal
+   environment (`env -i PATH="/usr/bin:/bin:/usr/sbin:/sbin" docker
+   ...`) before adding the fix, then confirming `docker`/`docker compose`
+   both work once `/usr/local/bin` is added back
+   (`env -i PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" HOME="$HOME"
+   docker compose config` succeeded; also tested with HOME entirely
+   unset, still worked - Docker's CLI plugin discovery under
+   `~/.docker/cli-plugins/` and its default context apparently don't
+   hard-require HOME to be explicitly set in env, at least on this
+   machine). Fixed by having the wrapper script itself `export
+   PATH="/usr/local/bin:$PATH"` near the top, rather than relying on the
+   plist's `EnvironmentVariables` key - keeps the fix self-contained in
+   the one place already responsible for this kind of environment setup.
+2. **`docker-compose.yml`'s own default `DATABASE_URL` for `app` points
+   at its own small `db` service (`db:5432`), not the real local system
+   Postgres (`localhost:5432`) where the actual scraped/matched data
+   lives** (see the two-Postgres-instances note elsewhere in this doc).
+   The wrapper derives the correct override itself:
+   `DB_URL_FOR_DOCKER="$(grep -E '^DATABASE_URL=' .env | cut -d= -f2- |
+   sed 's/localhost/host.docker.internal/')"` - the exact same
+   `localhost` -> `host.docker.internal` substitution already documented
+   in `scripts/backfill_embeddings.py` and used for every prior manual
+   `docker compose run` against this Postgres, just automated instead of
+   typed by hand each time.
+
+`--build` is passed on every scheduled run (`docker compose run --rm
+--build ...`) so a scheduled run always reflects whatever's actually on
+disk, rather than silently running a stale image from whenever `docker
+compose build app` was last run by hand - this is now the ongoing
+production path for the scraper, not a one-off manual invocation, so
+image staleness would otherwise be invisible until something looked
+wrong.
+
+**A separate, real logging regression was found (and fixed) while
+verifying this, not something the task anticipated** -
+`docker-compose.yml`'s `app` service had no volume mount for `logs/`.
+Confirmed the actual consequence directly: after a real `docker compose
+run --rm app python main.py`, the container's rotating
+`logs/huntloop.log` lines (e.g. `scrapy.core.engine: Spider closed`)
+were nowhere in the real host `logs/huntloop.log` - `grep` came back
+empty - because `huntloop.logging_config.setup_logging()`'s file handler
+was writing only inside the container's own ephemeral filesystem,
+discarded on `--rm`; only whatever flowed to stdout/stderr (captured via
+the wrapper's own `>> logs/cron.log` redirect) survived. Fixed the same
+way `api`'s existing `./data/resumes:/app/data/resumes` mount already
+solves the identical class of problem: added `./logs:/app/logs` to
+`app`'s `volumes:` in `docker-compose.yml`. **Checked a real risk before
+trusting the fix, not after**: the container's `huntloop` user is uid
+999, while the host directory is owned by this machine's real user
+(uid 501) - on a Linux Docker host this mismatch would typically cause
+a real permission-denied writing to the pre-existing, host-owned
+`logs/huntloop.log` (mode 644, no "other" write bit). Tested directly
+before trusting it: `docker compose run --rm app python -c "...write a
+test log line..."` succeeded, and the line was confirmed present in the
+real host file via a plain `grep` from outside the container - Docker
+Desktop's macOS file-sharing layer doesn't enforce strict POSIX
+ownership on bind mounts here. Worth re-checking if this project is ever
+run on a Linux Docker host, where bind-mount permissions ARE enforced
+strictly and this exact fix could fail differently there.
+
+**Docker-down behavior, researched and reported per the task's explicit
+ask - not silently worked around:**
+- Simulated an unreachable Docker daemon via a deliberately bad
+  `DOCKER_HOST` (`unix:///tmp/nonexistent-docker.sock`) rather than
+  actually quitting the real Docker Desktop mid-session, which felt
+  unnecessarily disruptive for an equivalent test. Real result:
+  `docker compose run` fails immediately (no hang) with a clear,
+  specific error to stderr - `"unable to get image ...: failed to
+  connect to the docker API at unix:///tmp/nonexistent-docker.sock;
+  check if the path is correct and if the daemon is running: dial unix
+  ...: connect: no such file or directory"` - and exit code 1. Since the
+  wrapper redirects all stage output into `logs/cron.log` and already
+  captures/logs each stage's exit code, this failure mode is fully
+  visible after the fact, not silent - it would show up as `stage 1/2
+  finished with exit code 1` and a real Docker error message in the log,
+  same as any other stage 1 failure.
+- **Docker Desktop is NOT configured to start at login on this
+  machine** - checked its own real settings store directly, not
+  guessed: `~/Library/Group Containers/group.com.docker/settings.json`
+  and `settings-store.json` both show `"AutoStart": false` /
+  `"autoStart": false`. Also checked for a Docker LaunchAgent
+  (`~/Library/LaunchAgents/`, none) and via `osascript`'s System Events
+  login-items list (Docker not present, only Google Chrome was).
+  **Consequence**: if this Mac reboots, or Docker Desktop is quit for
+  any reason, the next `launchd` firing will cleanly fail stage 1 (per
+  the tested behavior above) rather than silently succeed or hang -
+  scraping simply won't happen again until Docker Desktop is started by
+  hand. **Deliberately not fixed or worked around in this step** - not
+  silently enabling Docker's autostart or adding new automation to force
+  it running, per the task's explicit instruction to report this as an
+  open decision rather than resolve it unprompted.
+
+**Verified, all real, no mocking:**
+- **(a)** `launchctl kickstart -p gui/<uid>/com.huntloop.scraper` (same
+  method used to verify the original launchd migration) fired a real
+  run. `logs/cron.log` shows the updated stage label
+  (`"--- stage 1/2: scraper orchestrator (main.py, via docker compose
+  run) ---"`) followed by real `docker build` output (pulling/building
+  the `app` image) and real scrape activity. 4 genuinely new
+  `job_postings` rows were inserted (`Engineering Manager, Mortgage`,
+  `Engineering Manager, Verifications`, `Senior Software Engineer
+  (Python), Mortgage`, `Staff Workday HRIS Technical Analyst`) - all 4
+  had `is_relevant` populated immediately, confirmed via a direct `psql`
+  query, not app output; `count(*) FILTER (WHERE is_relevant IS NULL)`
+  was 0 both before and after. Stage 1 finished with real exit code 0;
+  the whole run (both stages) finished with exit code 0.
+- **(b)** Confirmed exactly what changed, not just that something did -
+  see the diff summary above. The plist is byte-for-byte unchanged from
+  the prior step; only the wrapper script's stage 1 invocation and
+  `docker-compose.yml`'s `app` service (`volumes:` addition) changed.
+  The old `.venv`-based stage 1 path (`"$PYTHON" "$REPO_ROOT/main.py"`)
+  no longer exists anywhere in the wrapper - `main.py` run manually via
+  `.venv` still works exactly as before (it's still how a developer runs
+  it by hand), it's only the scheduled path that changed.
+- **(c)** Logging format/destination confirmed unchanged after fixing
+  the volume-mount regression found above: `logs/cron.log`'s
+  start/stage/exit-code marker format is identical, and
+  `logs/huntloop.log` (the app's own rotating file) now genuinely
+  receives stage 1's real detail lines again, confirmed via `grep` from
+  outside any container. `logs/launchd.log` behavior is unchanged (still
+  only catches pre-redirect wrapper failures, confirmed still empty of
+  new content after a real successful run).
+- **(d)** `pytest`: 72/72 passing, unchanged - this step touched no
+  application code, only `scripts/run_orchestrator_cron.sh` and
+  `docker-compose.yml`.
+- **(e)** This entry plus the CLAUDE.md update, explicitly closing out
+  the "real scheduled scrapes leave is_relevant NULL" gap called out in
+  the prior step - now expected to no longer trigger for the daily
+  scrape specifically, though the graceful-degradation code itself is
+  left in place as a genuine safety net (a real per-row embedding
+  failure, or a future environment without Docker), not removed.
+
+Not touched, per this task's explicit scope: `huntloop.relevance_filter`
+(`REFERENCE_TEXT`/`EMBEDDING_SIMILARITY_THRESHOLD`/`classify_relevance`
+all reused exactly as Steps B/C left them), the embedding model, and
+skills-matching/Groq/queue work (stage 2 of the wrapper is completely
+untouched). Docker Desktop's autostart setting was reported, not
+changed - left as an open decision for the user.
+
+## 2026-08-24 — Enable Docker Desktop autostart-at-login (closes Step D's flag)
+
+Closes the open decision flagged in the prior step: Docker Desktop was
+not configured to start at login, meaning a reboot would silently leave
+the daily `launchd` scrape unable to reach Docker until someone manually
+reopened the app. This step is a single macOS/Docker Desktop
+configuration change on this machine - no repo files touched (confirmed
+via `git status` before and after: only this entry and the CLAUDE.md
+update below changed).
+
+**What actually toggled it**: no reliable non-interactive/CLI path
+exists for this specific setting. `docker desktop --help` has no
+settings subcommand for it, and driving it via `osascript`/System
+Events UI scripting was attempted and failed outright -
+`osascript is not allowed to send keystrokes (1002)`, since this
+session has no Accessibility permission grant. Rather than requesting
+that broad a permission (full UI/keystroke control of the machine) to
+toggle one checkbox, asked the user to toggle it directly in Docker
+Desktop's own Settings (General -> "Start Docker Desktop when you sign
+in") - the same reasoning as delegating the earlier Full Disk Access
+grant in the launchd step: a one-time manual action is lower-blast-radius
+than granting a session broad new permissions for a single use.
+
+**Verification - direct config-file and real-restart evidence, not "it's
+checked in the UI":**
+- **Found the real, live-authoritative config file first** -
+  `~/Library/Group Containers/group.com.docker/settings-store.json`, not
+  the neighboring `settings.json` (also present, also has an `autoStart`
+  key, but its mtime was frozen at `Jun 19 2022` throughout this entire
+  session - confirmed stale/vestigial, not what this Docker Desktop
+  version actually reads or writes). `settings-store.json`'s `AutoStart`
+  key: read as `false` immediately before asking the user to toggle it;
+  confirmed `true` immediately after, with the file's own mtime updated
+  to the exact moment the user applied the change in the UI - not a
+  stale/cached read.
+- **Checked the actual macOS-level login-item registration directly**,
+  via `sfltool dumpbtm` (Apple's own Background Task Management
+  inspection tool for macOS Sequoia's modern login-item system - not the
+  legacy AppleScript "login items" list, which doesn't reflect
+  SMLoginItemSetEnabled-style registrations like this one at all).
+  Real, non-obvious finding: the `DockerHelper` login item
+  (`4.com.docker.helper`, parent `2.com.docker.docker`) was **already**
+  `[enabled, allowed, visible, notified]` in `sfltool dumpbtm` output
+  even before the toggle, and stayed identical after. This isn't a null
+  result - it reveals the actual mechanism: `DockerHelper` is a small,
+  always-registered login-item launcher (installed once, at Docker
+  Desktop's first run), and it independently checks Docker Desktop's own
+  `AutoStart` preference in `settings-store.json` at each login to
+  decide whether to actually launch the full app or exit quietly. The
+  macOS-level registration and the app-level preference are two separate
+  layers - both need to be in the right state, and both were checked
+  independently here rather than assuming either implied the other.
+- **Real, if partial, restart test**: ran `docker desktop restart`
+  (Docker Desktop's own CLI, not just re-reading the file) and confirmed
+  it genuinely killed and relaunched the GUI process, not just the
+  backend - the `Docker Desktop --analytics-enabled=true --name=tray`
+  process's PID changed from `18086` to `37473`, and `docker ps`
+  succeeded again afterward (real engine came back up). Re-read
+  `settings-store.json` after this real restart: **`AutoStart` was still
+  `true`**, with the file's mtime updated again at restart time - proving
+  Docker Desktop's own startup logic re-reads and preserves this
+  preference across a real process restart, rather than resetting to a
+  default. This is meaningfully stronger evidence than a single read of
+  the JSON file would have been on its own.
+- **A genuine full OS reboot was NOT performed**, and this is stated
+  explicitly rather than assumed away, per the task's own instruction:
+  a full reboot would kill this entire working session (this
+  conversation, any other running work) and felt disproportionately
+  disruptive to test a setting that already has two independent, strong
+  pieces of evidence behind it (the persisted config value surviving a
+  real app-level restart, and the macOS login-item registration
+  confirmed enabled via Apple's own inspection tool). The genuine
+  first-real-reboot confirmation remains open - the next time this Mac
+  is actually rebooted for any reason, checking whether Docker Desktop
+  auto-launched (e.g. `ps aux | grep "Docker Desktop --analytics-enabled"`
+  shortly after login, no manual open) would be the real, final
+  confirmation this evidence predicts but doesn't itself constitute.
+
+**Explicitly not built, per this task's own instruction**: no local
+monitoring, retry loop, or launchd-side Docker-health check was added
+around this. **This fix is local-machine-only and will be entirely
+superseded if/when the scraper moves to a cloud deployment** (a managed
+container scheduler, or a Linux host running Docker Engine under
+`systemd` instead of Docker Desktop) - `systemd` would use its own
+native `enable`/`WantedBy=multi-user.target` mechanism, or a managed
+scheduler would have no "Docker Desktop" concept at all, so none of this
+step's investigation (Docker Desktop's specific settings-store.json
+format, its DockerHelper login-item mechanism, `sfltool dumpbtm`) would
+carry forward - it's worth remembering that when that migration
+eventually happens, not treating this as a permanent piece of
+infrastructure.

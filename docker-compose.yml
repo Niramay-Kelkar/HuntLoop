@@ -31,6 +31,17 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    # Added 2026-08-24 when the daily scraper (main.py) moved from the
+    # local .venv to `docker compose run` (see
+    # scripts/run_orchestrator_cron.sh and SESSIONS.md) - without this,
+    # huntloop.logging_config.setup_logging()'s rotating logs/huntloop.log
+    # file handler writes only inside this container's own ephemeral
+    # filesystem, discarded on `--rm`; only the console-handler output
+    # that happens to flow through docker's stdout into the wrapper
+    # script's own logs/cron.log redirect would survive. Same fix/
+    # reasoning as `api`'s ./data/resumes mount below.
+    volumes:
+      - ./logs:/app/logs
     depends_on:
       db:
         condition: service_healthy

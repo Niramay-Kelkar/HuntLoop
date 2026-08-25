@@ -1,27 +1,66 @@
 #!/bin/bash
-# Cron wrapper for HuntLoop's daily scheduled work: the multi-ATS scraper
-# orchestrator (main.py) followed by the skills-matching backfill stage
-# (scripts/backfill_skills_matching.py, added as a cron stage 2026-08-22
-# - see SESSIONS.md). Both stages always run, regardless of whether the
-# other succeeded - a scraping hiccup shouldn't stall skills-matching
-# progress on the existing backlog, and vice versa.
+# launchd/cron wrapper for HuntLoop's daily scheduled work: the multi-ATS
+# scraper orchestrator (main.py) followed by the skills-matching backfill
+# stage (scripts/backfill_skills_matching.py, added as a cron stage
+# 2026-08-22 - see SESSIONS.md). Both stages always run, regardless of
+# whether the other succeeded - a scraping hiccup shouldn't stall
+# skills-matching progress on the existing backlog, and vice versa.
+#
+# Stage 1 (the scraper) runs via `docker compose run` (the `app` image),
+# not the local .venv Python - as of 2026-08-24 (see SESSIONS.md's "Move
+# the daily scrape to run via Docker" entry). Reason: stage 1 now
+# classifies every newly-inserted job_postings row's is_relevant at
+# insert time (huntloop.relevance_filter, see CLAUDE.md), which needs
+# sentence-transformers/torch - and this machine's local .venv genuinely
+# cannot run torch (macOS Intel + Python 3.13, no compatible wheel - see
+# CLAUDE.md), same constraint as every other embedding-dependent script
+# in this project. Stage 2 (skills-matching) only talks to Groq over
+# HTTP, no torch dependency, so it's deliberately left running via the
+# local .venv exactly as before - no reason to move it into Docker.
+#
+# `--build` is passed so a scheduled run always reflects whatever's
+# currently on disk, rather than silently running a stale image from
+# whenever `docker compose build app` was last run manually - this is
+# now the ongoing production path for the scraper, not a one-off manual
+# invocation, so staleness would otherwise be invisible.
+#
+# DATABASE_URL is explicitly overridden to point at
+# host.docker.internal instead of docker-compose's own `db` service
+# (which docker-compose.yml points `app` at by default, a separate,
+# smaller instance - see CLAUDE.md's two-Postgres-instances note) -
+# derived from .env's real DATABASE_URL (same real local system Postgres
+# every manual run and the old .venv-based stage 1 used) by swapping
+# `localhost` for `host.docker.internal`, the same substitution
+# documented in scripts/backfill_embeddings.py and used for every prior
+# manual `docker compose run` against this Postgres.
+#
+# PATH is extended with /usr/local/bin (where Docker Desktop's `docker`
+# CLI is symlinked on this machine) because launchd does NOT inherit an
+# interactive shell's PATH - confirmed directly via `launchctl print`,
+# which shows launchd's own default PATH as only
+# `/usr/bin:/bin:/usr/sbin:/sbin` for this job, missing /usr/local/bin
+# entirely. Without this, `docker`/`docker compose` would not be found
+# at all when launchd fires this script - the earlier .venv/torch
+# question would never even be reached.
 #
 # Not run directly by developers - `python main.py` /
 # `python scripts/backfill_skills_matching.py` are still how you run
-# either stage manually. This wrapper exists only so cron has a stable
-# entrypoint that: cd's into the repo (cron's working directory is
-# otherwise unpredictable), uses the same .venv Python and .env config as
-# a manual run (both stages load .env themselves; nothing here
-# duplicates DATABASE_URL, GROQ_API_KEY, or any other credential), and
-# records a start/exit-code/end marker per stage in logs/cron.log so a
-# scheduled run's outcome is visible after the fact without watching it
-# live. Per-run detail (INFO/WARNING/ERROR lines, which companies were
-# scraped or skipped, which jobs got a skills match or were rejected by
-# the sanity filter, tracebacks) still goes to the app's own rotating
-# logs/huntloop.log via huntloop.logging_config.setup_logging() - this
-# script does not duplicate that, it just also captures each stage's
-# stdout/stderr into cron.log so wrapper-level failures (e.g. a missing
-# .venv) are visible too, not just app-level ones.
+# either stage manually (main.py still works locally too, it just can't
+# classify is_relevant without torch - see huntloop.pipelines). This
+# wrapper exists only so cron/launchd has a stable entrypoint that: cd's
+# into the repo (working directory is otherwise unpredictable), uses the
+# same .env config as a manual run (both stages load .env themselves;
+# nothing here duplicates DATABASE_URL, GROQ_API_KEY, or any other
+# credential beyond the one explicit Docker-networking override above),
+# and records a start/exit-code/end marker per stage in logs/cron.log so
+# a scheduled run's outcome is visible after the fact without watching
+# it live. Per-run detail (INFO/WARNING/ERROR lines, which companies
+# were scraped or skipped, which jobs got a skills match or were
+# rejected by the sanity filter, tracebacks) still goes to the app's own
+# rotating logs/huntloop.log via huntloop.logging_config.setup_logging()
+# - this script does not duplicate that, it just also captures each
+# stage's stdout/stderr into cron.log so wrapper-level failures (e.g.
+# Docker Desktop not running) are visible too, not just app-level ones.
 #
 # The skills-matching stage is expected to often stop early (not
 # complete every NULL row) once the day's 200K-token Groq budget is
@@ -31,13 +70,18 @@
 # jobs matched over time, with no separate manual re-triggering needed.
 #
 # See README.md's "Scheduled runs" section for how to install/remove the
-# crontab entry that calls this script, and where to check its output.
+# scheduling entry that calls this script, and where to check its output.
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 mkdir -p "$REPO_ROOT/logs"
 CRON_LOG="$REPO_ROOT/logs/cron.log"
+
+# See the PATH comment above - launchd's own environment doesn't include
+# /usr/local/bin, where Docker Desktop's `docker` CLI lives on this
+# machine.
+export PATH="/usr/local/bin:$PATH"
 
 PYTHON="$REPO_ROOT/.venv/bin/python"
 
@@ -50,8 +94,10 @@ PYTHON="$REPO_ROOT/.venv/bin/python"
     exit 1
   fi
 
-  echo "--- stage 1/2: scraper orchestrator (main.py) ---"
-  "$PYTHON" "$REPO_ROOT/main.py"
+  DB_URL_FOR_DOCKER="$(grep -E '^DATABASE_URL=' "$REPO_ROOT/.env" | cut -d= -f2- | sed 's/localhost/host.docker.internal/')"
+
+  echo "--- stage 1/2: scraper orchestrator (main.py, via docker compose run) ---"
+  docker compose run --rm --build -e DATABASE_URL="$DB_URL_FOR_DOCKER" app python main.py
   scrape_status=$?
   echo "--- stage 1/2 finished with exit code $scrape_status ---"
 

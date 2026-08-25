@@ -263,7 +263,11 @@ nothing scrapes them; treat that as planned, not present.
   (both its scraper + skills-matching stages — skills-matching wasn't
   touched in this step, it's being replaced by a continuous worker in a
   later step) via `StartCalendarInterval` (`Hour=3, Minute=0`), same
-  time-of-day the crontab used. **`man launchd.plist` confirms — not
+  time-of-day the crontab used. **The wrapper's own internals changed
+  later (the scraper stage moved from `.venv` to Docker, 2026-08-24 —
+  see the "daily scraper itself now runs via Docker" bullet further
+  below) — the plist described here is still exactly what's installed,
+  unchanged since this step.** **`man launchd.plist` confirms — not
   assumed — that unlike cron, launchd runs a missed
   `StartCalendarInterval` job the next time the machine wakes, coalescing
   multiple missed firings into one**, which is the actual reason this
@@ -557,26 +561,126 @@ nothing scrapes them; treat that as planned, not present.
   leaves `is_relevant` NULL for that run's inserts, rather than crashing
   the scrape; the same applies to an isolated per-row embedding failure
   (any other exception), which leaves just that row's `is_relevant`
-  NULL rather than rolling back its whole insert. **Consequence worth
-  knowing**: real `launchd`-triggered scheduled scrapes (local `.venv`,
-  no torch) currently still leave newly-inserted rows' `is_relevant`
-  NULL — this only actually classifies at insert time when `main.py`
-  runs somewhere torch is available (e.g. `docker compose run --rm app
-  python main.py`, as used to verify this step). Closing that gap for
-  real scheduled runs means either migrating the daily automation to run
-  via Docker, or continuing to periodically run `scripts/
-  backfill_relevance.py` — a decision deliberately left open, not made
-  in this step. Verified end-to-end for real via `docker compose run
-  --rm app python main.py` against the real local Postgres: 5 genuinely
-  new rows inserted (606→611), all 5 had `is_relevant` populated
-  immediately (confirmed via direct `psql` query); re-running
-  `scripts/backfill_relevance.py` immediately after found **0 rows left
-  to classify** — the insert-time path and the batch-backfill path fully
-  agree. `pytest`: 72/72 passing, including one new assertion
-  (`test_process_item_inserts_job_posting`) directly exercising the
-  graceful-degradation path (this test env also has no torch). Don't
-  touch skills-matching/Groq/queue work when extending this — that's a
-  deliberately separate, later step.
+  NULL rather than rolling back its whole insert.
+  **The "real scheduled scrapes leave is_relevant NULL" gap noted when
+  this was first wired in is now closed, as of 2026-08-24 (see the next
+  bullet and SESSIONS.md) — the daily scraper itself now runs via
+  Docker, so this graceful-degradation path is no longer expected to
+  ever trigger for the daily scrape specifically.** It's left in place
+  (not removed) as a genuine safety net — a real per-row embedding
+  failure, a future environment without Docker, etc. Verified end-to-end
+  for real via `docker compose run --rm app python main.py` against the
+  real local Postgres before the Docker migration: 5 genuinely new rows
+  inserted, all 5 had `is_relevant` populated immediately (confirmed via
+  direct `psql` query); re-running `scripts/backfill_relevance.py`
+  immediately after found **0 rows left to classify** — the insert-time
+  path and the batch-backfill path fully agree. `pytest`: 72/72 passing,
+  including one new assertion (`test_process_item_inserts_job_posting`)
+  directly exercising the graceful-degradation path (this test env also
+  has no torch). Don't touch skills-matching/Groq/queue work when
+  extending this — that's a deliberately separate, later step.
+- **The daily scraper itself now runs via Docker, not the local `.venv`,
+  as of 2026-08-24 (see SESSIONS.md's "Move the daily scrape to run via
+  Docker" entry) — closing the gap noted in the bullet above.**
+  `scripts/run_orchestrator_cron.sh`'s stage 1 (the scraper) now runs
+  `docker compose run --rm --build -e DATABASE_URL=... app python
+  main.py` instead of `.venv/bin/python main.py` — the same `app` image
+  every other embedding-dependent script in this project already needs.
+  Stage 2 (skills-matching) is untouched, still `.venv/bin/python
+  scripts/backfill_skills_matching.py` — it only talks to Groq over
+  HTTP, no torch dependency, no reason to move it. The launchd plist
+  itself (`~/Library/LaunchAgents/com.huntloop.scraper.plist`) is
+  unchanged — it already only invoked the wrapper script, so all the
+  real changes live in the wrapper.
+  **Two real environment gaps were found and fixed, not assumed away:**
+  (1) launchd's job environment does not inherit an interactive shell's
+  `PATH` — confirmed directly via `launchctl print`, which showed this
+  job's own default `PATH` as just `/usr/bin:/bin:/usr/sbin:/sbin`,
+  missing `/usr/local/bin` where Docker Desktop's `docker` CLI is
+  symlinked on this machine; without a fix, `docker` would never be
+  found at all. Fixed by having the wrapper script `export
+  PATH="/usr/local/bin:$PATH"` itself, rather than relying on the
+  plist. (2) `DATABASE_URL` is overridden per-invocation (`sed
+  's/localhost/host.docker.internal/'` against the real value in
+  `.env`) since `docker-compose.yml`'s own default for `app` points at
+  its own small `db` service, not the real local system Postgres where
+  the actual scraped data lives (see the two-Postgres-instances note
+  below) — same substitution pattern already used for every prior
+  manual `docker compose run` against this Postgres.
+  `--build` is passed on every scheduled run so a stale image can never
+  silently run in production — this is now the ongoing daily path, not
+  a one-off manual invocation, so staleness would otherwise be
+  invisible.
+  **A separate, real logging regression was found and fixed while
+  verifying this**: `docker-compose.yml`'s `app` service had no volume
+  mount for `logs/`, so stage 1's rotating `logs/huntloop.log` file
+  handler was writing only inside the container's own ephemeral
+  filesystem — discarded on `--rm`, with only the console-handler
+  output that happened to flow through to `logs/cron.log` surviving.
+  Fixed the same way `api`'s `./data/resumes` mount already solves the
+  identical class of problem: `app` now has a `./logs:/app/logs`
+  volume mount too. A real host/container UID mismatch (host `niramaykelkar`
+  vs. the container's `huntloop` user, uid 999) was checked directly,
+  not assumed safe — confirmed by an actual write-then-read-from-host
+  test that Docker Desktop's macOS file-sharing layer doesn't enforce
+  strict POSIX ownership on bind mounts here, so this isn't a problem
+  on this machine; worth re-checking if this project ever runs on
+  Linux, where bind-mount permissions are enforced strictly.
+  **Docker-down behavior, researched and reported per this task's
+  explicit ask, not silently fixed**: simulated an unreachable Docker
+  daemon (bad `DOCKER_HOST`, since deliberately quitting the user's real
+  Docker Desktop mid-session felt too disruptive) — `docker compose run`
+  fails immediately with a clear, specific error to stderr ("failed to
+  connect to the docker API ... check if the path is correct and if the
+  daemon is running") and exit code 1, not a silent failure or hang.
+  Since the wrapper redirects all stage output into `logs/cron.log`,
+  this is fully visible after the fact, and the wrapper's existing
+  exit-code bookkeeping correctly reflects the failure.
+  **The "Docker Desktop doesn't start at login" gap flagged here is now
+  closed, 2026-08-24 (see SESSIONS.md's "Enable Docker Desktop
+  autostart-at-login" entry) — Docker Desktop's "Start Docker Desktop
+  when you sign in" setting is now enabled on this machine.** Verified
+  via the real, live-authoritative config file
+  (`~/Library/Group Containers/group.com.docker/settings-store.json`'s
+  `AutoStart` key — the neighboring `settings.json` is stale/vestigial
+  on this install, its mtime frozen since 2022, not what this Docker
+  Desktop version actually reads) read `true` immediately after the
+  change and **stayed `true` after a real `docker desktop restart`**
+  (confirmed via a genuine PID change on the Docker Desktop GUI process,
+  not just re-reading the file) — real evidence the app's own startup
+  logic preserves this preference, not just that a checkbox looked
+  checked. Also checked the macOS-level login-item registration directly
+  via `sfltool dumpbtm` (Apple's Background Task Management inspector,
+  not the legacy AppleScript login-items list, which doesn't reflect
+  this kind of registration at all) — found the `DockerHelper` login
+  item already `enabled` at the OS level both before and after, revealing
+  the real two-layer mechanism: `DockerHelper` is a small, always-
+  registered login launcher that itself checks Docker Desktop's
+  `AutoStart` preference at each login to decide whether to actually
+  launch the app. **A genuine full OS reboot was not performed** (would
+  have killed the working session; felt disproportionate given two
+  independent strong pieces of evidence already in hand) — the true
+  first-real-reboot confirmation is still open, noted explicitly as
+  such rather than assumed. **This is a local-machine-only fix,
+  deliberately without any accompanying local monitoring/retry
+  infrastructure, and will be entirely superseded if/when the scraper
+  moves to a cloud deployment** (a managed container scheduler, or a
+  Linux host running Docker Engine under `systemd` instead of Docker
+  Desktop) — don't build on top of this Docker-Desktop-specific
+  mechanism (`settings-store.json`, `DockerHelper`, `sfltool`) as if
+  it were permanent infrastructure.
+  **Verified end-to-end for real**: `launchctl kickstart -p
+  gui/<uid>/com.huntloop.scraper` (same method as the original launchd
+  migration) fired a real run that built/ran the `app` image, inserted 4
+  genuinely new `job_postings` rows, all with `is_relevant` populated
+  immediately (confirmed via direct `psql` query, 0 NULLs before and
+  after), and finished stage 1 with a real exit code 0 — visible in
+  `logs/cron.log` under the updated `"stage 1/2: scraper orchestrator
+  (main.py, via docker compose run)"` label, including the real Docker
+  build output. Re-ran `scripts/backfill_relevance.py` immediately after
+  and got **0 rows left to classify** again. `pytest`: 72/72 passing,
+  unchanged (this step touched no application code, only the wrapper
+  script and `docker-compose.yml`).
 
 ## Key architectural decisions (already made — don't re-litigate)
 
