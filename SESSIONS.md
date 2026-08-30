@@ -5048,3 +5048,52 @@ since TPM already holds it well below; Gemini 14 - the real bound for
 its small ~13k-token batches). `batch_limits()` returns it as a 4th
 value; `tests/test_backfill_pacer.py` covers both the RPM and TPM sleep
 paths with a monkeypatched clock.
+
+## 2026-08-30 — Documented a 3rd skills-matching provider candidate list (documentation only, no code)
+
+**Ask:** pre-consider 1–2 backup LLM providers behind the live
+Groq→Gemini skills-matching routing, so that if the daily backlog-size
+log line ever shows sustained growth (Gemini's own free tier has already
+been cut once — 2.5-gen models went 1,000→20 RPD), a third option is
+already identified rather than researched under pressure. Documentation
+only — nothing built, ported, wired, or validated.
+
+**What was done:**
+- Added a **"Backup (3rd) skills-matching provider candidate list"**
+  section to `huntloop-architecture-decisions.md` (after the Step K
+  wiring section), covering Cerebras Inference, Mistral La Plateforme,
+  and OpenRouter aggregated free models. For each: current free-tier
+  rate limits (RPM/TPM/RPD/TPD) pulled from the providers' live docs on
+  2026-08-30, structured/JSON output support and how reliable it looks
+  for this task, and effective jobs/day capacity for HuntLoop's batch
+  path.
+- Key figures captured:
+  - **Cerebras** free tier: 5 RPM / 30K TPM / 1M TPD on
+    `gpt-oss-120b` + `gemma-4-31b`; **8,192-token context cap** is the
+    real constraint (forces batch-of-2 on ~9.5k-char JDs). Real JSON
+    schema + `json_object` support. ~500 jobs/day effective.
+  - **Mistral** "Experiment" free tier: 1 req/s / 500K TPM /
+    ~1B tokens/month, all models, 128K context. JSON mode + schema on
+    first-party models. Effectively unlimited for daily volume; labelled
+    eval-not-production.
+  - **OpenRouter**: 20 RPM on `:free` variants; 50 req/day, or
+    1,000/day after a one-time $10 credit purchase (lifetime unlock).
+    Structured output is model-dependent / pass-through, least
+    predictable. Value is model breadth.
+- **Recommendation written: try Mistral first** (highest real headroom,
+  no forced batch-size cut, native JSON support, same single-provider
+  integration shape as Groq/Gemini). Cerebras is fallback-to-the-
+  fallback (context cap). OpenRouter last (needs $10 unlock, unreliable
+  free routes).
+- Noted the standing rule: run the existing 11-job side-by-side harness
+  against the Groq baseline before wiring any of them, keep
+  `MAX_PLAUSIBLE_MATCHED_SKILLS = 20` as the backstop.
+
+**No code touched.** No new module, no `SKILLS_MATCHING_PROVIDERS`
+change, no validation harness. `huntloop.skills_matching_router` already
+accepts a third contract-identical backend with only an env change plus
+one new `huntloop/skills_matching_<name>.py` when/if the time comes.
+
+Sources consulted: inference-docs.cerebras.ai/support/rate-limits +
+/capabilities/structured-outputs; help.mistral.ai free-tier article +
+docs.mistral.ai/deployment/ai-studio/tier; openrouter.ai/docs/api_reference/limits.

@@ -278,3 +278,127 @@ What was built, and where the design above changed once it met reality:
 - Real `--limit 250` run: **242 stored / 8 left NULL (3.2%) / 26.7 min**;
   split groq 11 jobs, gemini 231. Backlog 12,972 → 12,730. Full clear at
   steady state (fresh Groq budget) ≈ **5.6 days**.
+
+---
+
+## Backup (3rd) skills-matching provider candidate list (documented 2026-08-30, NOT built)
+
+**Purpose:** pre-considered short list only. Nothing here is ported,
+wired, or validated. If `backfill_skills_matching.py`'s daily
+`skills-matching backlog: N relevant rows awaiting a result` line ever
+shows *sustained* growth with Groq→Gemini routing already active (i.e.
+combined ~2,258 jobs/day is no longer keeping up, or Gemini's free tier
+gets cut again the way its 2.5-gen RPD went 1,000→20), reach for this
+list instead of researching under pressure. The router
+(`SKILLS_MATCHING_PROVIDERS` env, per-provider `MAX_BATCH_SIZE` /
+`MAX_BATCH_ESTIMATED_TOKENS` / `TARGET_TPM` / `MAX_RPM`) is already
+shaped to take a third contract-identical backend module with only an
+env change plus one new `huntloop/skills_matching_<name>.py`.
+
+All rate-limit figures below pulled from the providers' current docs on
+2026-08-30 — re-verify before acting, free tiers move fast (this project
+has watched Groq, then Gemini, change limits mid-flight).
+
+### Candidate 1 — Cerebras Inference (free tier)
+
+- **Limits (inference-docs.cerebras.ai/support/rate-limits, June 2026
+  revision):** 5 RPM · 30K TPM · 1M tokens/hour · **1M tokens/day**.
+  Applies to the free-tier models `gpt-oss-120b` and `gemma-4-31b`.
+  **Free-tier context window is capped at 8,192 tokens** — this is the
+  real constraint for HuntLoop: the wider ATS set's job descriptions
+  average ~9,500 chars (~2.4K tokens) and a resume + batch of several
+  JDs plus JSON output will breach 8K context. Batch size would have to
+  drop to ~2 JDs/call, and even single-JD calls on the longest postings
+  risk truncation.
+- **Structured output:** Yes, real support —
+  `inference-docs.cerebras.ai/capabilities/structured-outputs`:
+  `response_format` with a full JSON schema (nested objects, required
+  fields, enums, `$ref`/`$defs`, number constraints) *and* simple
+  `{"type": "json_object"}` JSON mode. Reliable enough for this task on
+  paper; note a known third-party bug where Cerebras rejects schemas
+  missing `additionalProperties` (agno issue #6013) — our schema is
+  simple, low risk.
+- **Effective capacity:** 1M TPD ÷ ~4K tokens per (resume + 2 JDs +
+  output) call ≈ **~250 calls/day ≈ ~500 jobs/day** at the forced
+  batch-of-2. TPM (30K) and RPM (5) are generous relative to that. Lower
+  than Gemini's ~2,200/day but a real, independent bucket.
+- **Catch:** the $5 free credits now require a verified payment method
+  and expire in 30 days; the standing 1M TPD free tier itself does not,
+  but confirm at signup.
+
+### Candidate 2 — Mistral La Plateforme ("Experiment" free tier)
+
+- **Limits (help.mistral.ai free-tier article / admin.mistral.ai
+  console — Mistral stopped publishing exact numbers inline, they're
+  per-workspace now): 1 request/second · 500K TPM · ~1 billion
+  tokens/month**, across all API models including `mistral-large` and
+  `mistral-small`. No separate per-day cap surfaced.
+- **Structured output:** Yes —
+  `response_format: {"type": "json_object"}` JSON mode on all models,
+  plus custom JSON-schema structured outputs on recent models
+  (`mistral-small-latest`, `mistral-large-latest`). Generally reliable;
+  historically a bit looser than OpenAI/Gemini schema enforcement, so
+  keep the `MAX_PLAUSIBLE_MATCHED_SKILLS = 20` backstop.
+- **Effective capacity:** the binding limit is **~1B tokens/month ≈
+  ~33M/day**. At ~7K tokens per (resume + batch-5) call that's
+  effectively unlimited for HuntLoop's ~120 relevant jobs/day — 1 req/s
+  is the only real throttle and is far above what the daily volume
+  needs. Comfortably the highest-headroom option of the three.
+- **Catch:** the free tier is explicitly labelled "for evaluation, not
+  production" and Mistral reserves the right to rate-limit or revoke;
+  no context-window problem (`mistral-small` is 128K). Quality for a
+  short JSON extraction task is expected to be fine but is **unvalidated**
+  — a side-by-side against the Groq baseline (same 11-job harness used
+  for Gemini/Ollama) would be the first step if this is ever picked up.
+
+### Candidate 3 — OpenRouter aggregated free models
+
+- **Limits (openrouter.ai/docs/api_reference/limits): 20 RPM** on all
+  `:free` model variants; **50 requests/day** with < $10 lifetime
+  credit purchased, rising to **1,000 requests/day** after a one-time
+  $10 purchase (lifetime unlock, balance can then go to zero). No
+  separate TPM/TPD — request-count capped only.
+- **Structured output:** Model-dependent, not uniform. OpenRouter
+  passes `response_format` through to the upstream provider; JSON
+  schema / `json_object` works reliably on the OpenAI/Gemini/Mistral-
+  backed free routes but is best-effort or unsupported on some
+  community-hosted free models, and free routes are frequently rate-
+  limited upstream or rotated out. Least predictable of the three for a
+  task that needs dependable JSON every call.
+- **Effective capacity:** 1,000 req/day (after the $10 unlock) ×
+  batch-of-5 ≈ **~5,000 jobs/day** in principle, but the practical
+  ceiling is lower because free routes throttle and disappear. Main
+  value is *breadth* — one API key fronting many models, so if a
+  specific free model degrades you switch model strings, not providers.
+- **Catch:** requires the $10 purchase to be useful (50/day is too low);
+  free-route availability is not contractual.
+
+### Next provider if backlog monitoring signals trouble
+
+**Try Mistral La Plateforme first.** Reasoning:
+
+1. **Highest real headroom** — ~1B tokens/month with no per-day request
+   cap and a 128K context window means no forced batch-size reduction
+   (unlike Cerebras's 8K context) and no request-count ceiling (unlike
+   OpenRouter's 1,000/day). It slots into the existing per-provider
+   token-based pacing cleanly.
+2. **Native, documented JSON mode + schema support** on first-party
+   models — more predictable than OpenRouter's pass-through lottery.
+3. **Single first-party provider** — same integration shape as Groq and
+   Gemini (one base URL, one key, OpenAI-compatible endpoint), so the
+   third `skills_matching_mistral.py` backend is a near-copy of the
+   Gemini one.
+
+**Cerebras is the fallback-to-the-fallback** — genuinely fast and a
+clean independent quota bucket, but the 8K free-tier context window
+forces batch-of-2 and risks truncating the longest job descriptions,
+which is exactly the failure mode the wider ATS set already made worse.
+**OpenRouter is last** — only worth it for model breadth, needs the $10
+unlock to clear 50 req/day, and its free routes are the least reliable
+for guaranteed structured output.
+
+Whichever is picked: run the existing 11-job side-by-side harness
+(the one used for Gemini and Ollama — 9 Step 4/5 samples + the Duolingo
+soft-match + Palantir Deployment Strategist) against the Groq baseline
+before wiring, and keep `MAX_PLAUSIBLE_MATCHED_SKILLS = 20` as the
+model-agnostic backstop.
