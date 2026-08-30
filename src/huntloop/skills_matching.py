@@ -30,6 +30,7 @@ import os
 from dotenv import load_dotenv
 from groq import Groq, GroqError
 
+from huntloop.skills_matching_errors import DailyQuotaExhausted, ProviderResponseInvalid
 from huntloop.text_cleaning import clean_text
 
 load_dotenv()
@@ -48,6 +49,31 @@ MODEL_NAME = "openai/gpt-oss-20b"
 # Sanity ceiling for match_skills_batch()'s per-job matched_skills list -
 # see the comment where this is enforced, below.
 MAX_PLAUSIBLE_MATCHED_SKILLS = 20
+
+# Batch-sizing / pacing limits for THIS provider, consumed by
+# scripts/backfill_skills_matching.py via huntloop.skills_matching_router.
+# All three are artifacts of Groq's free tier specifically:
+#   - MAX_BATCH_ESTIMATED_TOKENS: below Groq's real 8,000-token HARD cap on
+#     a single request (a batch of 10 real jobs 413'd in the Step 4
+#     measurement - too-large requests are refused, not throttled). At the
+#     ~9.5k-char job descriptions seen at 380-company scale this collapses
+#     the effective batch to ~1-2 jobs; that is Groq's real limit, not a
+#     mistake - see huntloop-architecture-decisions.md.
+#   - MAX_BATCH_SIZE: the size the batch quality was actually validated at.
+#   - TARGET_TPM: below Groq's real 8,000 rolling tokens-per-minute cap.
+#   - MAX_RPM: Groq free tier is 30 req/min for gpt-oss-20b; the TPM pacer
+#     already holds this well under 30, so it's a non-binding backstop.
+MAX_BATCH_SIZE = 5
+MAX_BATCH_ESTIMATED_TOKENS = 7_000
+TARGET_TPM = 6_000
+MAX_RPM = 30
+
+# Substrings in a Groq 400 body that mean "the JSON-mode validator
+# rejected the model's own output" - a per-request flaky failure, not a
+# daily wall. Raised as ProviderResponseInvalid so the router fails just
+# that batch over instead of letting it fall silently into the
+# leave-NULL-and-retry-the-same-provider path (Step I open item).
+_JSON_VALIDATE_FAILED_MARKERS = ("json_validate_failed", "failed to validate json")
 
 _SYSTEM_PROMPT = (
     "You are a resume-to-job skills matcher. Given a candidate's resume text and a job "
@@ -131,22 +157,6 @@ _BATCH_SYSTEM_PROMPT = (
 )
 
 
-class DailyQuotaExhausted(Exception):
-    """Raised by match_skills_batch() specifically when Groq reports the
-    account's tokens-per-day (TPD) budget is exhausted - a distinct,
-    real limit from the per-minute (TPM) one, discovered only by running
-    a real ~600-call backfill (2026-08-22, see SESSIONS.md): a fresh
-    per-minute pacer has no way to know this budget is gone until it
-    hits it, and once it's gone, retrying every ~60s for hours is a
-    waste, not resilience - a caller running a multi-hundred-call
-    backfill should stop the whole run on this specific signal rather
-    than let match_skills_batch()'s normal "return None and keep going"
-    contract mask it. All other failure modes (per-minute rate limit,
-    timeout, malformed response, etc.) still return None as usual -
-    this is the one deliberate exception to that contract, and only for
-    this one specific, otherwise-unrecoverable-within-the-day signal."""
-
-
 def match_skills_batch(resume_text: str, job_descriptions: list[str]) -> list[dict | None]:
     """Batch version of match_skills(): one resume + N job descriptions in
     a single Groq call. Measured ~2.3x more token-efficient per job than
@@ -161,9 +171,11 @@ def match_skills_batch(resume_text: str, job_descriptions: list[str]) -> list[di
     recovered from the response - including the whole-batch-failed case
     (API error, unparseable JSON), where every entry is None, since a
     single failed call can't be attributed to one job within the batch.
-    Raises DailyQuotaExhausted (not caught here) specifically when Groq
-    reports the daily token budget is gone - see that class's docstring.
-    Every other failure mode still returns None, never raises."""
+    Raises DailyQuotaExhausted (not caught here) when Groq reports the
+    daily token budget is gone, and ProviderResponseInvalid when Groq's
+    JSON-mode validator rejects its own output (json_validate_failed 400)
+    - both are router failover signals, see huntloop.skills_matching_errors.
+    Every other failure mode still returns [None] * n, never raises."""
     cleaned_resume = clean_text(resume_text)
     cleaned_jobs = [clean_text(jd) for jd in job_descriptions]
     n = len(cleaned_jobs)
@@ -182,8 +194,11 @@ def match_skills_batch(resume_text: str, job_descriptions: list[str]) -> list[di
             temperature=0.1,
         )
     except GroqError as e:
-        if "tokens per day" in str(e).lower():
+        msg = str(e).lower()
+        if "tokens per day" in msg:
             raise DailyQuotaExhausted(str(e)) from e
+        if any(m in msg for m in _JSON_VALIDATE_FAILED_MARKERS):
+            raise ProviderResponseInvalid(str(e)) from e
         logger.warning(f"Groq batch API call failed ({type(e).__name__}) for {n} jobs: {e}")
         return [None] * n
     except Exception as e:

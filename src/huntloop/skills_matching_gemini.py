@@ -1,22 +1,26 @@
 """
-EXPERIMENTAL - not wired into anything. Matched/missing skills extraction
-via Google's Gemini API (free tier), as a candidate SECOND provider
-behind the production Groq path (`huntloop.skills_matching`).
+Matched/missing skills extraction via Google's Gemini API (free tier),
+the FALLBACK provider behind the primary Groq path
+(`huntloop.skills_matching`). Dispatched to by
+`huntloop.skills_matching_router` when Groq raises DailyQuotaExhausted
+(or ProviderResponseInvalid for a single batch) - WIRED as of 2026-08-29
+(Step K, see SESSIONS.md + huntloop-architecture-decisions.md).
 
-Built 2026-08-29 (see SESSIONS.md) to evaluate Gemini as a fallback for
-when Groq's real 200,000-tokens-per-day free-tier cap is exhausted mid-
-backfill. Same motivation and same "keep it unwired and contract-
-identical" approach as `huntloop.skills_matching_ollama`.
+Built 2026-08-29 to cover Groq's real 200,000-tokens-per-day free-tier
+cap; became load-bearing once 380-company coverage pushed daily relevant
+volume (~120/day) past Groq's real throughput (~55/day).
 
 The public contract deliberately mirrors `huntloop.skills_matching`
-exactly so it can be swapped in by import alone (or dispatched to by the
-routing layer designed in huntloop-architecture-decisions.md):
+exactly so the router can dispatch to either interchangeably:
 
   - match_skills(resume_text, job_description) -> dict | None
   - match_skills_batch(resume_text, job_descriptions) -> list[dict | None]
   - MODEL_NAME, _BATCH_SYSTEM_PROMPT, MAX_PLAUSIBLE_MATCHED_SKILLS
-  - DailyQuotaExhausted  (RAISED here too - Gemini's free tier has a real
-    per-day request cap, same shape of problem as Groq's TPD cap)
+  - MAX_BATCH_SIZE / MAX_BATCH_ESTIMATED_TOKENS / TARGET_TPM (this
+    provider's own limits - see below; NOT Groq's)
+  - DailyQuotaExhausted  (the shared class from skills_matching_errors;
+    Gemini's free tier has a real per-day request cap, same shape of
+    problem as Groq's TPD cap)
 
 No SDK dependency: talks to the REST endpoint directly with `requests`,
 same as the Ollama port. Adding `google-genai` for an unwired experiment
@@ -41,6 +45,7 @@ import time
 import requests
 from dotenv import load_dotenv
 
+from huntloop.skills_matching_errors import DailyQuotaExhausted
 from huntloop.text_cleaning import clean_text
 
 load_dotenv()
@@ -99,15 +104,35 @@ _BATCH_SYSTEM_PROMPT = (
 )
 
 
-class DailyQuotaExhausted(Exception):
-    """Raised by match_skills_batch()/match_skills() when Gemini reports the
-    free-tier per-DAY request/token quota is exhausted (HTTP 429 whose
-    error payload names a *_per_day / RequestsPerDay quota metric). Same
-    contract as huntloop.skills_matching.DailyQuotaExhausted: every other
-    failure (per-minute 429, timeout, malformed response) still returns
-    None; this one specific, un-recoverable-within-the-day signal is the
-    single deliberate exception, so a long backfill run stops cleanly
-    instead of retrying for hours."""
+# --- Batch-sizing / pacing limits for THIS provider ---
+# Derived from Gemini's real free-tier limits (checked 2026-08-29,
+# per-account via AI Studio): 15 RPM / 250,000 TPM / 500 RPD for
+# gemini-3.5-flash-lite. NOT bounded by any small Groq-style per-request
+# hard cap - the model's context window is ~1M tokens.
+#
+# The binding constraint on request SIZE is the TPM ceiling at the max
+# request rate: 250,000 TPM / 15 RPM = ~16,666 tokens/request before
+# sustained max-rate calls would breach TPM. MAX_BATCH_ESTIMATED_TOKENS
+# is set just under that (margin for estimation error, same spirit as
+# Groq's 7,000-under-8,000), which at the ~9.5k-char job descriptions
+# seen at 380-company scale (~2.4k tokens each + ~1.5k resume/prompt
+# base) works out to a real batch of ~5 jobs - so MAX_BATCH_SIZE = 5
+# also happens to be the effective cap here, but for a completely
+# different reason than Groq (TPM-vs-RPM, not a per-request refusal).
+# 5 is also the size batch quality was validated at (on Groq); Gemini
+# large-batch quality is unverified, so we don't push past it.
+# At the real JD sizes this yields a measured batch of ~4.4 jobs ->
+# 500 RPD x 4.4 = ~2,200 jobs/day (RPD is the binding daily limit).
+#
+# MAX_RPM: unlike Groq, Gemini's per-minute REQUEST cap (15) is a real
+# constraint here - the batches are small enough (~13k tokens) that the
+# TPM pacer alone would let the loop run at ~30 req/min, over the cap. A
+# full multi-thousand-job Gemini run needs the request-rate backstop
+# even though the Step K bounded run happened not to 429. 14 leaves margin.
+MAX_BATCH_SIZE = 5
+MAX_BATCH_ESTIMATED_TOKENS = 16_000
+TARGET_TPM = 200_000  # pace under the real 250,000 TPM cap
+MAX_RPM = 14         # under the real 15 RPM cap
 
 
 # Substrings that distinguish a per-DAY cap from a per-minute cap in

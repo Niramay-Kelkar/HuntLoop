@@ -8,7 +8,13 @@ log.
 
 ---
 
-## Multi-provider skills-matching routing (designed 2026-08-29, NOT yet wired)
+## Multi-provider skills-matching routing (designed 2026-08-29, WIRED 2026-08-29 / Step K)
+
+**Status: live.** `huntloop.skills_matching_router` dispatches Groq
+primary → Gemini fallback; `scripts/backfill_skills_matching.py` uses it.
+See the "Step K — wiring" section at the bottom for what was actually
+built and the real verification numbers. The design notes below are kept
+as the rationale.
 
 ### Context
 
@@ -96,6 +102,27 @@ conservative on soft/inferred matches than gpt-oss-20b. Acceptable for a
 a full day for Groq's TPD window to reset — but it's why Groq stays
 primary, not a coin-flip.
 
+### Real-scale demand check (2026-08-29, see SESSIONS.md)
+
+Step G's `date_posted`-anchored volume methodology, re-run against the
+full 380-company coverage: **~120 new relevant postings/day** (was ~2/day
+at 5-company scale). Meanwhile real job descriptions from the wider set
+average 9,496 chars (3.2x the original sample), which collapses Groq's
+mean batch size from ~4 to ~1.6 and drops its real throughput to
+**~55 jobs/day** — i.e. **Groq alone can no longer keep up**; the Gemini
+fallback (still ~2,500/day at batch-5, its per-request limit is large)
+is what makes this design sufficient (21x combined headroom). Three
+items below are now load-bearing rather than nice-to-have:
+- **`backfill_skills_matching.py` must filter `is_relevant = true`** —
+  57% of the current NULL backlog is irrelevant postings.
+- **Batch sizing must be per-provider** — `MAX_BATCH_ESTIMATED_TOKENS =
+  7000` is a Groq per-request artifact; Gemini wants a much larger cap
+  (else 500 RPD × 1.6 = 800/day, not 2,500). The "batch size stays 5"
+  note below is superseded: Groq's real batch size is ~1.6 at these JD
+  sizes.
+- **Batch-5 quality on Gemini at ~17K-token prompts is unverified** (the
+  Gemini validation was single-job).
+
 ### Routing design (Groq primary, Gemini fallback)
 
 **Principle:** reuse the existing self-pacing batch-loop pattern from
@@ -182,3 +209,72 @@ skills-matching endpoint, concurrent multi-provider fan-out, a persisted
 job queue, cost accounting, or automatic model-tier upgrades. If a
 live-latency requirement ever appears, revisit — this design is for the
 batch backfill path only.
+
+---
+
+### Step K — wiring (2026-08-29, see SESSIONS.md)
+
+What was built, and where the design above changed once it met reality:
+
+- **`huntloop/skills_matching_errors.py`** — a dependency-free module
+  holding the two shared exceptions (`DailyQuotaExhausted`,
+  `ProviderResponseInvalid`) so both backends raise the *same* class and
+  neither drags in the other's API-key requirement.
+- **`huntloop/skills_matching_router.py`** — `make_run_state()`,
+  `match_skills_batch(resume, jds, state)`, `active_provider(state)`,
+  `batch_limits(state)`, `run_summary(state)`, `AllProvidersExhausted`.
+  `SKILLS_MATCHING_PROVIDERS` env (default `groq,gemini`); `groq` alone
+  reproduces pre-routing behaviour and never imports the gemini backend.
+- **Two failover triggers, not one** (design decision 4 was wrong):
+  - `DailyQuotaExhausted` → provider marked spent for the whole run.
+  - `ProviderResponseInvalid` (Groq `json_validate_failed` 400) → **just
+    that batch** fails over; the provider stays primary. This is the
+    Step I open item — without it those ~18%-of-calls failures silently
+    became `[None]*n` and got retried against the same flaky provider.
+- **Per-provider batch sizing + pacing** (design decision 4 fully
+  reversed). Each backend module owns `MAX_BATCH_SIZE` /
+  `MAX_BATCH_ESTIMATED_TOKENS` / `TARGET_TPM` / `MAX_RPM`. Groq:
+  5 / 7,000 / 6,000 / 30 (artifacts of its real 8,000 per-request +
+  8,000 TPM caps; RPM non-binding). Gemini: 5 / **16,000** / 200,000 /
+  **14** — 16,000 computed from `250,000 TPM ÷ 15 RPM ≈ 16,666` (the
+  request-size ceiling before sustained max-rate calls breach TPM),
+  which at the real ~9.5k-char job descriptions yields a **measured
+  batch size of 4.4** and **~2,200 jobs/day** (500 RPD × 4.4), not the
+  2,500 the design guessed. The `MAX_RPM=14` was added after the Step K
+  verification run: Gemini's small batches let the loop hit ~30 req/min,
+  over its real 15 RPM cap (it didn't 429 that run, but a full-scale run
+  would). `TokenPacer` now enforces both a tokens/min and a
+  requests/min sliding-window bound. `backfill_skills_matching.py`
+  chunks *incrementally*, re-reading `router.batch_limits(state)` (a
+  4-tuple) before every batch, so the caps flip the moment Groq gets
+  exhausted mid-run.
+- **`is_relevant = true` filter** added to the backfill's query
+  (`matched_skills IS NULL AND is_relevant IS TRUE`). Real effect:
+  29,921 → 12,972 rows (16,949 / 56.6% irrelevant rows no longer burn
+  quota).
+- **Backlog logging** — `backfill_skills_matching.py` logs
+  `skills-matching backlog: N relevant rows awaiting a result` at the
+  start and end of every run (it runs daily via the orchestrator). One
+  cheap INFO line is the leading indicator for a future capacity
+  regression — Gemini's own free-tier limits changed 50× mid-project
+  without notice, and re-deriving the whole volume analysis to notice is
+  expensive.
+
+**Real verification (Step K):**
+- Groq real throughput: **~58 jobs/day** (mean 3,453 batched tok/job,
+  batch 1.67 at 7,000 cap).
+- Gemini real: batch **4.4**, ~12,816 tok/request (× 15 RPM = 192k/min,
+  under the 250k TPM cap), **~2,200 jobs/day** (RPD-bound).
+- Combined ≈ **2,257 jobs/day** → the 12,972-row backlog clears in
+  **~5.7 days**.
+- `json_validate_failed` → Gemini per-batch failover **fired on real
+  Groq 400s** in the `--limit 250` verification run — 19 times (Groq's
+  JSON mode was ~76% flaky that session, vs Step I's 18%); each failed
+  one batch over to Gemini while Groq stayed primary.
+- `DailyQuotaExhausted` → full failover **also fired for real**: Groq
+  hit its TPD wall after 11 jobs (budget pre-spent that day), the router
+  marked it exhausted and every subsequent batch went to Gemini with its
+  own 16,000-token cap.
+- Real `--limit 250` run: **242 stored / 8 left NULL (3.2%) / 26.7 min**;
+  split groq 11 jobs, gemini 231. Backlog 12,972 → 12,730. Full clear at
+  steady state (fresh Groq budget) ≈ **5.6 days**.

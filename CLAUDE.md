@@ -503,32 +503,50 @@ nothing scrapes them; treat that as planned, not present.
   cap (the daily incremental volume, ~1–2 relevant jobs/day, fits one
   day's budget easily; the full backfill is a one-time multi-day cost
   the existing self-pacing script already handles).
-  **Google Gemini's free tier was then evaluated as a second provider
-  2026-08-29 and is a GO as a FALLBACK (not a replacement) — see
-  SESSIONS.md + `huntloop-architecture-decisions.md`.**
-  `src/huntloop/skills_matching_gemini.py` is another complete,
-  contract-identical, **intentionally unwired** port (REST, no SDK dep);
-  `scripts/validate_gemini_skills_match.py` runs it side-by-side with
-  Groq on the same 11 sample jobs (writes gitignored
-  `scratch_gemini_validation.json`). **Real current free-tier limits
-  (from AI Studio — Google removed the static per-model table from
-  `ai.google.dev/gemini-api/docs/rate-limits` on 2026-08-18, limits are
-  per-account now): the 2.5-gen models were cut to 20 RPD (was 1,000)
-  and `gemini-2.5-flash-lite` now 404s as "no longer available to new
-  users"; the only viable free model is `gemini-3.5-flash-lite` (or
-  3.1) at 15 RPM / 250K TPM / 500 RPD** — ~2,500 jobs/day at batch-5,
-  and 250K TPM vs Groq's 8K. Quality: equivalent to Groq on clear-cut
-  jobs, better on 2 SWE roles Groq whiffed, but **more conservative on
-  the Duolingo soft-match case** (matched only literally-stated
-  Python/SQL) — milder than the Ollama failures, no inversion/dump, and
-  11/11 reliable vs Groq's 9/11 (`json_validate_failed`). That
-  soft-match conservatism is why Groq stays primary. Routing (Groq
-  primary → Gemini on `DailyQuotaExhausted` → stop on
-  `AllProvidersExhausted`, reusing `backfill_skills_matching.py`'s
-  self-pacing loop, one import swap) is **designed but NOT wired** —
-  full writeup in `huntloop-architecture-decisions.md` (new file: the
-  place for longer-form decision notes that don't fit as a CLAUDE.md
-  one-liner). `GEMINI_API_KEY` is in `.env`.
+  **Google Gemini's free tier is the WIRED fallback provider behind Groq
+  as of 2026-08-29 (Step K) — see SESSIONS.md + full writeup in
+  `huntloop-architecture-decisions.md`.** Why it became load-bearing:
+  the ATS expansion (9→380 companies) pushed daily relevant-postings
+  volume to ~120/day while Groq's real free-tier throughput at the wider
+  set's ~9.5k-char JDs is only **~58 jobs/day** (long JDs collapse Groq's
+  batch to ~1.7); Gemini's ~2,200/day (500 RPD × real batch 4.4) covers
+  the gap. **Real current Gemini free-tier limits (from AI Studio —
+  Google removed the static per-model table from the docs on 2026-08-18,
+  limits are per-account now): 2.5-gen models cut to 20 RPD (was 1,000),
+  `gemini-2.5-flash-lite` 404s; the only viable model is
+  `gemini-3.5-flash-lite` at 15 RPM / 250K TPM / 500 RPD.** Quality
+  (11-job side-by-side): equivalent to Groq on clear-cut jobs, better on
+  2 SWE roles Groq whiffed, but more conservative on the Duolingo
+  soft-match — hence Groq stays *primary*, Gemini is fallback-only.
+  **Wiring:**
+  - `huntloop.skills_matching_errors` — shared `DailyQuotaExhausted` /
+    `ProviderResponseInvalid` (both backends raise the same classes).
+  - `huntloop.skills_matching_router` — `match_skills_batch(resume, jds,
+    state)` dispatching Groq→Gemini. `SKILLS_MATCHING_PROVIDERS` env
+    (default `groq,gemini`; `groq` alone = pre-routing behaviour, no
+    GEMINI_API_KEY needed). Two failover triggers: `DailyQuotaExhausted`
+    marks a provider spent for the whole run; `ProviderResponseInvalid`
+    (Groq `json_validate_failed` 400, ~18% of calls) fails over **just
+    that batch**, provider stays primary. Run stops only on
+    `AllProvidersExhausted`.
+  - Per-provider batch sizing + pacing: each backend owns `MAX_BATCH_SIZE`
+    / `MAX_BATCH_ESTIMATED_TOKENS` / `TARGET_TPM` / `MAX_RPM` (Groq
+    5/7000/6000/30; Gemini 5/16000/200000/14 — 16000 computed from 250K
+    TPM ÷ 15 RPM; `MAX_RPM=14` because Gemini's small batches otherwise
+    run at ~30 req/min over its real 15 cap). `TokenPacer` enforces both
+    a tokens/min and a requests/min bound; `backfill_skills_matching.py`
+    chunks incrementally, re-reading `router.batch_limits(state)` (a
+    4-tuple) each batch so the caps flip when Groq exhausts mid-run.
+  - `backfill_skills_matching.py` query now filters `is_relevant IS TRUE`
+    (29,921 → 12,972 NULL rows; 57% were irrelevant) and logs the
+    relevant-backlog count each run as a capacity leading indicator.
+  Verified with a real `--limit 250` run: 242 stored / 8 NULL, split
+  groq 11 / gemini 231 (Groq's TPD was pre-spent → `DailyQuotaExhausted`
+  fired after 11; 19 `json_validate_failed` per-batch failovers). Full
+  12,972 backlog clears in ~5.6 days at steady state.
+  `scripts/validate_gemini_skills_match.py` (side-by-side harness, writes
+  gitignored `scratch_gemini_validation.json`) is unchanged.
+  `GEMINI_API_KEY` is in `.env`.
 - **A hybrid keyword + embedding-similarity relevance pre-filter exists,
   added 2026-08-24 (see SESSIONS.md) — `job_postings.is_relevant`
   (nullable `Boolean`, migration `0900f3514ad2`), meant to flag whether
