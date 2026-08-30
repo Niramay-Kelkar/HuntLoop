@@ -1116,7 +1116,30 @@ nothing scrapes them; treat that as planned, not present.
   the 20-filing threshold; safe to re-run (only inserts new / fills
   NULL-or-unknown). `main.py` needs no changes - it already groups
   `companies` by `ats_platform`. No new spiders were built; `ashby`/
-  `workday`/`neither` employers are still skipped. **Verified with a
+  `workday`/`neither` employers are still skipped.
+  **Feasibility measured 2026-08-30 (see SESSIONS.md "Which ATS is most
+  common among the 'neither' sponsors") to decide which spider to build
+  next — measurement only, no spider, no DB writes.**
+  `scripts/probe_neither_ats_platforms.py` probed a seeded random sample
+  of 400 of the 8,113 GH/Lever-"neither" >=20-filing employers against
+  Ashby/Workday/SmartRecruiters/iCIMS. Result (any-hit, lower bounds):
+  **Workday 10.8% · iCIMS 4.5% · SmartRecruiters 4.0% · Ashby 2.2% ·
+  undetected 79.8%** (the undetected mass is IT body-shops, hospitals,
+  universities, research institutes, gov/school-district employers).
+  **Workday is the clear next target.** Tenant detection IS feasible: POST
+  `{tenant}.{dc}.myworkdayjobs.com/wday/cxs/{tenant}/__nosuchsite__/jobs`
+  -> **404 = tenant+dc exist, 422 = not** (dc brute-forced over 8 `wd{N}`
+  subdomains; site name not needed to confirm). BUT a Workday *spider*
+  additionally needs the per-tenant **site segment**, which is NOT
+  guessable (`adobe`=`external_experienced`, `salesforce`=
+  `External_Career_Site`; a 10-name common list hit 1/6 real tenants) --
+  onboarding must resolve each company's real careers URL once to capture
+  `{tenant, dc, site}` and `companies.ats_token` must widen to a 3-tuple.
+  Once known, the CXS `/jobs` POST paginates cleanly. SR is the cleanest
+  public API but ids aren't name-derivable (`Ubisoft`->`Ubisoft2`) and
+  only ~4%; Ashby is clean but too rare in this enterprise-skewed set;
+  iCIMS has opaque subdomains and mostly no public JSON.
+  **Verified with a
   real `docker compose run app python main.py`: `job_postings` 649 ->
   30,363 (+29,714), every new row's `is_relevant` populated at insert
   time (0 NULL at 30k scale).** One pre-existing bug surfaced at this

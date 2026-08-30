@@ -5572,3 +5572,94 @@ account above, derived from the actual query construction in
 `huntloop.api.routers.jobs`; (c) measured `EXPLAIN ANALYZE` + `curl`
 timings above, no index needed; (d) rank-#42-for-old-max example;
 (e) full suite **133 passing**, unchanged; (f) this entry + CLAUDE.md.
+
+---
+
+## 2026-08-30 — Which ATS is most common among the "neither" sponsors? (feasibility only)
+
+**Question:** of the **8,113** sponsor employers (≥20 LCA filings) that
+`scripts/detect_ats_for_sponsors.py` did NOT resolve to Greenhouse/Lever,
+which other ATS is most common — Ashby, Workday, SmartRecruiters, iCIMS —
+and is it slug-guessable? **No spider built. No DB writes. Measurement
+only.**
+
+**Method.** New `scripts/probe_neither_ats_platforms.py`. Reconstructs the
+8,113-employer "neither" set (≥20-filing employers minus the 378 already
+in `scratch_sponsor_ats_detection.json`), takes a **seeded random sample
+of 400** (`--seed 12345`, `random.Random.shuffle` then head), and probes
+each with name-derived slug candidates — `slug_candidates()` from the GH/
+Lever probe **plus** the looser guesses it withholds (bare first word,
+first-two-words) so this measures the ceiling of name-derived guessing:
+- **Ashby** — `GET api.ashbyhq.com/posting-api/job-board/{slug}` → 200 with
+  a non-empty `jobs` array. Clean, exactly like GH/Lever.
+- **Workday** — `POST {tenant}.{dc}.myworkdayjobs.com/wday/cxs/{tenant}/
+  __nosuchsite__/jobs`. **404 ⇒ tenant+datacenter exist (only the site
+  segment is wrong); 422 ⇒ tenant/dc wrong.** `dc` brute-forced over the 8
+  real `wd{N}` subdomains. Confirms tenant existence *without needing the
+  site name*. Verified stable: bogus slug → 422 every time; `salesforce`/
+  `nxp`/`astrazeneca`/`accenture`/`pfizer` → 404 on exactly one dc each.
+- **SmartRecruiters** — `GET api.smartrecruiters.com/v1/companies/{id}/
+  postings` → `totalFound > 0`. Endpoint 200s with `totalFound:0` for
+  unknown ids, so only a positive count counts.
+- **iCIMS** — `GET {careers-,}{slug}.icims.com/jobs/search` → 200 + "icims"
+  in body.
+
+**Result (400-company random sample, per-platform any-hit):**
+
+| Platform        | Hits | % of sample |
+|-----------------|------|-------------|
+| **Workday**     | 43   | **10.8 %**  |
+| iCIMS           | 18   | 4.5 %       |
+| SmartRecruiters | 16   | 4.0 %       |
+| Ashby           | 9    | 2.2 %       |
+| **undetected**  | 319  | **79.8 %**  |
+
+(5 companies multi-hit — counted under each platform; 81 distinct companies
+had ≥1 hit.) The 79.8 % undetected is dominated by IT staffing/body-shops,
+hospitals & health systems, universities, research institutes, and
+school-district/government employers — many genuinely run no major ATS or
+a regional/custom one; the rest just don't slug-match. All four rates are
+**lower bounds** (name→slug is lossy).
+
+**Workday feasibility — honest assessment (it's the most common):**
+- **Detecting that a company is on Workday is feasible.** The 404/422 CXS
+  trick + 8-value dc brute force reliably confirms a tenant, and the
+  tenant slug is usually the company short name — same guessability as GH/
+  Lever, same lossiness. Spot-check of the 43 hits: ~35 are unambiguously
+  right (`salesforce`, `nxp`, `bdo`, `rsm`, `pwc`, `barclays`, `logitech`,
+  `regeneron`, `organon`, `kimberly-clark`, `whole foods`, `iron mountain`,
+  …); ~3–8 are shaky *attributions* on generic one-word slugs (`red`,
+  `western`, `tera` — a Workday tenant by that name exists but may belong
+  to a different company). Even docking those, Workday ≈ 9–10 %.
+- **Building a Workday *spider* is meaningfully harder than GH/Lever.** The
+  scrape URL is `.../wday/cxs/{tenant}/{SITE}/jobs` and **{SITE} is
+  per-tenant and NOT guessable**: Adobe = `external_experienced`,
+  Salesforce = `External_Career_Site`; a 10-name common-site list matched
+  only 1 of 6 confirmed tenants tried. A real spider needs a **one-time
+  per-company `{tenant, dc, site}` discovery** — cheapest source is the
+  company's real careers URL, which redirects to
+  `{tenant}.wd{N}.myworkdayjobs.com/{locale}/{site}` and hands over all
+  three. So `companies.ats_token` would have to carry a 3-tuple, not a
+  bare slug, and onboarding is "resolve the careers URL once" rather than
+  "probe a slug". Once known, the CXS `/jobs` POST paginates cleanly
+  (`{total, jobPostings:[{title, externalPath, locationsText, postedOn}]}`)
+  and is very scrapeable.
+
+**Recommendation: build Workday next.** ~2.5× the prevalence of the
+next platform among large H-1B sponsors, and tenant detection is feasible
+today. Budget for a `{tenant, dc, site}` discovery step seeded from real
+careers URLs (not pure slug-probing) and a wider `ats_token`. Second
+choice would be SmartRecruiters — cleanest public paginated API of the
+four — but its company ids aren't name-derivable (`Ubisoft` → `Ubisoft2`),
+so it needs the same per-company id-lookup step and only covers ~4 %.
+Ashby (2.2 %) is clean to probe but too rare here to prioritise (it skews
+startup; the ≥20-filing sponsor set skews enterprise). iCIMS (4.5 %) has
+opaque subdomains and mostly no public JSON API — worst build effort.
+
+**Verification:** (a) sample = 400, seed 12345, from the reconstructed
+8,113 set; method above. (b) per-platform counts in the table, from
+`scratch_neither_ats_probe.json`. (c) Workday feasibility: 404/422 trick
+verified stable against bogus + 6 real tenants; site-name unguessability
+verified (1/6 common-list hit). (d) recommendation above. (e) full suite
+**133 passing**, unchanged (no app code touched — one new `scripts/`
+file). (f) this entry + CLAUDE.md.
