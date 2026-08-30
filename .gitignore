@@ -14,3 +14,7 @@ dist/
 data/raw/
 data/resumes/
 logs/
+
+# Scratch / validation / one-off run artifacts (never committed)
+scratch_*
+.claude/

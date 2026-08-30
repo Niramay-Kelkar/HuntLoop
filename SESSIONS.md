@@ -4507,3 +4507,346 @@ format, its DockerHelper login-item mechanism, `sfltool dumpbtm`) would
 carry forward - it's worth remembering that when that migration
 eventually happens, not treating this as a permanent piece of
 infrastructure.
+
+---
+
+## 2026-08-29 — Ollama local-model validation for skills-matching: NO-GO on this hardware
+
+**Goal:** evaluate replacing the Groq-hosted skills-matching backend
+(`huntloop.skills_matching`, `openai/gpt-oss-20b`) with a local Ollama
+model, before building any queue/worker around it. Motivation: Groq's
+real 200,000-tokens-per-day free-tier cap stretches a full ~600-job
+backfill to 3.4+ days. Model validation only — queue/backfill/scheduling
+untouched, per the task.
+
+**Install:** Ollama was already present — `brew install ollama` (Homebrew
+formula, not cask), `ollama 0.32.15` at
+`/usr/local/Cellar/ollama/0.32.15`, symlinked to `/usr/local/bin/ollama`
+(dated Aug 24). `brew outdated` shows it slightly behind; not upgraded
+mid-task. Started `ollama serve` (was not running); `/api/version`
+confirmed responding. No new install performed — documented the existing
+one.
+
+**Hardware reality, reported going in (not after):** Intel Core i5-8257U
+— 2 physical cores / 4 threads @ 1.4 GHz base, **8 GB total RAM**, no
+CUDA, no MPS (Intel Mac). CPU-only llama.cpp. At idle the machine is
+already ~99% RAM-committed (macOS compressor ~1 GB). Predicted before
+measuring: an 8B Q4 model (~4.7 GB weights) would force heavy swap and be
+impractical; a 3B-class model (~2 GB) is the only sustainable size;
+expect ~20–60 s/job single-call, minutes per batch-of-5, vs. Groq's ~1–3 s.
+
+**Code:** rewrote skills-matching to call Ollama's `/api/chat`
+(non-streaming, `format: json`, `temperature 0.1`, `num_ctx 8192`,
+`num_predict 1500` cap), same public contract (`match_skills`,
+`match_skills_batch`, `MODEL_NAME`, `_BATCH_SYSTEM_PROMPT`,
+`MAX_PLAUSIBLE_MATCHED_SKILLS`, `DailyQuotaExhausted` kept as
+dead-but-exported), same prompts, same log-and-return-None failure
+contract. After the NO-GO verdict this was **moved to
+`src/huntloop/skills_matching_ollama.py`** (experimental, not wired to
+anything); `huntloop.skills_matching` and `requirements.txt`'s
+`groq==1.6.0` were restored from git so production is untouched. New
+harness: `scripts/validate_ollama_skills_match.py` (9 Step 4/5 sample
+jobs + the 2 required known cases; captures per-job wall-clock + system
+RAM + ollama RSS). Output file `scratch_ollama_validation.json`
+gitignored.
+
+**Models tested** (downloads were slow, ~650 KB/s — network-bound, one-time):
+`qwen2.5:3b-instruct` (1.9 GB), `llama3.2:3b` (2.0 GB), `qwen2.5:7b-instruct`
+(4.7 GB). Chosen as the realistic structured-output candidates at sizes
+that could plausibly run here; `qwen2.5:7b` included as the quality
+ceiling.
+
+**(a) Real latency, this hardware** (from `ollama serve`'s own timing logs):
+- Generation **~6 tok/s** (qwen2.5:3b), prompt eval ~38 tok/s.
+- **qwen2.5:3b-instruct**: ~90–130 s/job when it succeeded; **5 of 11
+  jobs hit the 600 s read timeout → None**. Full run 48 min, mean
+  264 s/job.
+- **llama3.2:3b**: 12–130 s/job, 1 timeout, mean 105 s/job, full run 19 min.
+- **qwen2.5:7b-instruct**: **first 2 jobs both timed out at 900 s**;
+  system-available RAM fell to **0.9 GB** (5.5 GB model on 8 GB machine).
+  Killed after 2 jobs — clearly non-viable, quality left undetermined
+  because latency alone disqualifies it (900 s/job × 600 jobs ≈ 6+ days
+  continuous, and it starves the machine).
+
+**(c) Memory/CPU during inference:** llama-server RSS ~2.0–2.4 GB (3B),
+~5.5 GB (7B). Pinned at **100% CPU** (all 4 threads) throughout. System
+available RAM dropped to ~1.3 GB (3B) / ~0.9 GB (7B). Postgres and the
+browser stayed responsive with the 3B models; the 7B model made the
+machine thrash.
+
+**(b) Quality vs. Groq baseline — side by side, the 2 required known cases:**
+
+*Duolingo "Senior Data Science Manager, User Growth" (the soft-match case):*
+- **Groq (correct):** `matched: [Python, SQL, ML data pipelines,
+  Sentence-BERT, NLP, semantic search, AWS, GCP, Docker, Kubernetes]`;
+  `missing: [data science, statistical modeling, causal inference, R,
+  team management, ...]` — correctly infers soft ML/data-pipeline matches
+  AND correctly places "data science"/"R"/"causal inference" as *missing*.
+- **qwen2.5:3b:** `matched: [Python, SQL, machine learning, forecasting,
+  data science, data engineering, experimentation, agile/Scrum]`;
+  `missing: []` — **over-matches** (claims "data science" as matched; empty
+  missing for a management role). Soft-match nuance NOT reproduced.
+- **llama3.2:3b:** `matched: [ML, Data Science, SQL, Python, R, Causal
+  Inference, Team Management, Hiring, ...24 items]`; `missing: [Java, C++,
+  ... "Cloud Excellence", "Cloud Innovation" ...58 items, degenerate "Cloud
+  X" repetition spiral]` — **over-matches the exact items Groq correctly
+  called missing**, then melts down.
+
+*Palantir "Deployment Strategist" (high-embedding / low-literal-overlap outlier):*
+- **Groq:** short, sensible result (the one historical 53-item
+  full-resume-dump was a rare one-off in a batch run).
+- **qwen2.5:3b:** **47 matched_skills** — the entire resume skills
+  section dumped verbatim, `missing: []`. The Groq one-off failure mode,
+  reproduced *deterministically*.
+- **llama3.2:3b:** `matched: [data-driven decisions, data analysis, user
+  empathy, product design, ...]`, `missing: []` — invented soft skills,
+  no real matching.
+
+**Broader quality pattern across all 9 other sample jobs:** qwen2.5:3b
+dumped 45–56-item full-resume `matched_skills` on nearly every technical
+job and **echoed the literal example phrase "B2B marketing campaigns"
+from the system prompt** as a real skill (incl. for a defense-software
+role and a fraud-ops role). llama3.2:3b constantly returned
+`missing_skills: []`, inverted matched/missing (claimed design skills the
+resume lacks for the Wealthfront Designer role), and truncated JSON
+mid-string. Neither small model does the discriminative
+matched-vs-missing judgment the task needs — they default to
+resume-dumping or hallucination. This is a model-capability ceiling, not
+a prompt-tuning gap: `gpt-oss-20b` is ~20B params; nothing that fits in
+8 GB RAM is close.
+
+**(d) Recommendation: DO NOT build the queue around a local Ollama model
+on this machine.** Every RAM-viable model fails quality; the only
+quality-plausible model (7B+) is latency/RAM-infeasible here. Paths
+forward, in preference order:
+1. **Stay on Groq**, live with the 200K-TPD cap. Newly-scraped relevant
+   jobs run ~1–2/day (see the volume-estimate session) — trivially
+   within one day's budget. The 3.4-day full-backfill is a one-time
+   cost the existing self-pacing `backfill_skills_matching.py` already
+   handles (re-run daily until caught up).
+2. If local inference becomes a hard requirement: needs different
+   hardware — Apple Silicon with ≥16 GB, or a GPU box — then
+   `qwen2.5:7b`/`14b` or a local `gpt-oss-20b` becomes viable.
+   `skills_matching_ollama.py` + the validation harness are kept intact
+   for exactly this re-evaluation.
+3. Hybrid: Groq for the small daily incremental, local only for bulk
+   backfill on capable hardware.
+
+**(e)** Full suite: **72/72 passing** (before and after; production
+module restored). Real production row counts not re-verified by
+count here — this session's DB access was **read-only** (the validation
+harness only `SELECT`s job/resume text; no writes anywhere).
+
+**(f)** CLAUDE.md updated (skills-matching bullet + the
+"deferred/not-started" note).
+
+---
+
+## 2026-08-29 — ATS coverage expansion from the real LCA sponsor universe (Greenhouse/Lever only)
+
+**Task:** replace the hardcoded 9-company ATS-detection list with the real
+universe of distinct sponsor employer names already in `lca_disclosures`;
+detect Greenhouse/Lever; add every hit to the curated scraping list. No
+new spiders, no skills-matching changes.
+
+**(a) Real distinct-sponsor count:** `lca_disclosures` holds **108,575**
+distinct `employer_name_normalized` values (129,295 distinct raw
+`employer_name`). Running per-URL `detect_ats()` against all of them is
+infeasible (no careers URLs exist for any; each call is a live GET +
+optional Playwright render). Per an explicit user decision, scoped to
+employers with **>= 20 LCA filings = 8,491 employers** (a real footprint
+cutoff; >=100 would be 1,647).
+
+**Reverse "list our customers" endpoint — confirmed absent for both**
+(checked against the vendors' own API docs, not aggregators):
+- Greenhouse Job Board API (`docs.greenhouse.io/job-board.html`): every
+  endpoint requires `board_token` up front
+  (`/v1/boards/{board_token}/jobs|offices|departments`). No enumeration.
+- Lever Postings API (`github.com/lever/postings-api`): "All job postings
+  are name-spaced within a unique site name" — every endpoint needs the
+  known `SITE`. No discovery.
+
+So detection = derive candidate slugs from each employer name and probe
+the public board APIs directly (`boards-api.greenhouse.io/v1/boards/{slug}`
++ `/jobs`, `api.lever.co/v0/postings/{slug}`). New script
+`scripts/detect_ats_for_sponsors.py` (+ `tests/test_detect_ats_for_sponsors.py`,
+11 network-free tests). Threaded, ~25 min for 8,491 employers.
+
+**Three probe passes — false positives found and fixed each time, not
+assumed away:**
+1. Naive first-word-of-multi-word-name slug → matched generic fragments
+   to unrelated tiny boards: `GENERAL MOTORS`→`general` (1 junk job),
+   `US BANK…`→`us`, `CHARLES SCHWAB`→`charles`; plus Greenhouse demo
+   tenants `linkedin` ("LI Test Company", 53 rows like "123123"/"Bug
+   Bash Job") and `microsoftcorporation` (2 sandbox rows). 518 GH / 102
+   Lever — inflated.
+2. Dropped the bare first-word slug for multi-word names; expanded
+   trailing-noise stripping (`COMPANY`/`CORPORATION`/`MARKETS`/…);
+   require >= 3 postings; reject board names containing "test"/"demo";
+   small evidence-based blocklist. Down to 341 GH / 61 Lever — still a
+   tail of `national`←"National Consulting Group", `flex`←"Flex
+   Consulting Group", `hs`←Headspace-board, etc.
+3. Added a **Greenhouse board-name similarity gate** (the board's own
+   display name must fuzzy-match the DOL employer name — `rapidfuzz`
+   `token_set_ratio` >= 55; kills `hs`→"Headspace", `oath`→"Oath Animal
+   Hospital", `tec`→"Tidewater Eye Centers") **plus a dictionary-word
+   stoplist + acronym rule** (a name collapsing to a short generic word
+   is rejected unless it's a real acronym whose other tokens are all
+   noise — keeps real customers ASM/NICE/IMC, kills
+   flex/aura/yes/national/blockchain collisions). Verified against ~24
+   known-good + known-bad cases, all correct.
+
+**(b) Final breakdown (>= 20 filings, 8,491 probed):**
+- **Greenhouse: 318**
+- **Lever: 60**
+- **Neither: 8,113** — future-spider candidates or genuinely not on
+  GH/Lever (the bulk are IT-staffing/consultancy firms —
+  Cognizant/Infosys/TCS/Compunnel/etc. — that don't run a public
+  product-company careers board).
+- **Match rate 4.5% — a LOWER BOUND.** Slug guessing misses any company
+  whose real board slug differs from a slugified legal name (branding,
+  abbreviations, acquisitions). Residual false-positive risk remains at
+  the low-filing tail on generic 3-letter slugs (`rpa`, `pmg`, `grey`,
+  `axiom`, `source`, `genesis`) where the board name legitimately
+  matches but may be a different company than the LCA filer — accepted
+  as MVP noise (worst case: a few junk rows the relevance filter flags).
+
+**(c) Added to curated coverage:** committed via `upsert_hits()` →
+**371 new `companies` rows inserted, 1 updated** (`brex`:
+`unknown`→`greenhouse`, a real prior failed detection now resolved).
+`companies` with a detected platform: **9 → 380** (318 greenhouse, 60
+lever, 1 workday=adobe, 1 ashby=ramp). `upsert_hits()` fills only
+NULL/`'unknown'` platforms, never overwrites a different successful one.
+`main.py` needs zero changes — it already groups `companies` by
+`ats_platform` and runs one spider per platform with the full token list.
+
+**(d) Real scrape against the expanded list** (`docker compose run --rm
+app python main.py` against real local Postgres, ~52 min):
+- **`job_postings`: 649 → 30,363 (+29,714 new rows)** — Greenhouse
+  spider scraped 318 boards (26,674 items), Lever 60 boards (3,655
+  items).
+- **`is_relevant` populated on 100% of new rows — 0 NULL** (the
+  Docker/torch insert-time path from the 2026-08-24 work held up at
+  30k-row scale). 13,241 flagged relevant, 17,122 not.
+- 374 of 380 companies now have postings (the 6 without: `kraken` has 0
+  open Lever roles, a few Lever boards returned 0, `adobe`/`ramp` are
+  workday/ashby and skipped).
+- **37 rows dropped (0.12%)** — all the same pre-existing bug:
+  `job_locations.location_name` is `varchar(255)` but a handful of
+  Lever/Greenhouse postings (e.g. Analytic Partners) put a long
+  semicolon-joined multi-location string in the primary `location`
+  field. `JobDataPipeline.process_item()` catches the `DataError`, logs
+  `"Unexpected error inserting item"`, and continues — the run is not
+  affected. Not fixed here (out of scope, gracefully handled, 0.12%);
+  worth a follow-up: either widen the column or truncate/skip the
+  oversized location in the pipeline.
+
+**(e) Full test suite: 93/93 passing** (72 prior + 11 new
+`test_detect_ats_for_sponsors.py` + 10 new `test_skills_matching_gemini.py`
+from the parallel Gemini session; net +21, and one prior count was 90
+before both sessions' tests). Production row counts were only ever
+read for verification except the single deliberate `upsert_hits()`
+write (371 inserts + 1 update to `companies`) and the real scrape's
+inserts to `job_postings` — both intended.
+
+**(f)** Re-run cadence: `scripts/detect_ats_for_sponsors.py` should be
+re-run **after each new quarterly DOL LCA file is ingested**
+(`scripts/ingest_lca_disclosures.py`), NOT on a fixed calendar — a new
+quarter adds employers and pushes others past the 20-filing threshold.
+Safe to re-run (only ever inserts new rows / fills NULL-or-unknown).
+Noted in CLAUDE.md.
+
+---
+
+## 2026-08-29 — Gemini free tier evaluated as a second skills-matching provider + routing design (not wired)
+
+**Task:** validate Google Gemini's free tier as a fallback skills-matching
+provider behind Groq; build a contract-identical port; run it side-by-side
+against Groq on the same 11 sample jobs; if quality holds, design (not
+wire) Groq-primary / Gemini-fallback routing. No changes to the relevance
+filter, scraping, or the production Groq path.
+
+**(a) Real current Gemini free-tier limits (from AI Studio, per-account —
+Google REMOVED the static per-model table from
+`ai.google.dev/gemini-api/docs/rate-limits`, page now says "view your
+active rate limits in AI Studio", last updated 2026-08-18):**
+
+| Model | RPM | TPM | RPD |
+|---|---|---|---|
+| Gemini 2.5 Flash | 5 | 250K | **20** |
+| Gemini 2.5 Flash Lite | 10 | 250K | **20** |
+| **Gemini 3.5 Flash Lite** | **15** | **250K** | **500** |
+| Gemini 3.1 Flash Lite | 15 | 250K | 500 |
+| Gemini 3.x Flash (non-lite) | 5 | 250K | 20 |
+| Gemma 4 26B / 31B | 30 | **16K** | 14,400 |
+
+The 2.5-gen models were cut to **20 RPD** (the last *documented* figure
+was 1,000 RPD for 2.5 Flash-Lite — this is the "reportedly changed
+recently" the task flagged, and it is real and large). `gemini-2.5-flash-lite`
+also now returns **404 "no longer available to new users"** on the API.
+The only viable free option is **`gemini-3.5-flash-lite` (or 3.1):
+15 RPM / 250K TPM / 500 RPD**, no separate TPD cap surfaced. Gemma 4's
+14,400 RPD is unusable here — 16K TPM is too small for a resume + a
+batch of 5 job descriptions.
+
+**Effective fallback capacity (3.5 Flash Lite):** 500 RPD × batch-of-5 =
+~2,500 jobs/day, 250K TPM vs Groq's 8K TPM. Ample for clearing a backlog
+that would otherwise wait a day for Groq's 200K TPD to reset.
+
+**Built (all unwired, contract-identical to `huntloop.skills_matching`):**
+- `src/huntloop/skills_matching_gemini.py` — REST (no SDK dep, like the
+  Ollama port). `match_skills` / `match_skills_batch` / `MODEL_NAME` /
+  `MAX_PLAUSIBLE_MATCHED_SKILLS` / `DailyQuotaExhausted` (raised here too
+  — Gemini's per-day RPD cap is the same shape of problem). Per-day vs
+  per-minute 429 distinguished conservatively (only unambiguous "per
+  day" markers raise `DailyQuotaExhausted`; a per-minute 429 returns
+  None like every other transient failure).
+- `scripts/validate_gemini_skills_match.py` — calls BOTH providers per
+  job, 35s pacing between jobs to keep Groq under 8K TPM.
+- `tests/test_skills_matching_gemini.py` — 10 network-free tests.
+
+**(b) Side-by-side, 11 jobs (`scratch_gemini_validation.json`):**
+
+| | Groq (gpt-oss-20b) | Gemini 3.5 Flash Lite |
+|---|---|---|
+| Successful | 9/11 (2× `json_validate_failed` 400) | 11/11 |
+| Latency (typical) | ~1.3s | ~0.9s (one 86s cold-start outlier) |
+
+- **Equivalent** on the 6 clear cases: both return `matched: []` for the
+  irrelevant creative/fraud roles; both catch the Chief-of-Staff soft
+  matches ("AI", "data analysis and problem-solving", "communication").
+- **Gemini better** on 2 high-similarity Palantir SWE roles where Groq
+  returned `matched: []` outright (missed TypeScript/microservices/REST
+  that are plainly in the resume), and on the internship job Groq failed
+  entirely.
+- **Groq better** on the **Duolingo "Senior Data Science Manager"
+  soft-match case** — Groq matched the inferable ML/pipeline skills
+  (Sentence-BERT, NLP, semantic search, ETL, AWS/GCP/Docker/K8s); Gemini
+  matched only literally-stated `Python`/`SQL` and dropped the rest to
+  missing. Same conservative direction as the rejected Ollama models,
+  but far milder (no inversion, no dump). Also Groq more thorough on
+  "AI Conversation Designer" (12 matched vs 1).
+- **Palantir "Deployment Strategist"** (the 53-item full-resume-dump
+  outlier): did NOT reproduce on either provider. Groq
+  `['data','software']`, Gemini `[]` — both weak, neither catastrophic.
+  `MAX_PLAUSIBLE_MATCHED_SKILLS = 20` stays as the backstop.
+
+**(c) Recommendation: GO — Gemini 3.5 Flash Lite is good enough as a
+FALLBACK, not a replacement.** More reliable on structured output,
+comparable latency, never inverted/dumped, and far better than the
+rejected Ollama options. Its soft-match conservatism is a real, documented
+limitation and is why Groq stays primary rather than a coin-flip.
+
+**(d) Routing design:** written up in `huntloop-architecture-decisions.md`
+(new file). Groq primary → switch to Gemini only on `DailyQuotaExhausted`
+(never on a transient `None`) → stop on `AllProvidersExhausted`. Reuses
+`backfill_skills_matching.py`'s existing self-pacing loop; no queue, no
+worker. Integration = one import swap + one `except` clause in that
+script. NOT wired this session.
+
+**(e) Full test suite: 93/93 passing.** This session's DB access was
+read-only except that the validation harness makes real Groq + Gemini
+API calls (11 jobs each); no DB writes.
+
+**(f)** CLAUDE.md updated (skills-matching bullet + the ATS-coverage
+bullet); `huntloop-architecture-decisions.md` created.
