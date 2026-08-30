@@ -5097,3 +5097,175 @@ one new `huntloop/skills_matching_<name>.py` when/if the time comes.
 Sources consulted: inference-docs.cerebras.ai/support/rate-limits +
 /capabilities/structured-outputs; help.mistral.ai free-tier article +
 docs.mistral.ai/deployment/ai-studio/tier; openrouter.ai/docs/api_reference/limits.
+
+## 2026-08-30 — Full-backlog Groq→Gemini skills-matching run + quality/observability verification
+
+First unbounded (`--limit`-less) production run of the Step K router against
+the real relevant backlog, plus answers to two open quality questions.
+**No routing / batch-sizing / relevance-filter code was changed** — run +
+measurement only.
+
+### What actually happened (read this first)
+
+The launchd daily orchestrator (`com.huntloop.scraper`, missed-3am
+catch-up) **fired this morning at 07:40 and its stage-2 backfill ran
+concurrently with the manual run started at 07:57.** Both processes:
+- read the same `matched_skills IS NULL AND is_relevant IS TRUE` list,
+  oldest-`scraped_at`-first, so they raced the same rows;
+- shared one Groq TPD bucket and one Gemini RPD bucket.
+
+This was not anticipated and it contaminates the per-run capacity numbers
+(a single run would have gone further on Gemini's 500 RPD). It is *not* a
+correctness problem: each row's `matched_skills`/`missing_skills` are set
+together and committed per-row, so the later commit of a
+double-processed row just wins cleanly. But ~700 rows were processed
+twice — wasted quota. **Finding, not fixed (out of scope): the backfill
+has no concurrency guard / lock; a manual run and the scheduled run will
+trample each other.**
+
+### (a) Backlog, provider split, wall-clock
+
+| | before | after |
+|---|---|---|
+| relevant `matched_skills IS NULL` backlog | 12,682 (manual run's view) / 12,716 (cron run's view) | **11,057** |
+| `job_postings` with a stored result | 736 | **2,363** |
+| of those, `matched_skills = []` | — | 733 (31%, healthy — lots of genuinely non-fit roles) |
+
+Net backlog reduction **−1,625** despite **~2,346 combined store-events**
+across the two runs (the gap = double-processed rows).
+
+- **Manual run:** 1,068 stored / 727 NULL / 1,795 processed in **28.5 min**.
+  Routing: groq 2 jobs / 1 batch, gemini 1,066 jobs / 366 batches. Stopped
+  on `AllProvidersExhausted`.
+- **Cron run:** 1,278 stored / 461 NULL / 1,739 processed in **44.8 min**.
+  Routing: groq 7 jobs / 4 batches (+14 `json_validate_failed` per-batch
+  failovers), gemini 1,271 jobs / 362 batches. Also stopped on
+  `AllProvidersExhausted`.
+- **Groq contributed 9 jobs total.** Its 200,000-token TPD (confirmed
+  still 200K via a forced 429: *"Limit 200000, Used 196649"*) was ~98%
+  consumed at run start — rolling-24h residue from 2026-08-29's Step K
+  `--limit 250` verification run, which burned tokens on ~19
+  `json_validate_failed` retries. One Groq batch got through per run
+  before the TPD 429.
+- **Gemini did the rest** and hit its **per-day (RPD ≈ 500)** cap after
+  ~360 successful batches per run — correctly raised `DailyQuotaExhausted`
+  → `AllProvidersExhausted` → clean stop, exit 0, backlog line logged.
+- The **~1,188 combined NULL rows** are almost all Gemini **per-minute**
+  429s ("You exceeded your current quota" — the free tier returns no
+  clean RetryInfo). Classified as transient (not `DailyQuotaExhausted`),
+  left NULL, will be retried next run — interrupt-safe, as designed.
+  **The per-minute 429 rate (manual 40%, cron 26%) is inflated by the
+  concurrency**: two runs each pacing at `MAX_RPM=14` against Gemini's
+  real 15 RPM cap = ~28 req/min combined. Even single-run, 14-vs-15 is a
+  thin margin and will still shed some calls.
+
+### (b) Gemini cold-start latency — does the ~86 s recur?
+
+**It recurs, sporadically, and it is NOT a first-call-only effect.**
+Across ~491 successful Gemini batch calls in the two runs, exactly **5
+were slow**: 43.0 s and 32.0 s (manual run, 07:59), and 47.6 s / 31.8 s /
+69.4 s (cron run, 08:02 / 08:06 / 08:17). Every other call was
+**1.0–2.5 s**.
+
+Evidence it is **server-side, not a client warm-up**:
+- The cron run's *first* ~8 Gemini calls (07:41–07:50) were all
+  1.0–1.4 s — no cold start at all.
+- The slow calls in the two **independent processes** cluster in the same
+  wall-clock window (07:59–08:06, then an outlier at 08:17), i.e. both
+  clients saw Gemini slowness at the same time.
+- Magnitude range 32–69 s this session; the earlier single-batch 86 s is
+  the same phenomenon at its tail, not a distinct effect.
+
+So: ~1% of calls, in short time-correlated bursts, 30–70 s. Not a
+per-session warm-up penalty. No mitigation needed — `REQUEST_TIMEOUT_SECONDS`
+already covers it and these are rare.
+
+### (c) Quality spot-check — real production data, 24 rows
+
+Random sample (`seed=1234`), provider attributed from both runs' logs:
+**all 8 Groq-produced rows** (that's the entire day's Groq output) + **16
+random Gemini rows**. Reviewed `matched_skills`/`missing_skills` against
+each real JD and the active resume (id 3, backend-SWE).
+
+**Groq (8): 6 clean, 2 mild over-match, 0 hallucinations, 0 full-resume
+dumps.**
+- Correct `matched: []` on all mechanical/automotive/sales roles
+  (Exterior D&R Engineer, Exterior Lighting, Deal Desk Analyst, HiL Test
+  Engineer → `[]` or just `[Python]`).
+- `id=1805` "Datadog FDE Lead" — 17 matched incl. K8s/AWS/GCP/microservices/
+  observability stack (all named in the JD, all in the resume — fair),
+  **but Agile/Scrum, GitHub Actions, Jenkins, ServiceNow, JMeter are not
+  in that JD** — ~5/17 pulled from the resume, not matched. Mild
+  over-match on a management role.
+- `id=1859` "Director, Engineering (50-60 reports)" — 6 matched, all
+  generic paraphrases ("Backend engineering", "High-throughput APIs",
+  "Async processing"…) loosely tied to JD context. Borderline —
+  not wrong, but vague and generous for a manager-of-managers role the
+  candidate isn't near qualified for.
+
+**Gemini (16): ~12 clean, 2 weakly-grounded over-match, 2 with
+hallucinated matches.**
+- Good: `id=1940` (JMeter/Python/AWS/GCP — textbook), `id=2104` Reddit
+  Senior SWE (Python + distributed systems), `id=2146` Riot ML Eng
+  (matched only Python/C++/C#, all the ML depth correctly in missing),
+  correct `[]` on Veeva sales roles, water-treatment Field Service Rep,
+  Databricks SA manager.
+- **Hallucinated matches (JD phrases with ~zero resume grounding):**
+  - `id=2123` "Principal Electronics Engineer" → `matched: ["PCB layout",
+    "power electronics"]`. Resume has neither — pure JD lift. Should be
+    `[]`.
+  - `id=1930` "Senior Frontend SWE" (Reddit) → `matched` includes
+    **React** and **GraphQL**; the resume lists TypeScript/Angular/Vue.js
+    only, no React, no GraphQL. TS/JS/Angular/Vue are correct; React +
+    GraphQL are invented.
+- **Weakly-grounded over-match (JD-phrase matches, thin resume support):**
+  - `id=3028` Veeva "AI Agent Implementation" Solution Architect → 5
+    matched ("SaaS", "enterprise AI projects", "hyperscale cloud
+    platforms"…) mostly paraphrased JD, not resume skills.
+  - `id=2624` "CRM Lead – Service Cloud" → `matched: ["AI-driven customer
+    support", "automation and intelligence"]`. No CRM/Salesforce/support
+    content in the resume. Should be `[]`.
+
+**Pattern:** on *adjacent-but-not-a-fit* roles (Solution Architect, CRM
+Lead, Electronics Engineer, Frontend), Gemini sometimes fills
+`matched_skills` with skills **named in the JD** without checking they're
+in the résumé — the inverse of the full-resume-dump failure, milder, and
+**not caught by `MAX_PLAUSIBLE_MATCHED_SKILLS = 20`** (these are 2–7
+items). Groq is tighter here but not immune (`id=1805`). Rate in this
+sample: ~4/24 with a real concern, 2/24 clear hallucination. Consistent
+with the Step-K note that Gemini is a *fallback*, not a co-equal — and
+here it produced ~99% of the day's results because Groq's budget was
+gone. No `matched_skills` length anomalies (max in sample 17; DB-wide max
+20, filter working).
+
+### (d) Backlog-size logging
+
+Correct. Both runs' end-of-run `_log_backlog` printed
+`skills-matching backlog: 11057 relevant rows awaiting a result (16953
+non-relevant NULL rows deliberately skipped)`, matching a direct
+`SELECT count(*) … matched_skills IS NULL AND is_relevant IS TRUE` = 11,057.
+
+### (e) Tests
+
+`104/104 passing` (unchanged). Production row counts (`job_postings`
+30,373, `companies` 380, `lca_disclosures` 1,431,321, `resume_versions` 3,
+`job_applications` 2) identical before and after `pytest` — conftest
+isolation intact.
+
+### Takeaways (no code changed this step)
+
+1. Backlog 12,682 → **11,057**; full clear will take several more daily
+   runs (Groq ~58 jobs/day when its budget isn't pre-spent; Gemini
+   ~1,000–1,300 successful/day at current 429 rates, not the ~2,200 the
+   Step K projection assumed).
+2. **Concurrency:** the scheduled orchestrator and any manual run share
+   quota and race rows. If a manual catch-up run is wanted, either skip
+   it on days the launchd job already ran, or add a lock — deferred.
+3. **Gemini per-minute 429 waste** is real even single-run; `MAX_RPM=14`
+   vs a 15 hard cap has no margin. Lowering it (e.g. 10) would cut wasted
+   RPD budget at the cost of throughput — deferred, needs its own
+   measurement.
+4. **Gemini matched-skills hallucination** on adjacent roles (~1/8 of
+   sampled Gemini rows) — pulls JD skills into `matched`. Worth a
+   prompt-tightening pass or a resume-grounding check later; the
+   `MAX_PLAUSIBLE_MATCHED_SKILLS` filter does not catch it.

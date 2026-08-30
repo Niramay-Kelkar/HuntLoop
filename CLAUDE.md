@@ -547,6 +547,37 @@ nothing scrapes them; treat that as planned, not present.
   `scripts/validate_gemini_skills_match.py` (side-by-side harness, writes
   gitignored `scratch_gemini_validation.json`) is unchanged.
   `GEMINI_API_KEY` is in `.env`.
+  **First unbounded (`--limit`-less) production run, 2026-08-30 (see
+  SESSIONS.md) — measurement only, no code changed.** Backlog 12,682 →
+  **11,057**; `job_postings` with a stored result 736 → 2,363 (733 of
+  those `matched_skills = []`, a healthy 31%). Real observations that
+  differ from the projections above: (1) **Groq contributed only ~9 jobs
+  total** — its 200K TPD (still 200K, confirmed via a forced 429:
+  "Limit 200000, Used 196649") was ~98% pre-consumed by the prior day's
+  `--limit 250` run within the rolling-24h window. (2) **Gemini's
+  effective throughput is ~1,000–1,300 successful jobs/day, not the
+  ~2,200 projected** — sustained per-minute 429s ("You exceeded your
+  current quota", classified transient → row left NULL, retried next
+  run) shed 25–40% of calls; `MAX_RPM=14` vs Gemini's real 15 RPM hard
+  cap has no margin. It still stops cleanly on the per-day (RPD ≈ 500)
+  429 → `DailyQuotaExhausted` → `AllProvidersExhausted`, exit 0. (3)
+  **The launchd daily orchestrator's stage-2 backfill and any manual
+  `backfill_skills_matching.py` run share quota and race the same NULL
+  rows — there is no lock.** That day both ran concurrently (07:40 cron
+  catch-up + 07:57 manual); ~700 rows got processed twice. If running a
+  manual catch-up, skip it on days the scheduled job already fired.
+  (4) **Gemini cold-start latency is server-side and sporadic, not a
+  first-call warm-up** — ~1% of calls take 30–70s in short
+  time-correlated bursts (seen simultaneously across two independent
+  processes); the rest are 1–2.5s. (5) **Gemini quality on
+  adjacent-but-not-a-fit roles**: ~1/8 of spot-checked Gemini rows put
+  skills *named in the JD* into `matched_skills` without résumé grounding
+  (e.g. "PCB layout" for an electronics role, "React"/"GraphQL" for a
+  frontend role when the résumé has neither) — the inverse of the
+  full-resume-dump failure, milder, and **not caught by
+  `MAX_PLAUSIBLE_MATCHED_SKILLS = 20`** (these are 2–7 items). Groq is
+  tighter but not immune. A prompt-tightening / résumé-grounding pass is
+  a candidate follow-up; nothing changed this step.
 - **A hybrid keyword + embedding-similarity relevance pre-filter exists,
   added 2026-08-24 (see SESSIONS.md) — `job_postings.is_relevant`
   (nullable `Boolean`, migration `0900f3514ad2`), meant to flag whether
