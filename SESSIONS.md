@@ -5663,3 +5663,90 @@ verified stable against bogus + 6 real tenants; site-name unguessability
 verified (1/6 common-list hit). (d) recommendation above. (e) full suite
 **133 passing**, unchanged (no app code touched — one new `scripts/`
 file). (f) this entry + CLAUDE.md.
+
+---
+
+## 2026-08-30 — Prove Workday {tenant, dc, site} discovery on 5 real tenants
+
+**Goal:** before building a Workday spider, prove the `{tenant, dc, site}`
+discovery step end-to-end on a handful of the confirmed hits. No spider,
+no scaling to all 43. New `scripts/discover_workday_triple.py` (one tenant
+per invocation, proof tool — not a batch runner).
+
+**5 real triples discovered + real jobs retrieved via CXS API:**
+
+| Company (DOL name) | tenant | dc | site | CXS `total` | pagination |
+|---|---|---|---|---|---|
+| NXP USA | `nxp` | `wd3` | `careers` | 763 | 0 overlap across 6 pages, 120 unique |
+| REGENERON GENETICS CENTER | `regeneron` | `wd1` | `careers` | 577 | 0 overlap |
+| ORGANON | `organon` | `wd5` | `searchjobs` | 121 | 0 overlap |
+| CDW | `cdw` | `wd5` | `careers` | 114 | 0 overlap |
+| SALESFORCE | `salesforce` | `wd12` | `External_Career_Site` | 1516 | 0 overlap |
+
+CXS endpoint shape: `POST https://{tenant}.{dc}.myworkdayjobs.com/wday/
+cxs/{tenant}/{site}/jobs` body `{"limit":N,"offset":M,"appliedFacets":{}}`
+→ `{"total":N,"jobPostings":[{title, externalPath, locationsText,
+postedOn, bulletFields}]}`. `total` is returned on the offset-0 call;
+paginate by `offset` until `offset >= total`. Cross-checked NXP against
+the **live rendered board** (`nxp.wd3.myworkdayjobs.com/careers`,
+screenshot): "763 JOBS FOUND", same first posting ("Customer Support
+Engineer – i.MX Applications Processors", Guadalajara, R-10066489) — the
+API result *is* the real board.
+
+**Discovery is fully automated — no manual step needed for these 5:**
+1. **tenant** — name-derived slug (`slug_candidates()`, already proven for
+   GH/Lever).
+2. **dc** — POST `.../wday/cxs/{tenant}/__nosuchsite__/jobs` to each of 8
+   `wd{N}` subdomains; **404 = tenant lives here, 422 = not**. ~8 requests.
+3. **site** — POST `.../wday/cxs/{tenant}/{site}/jobs` for each of an
+   18-name curated list (`scripts/discover_workday_triple.py`
+   `_SITE_CANDIDATES`); first 200 wins. **Matched 5/5**, including
+   Salesforce's non-standard `External_Career_Site` (it was in the list).
+   Workday matches this segment **case- and separator-insensitively** for
+   standard names (`nxp/Careers` == `nxp/careers`; `organon/SearchJobs`
+   == `organon/Search_Jobs`), so a short list has wide reach. Web-search
+   fallback (`"{company} site:myworkdayjobs.com"`) is only for a tenant
+   whose site name isn't in the list — **not needed for any of these 5**.
+
+**Repeatability assessment (task item 4):**
+- **No existing careers-URL source for the "neither" companies.**
+  `companies.careers_url` exists but is populated for only **9 / 380**
+  rows (the original `detect_and_store_ats.py` curated set;
+  `adobe` = `https://adobe.wd5.myworkdayjobs.com/en-US/external_experienced`
+  is the one Workday example and shows the intended full-URL format).
+  `detect_ats_for_sponsors.py` only writes `name`/`ats_platform`/
+  `ats_token`, so the 371 sponsor-expansion rows have `careers_url` NULL.
+  `lca_disclosures` has **no website/URL/domain column** at all. So the
+  careers URL is not available from records or LCA data.
+- **But the proof shows you don't need it.** The triple is discoverable
+  from the **tenant slug alone** via CXS probing (steps 2–3 above), which
+  is what the script does. A careers URL would only be a convenience /
+  disambiguation aid.
+- **What still needs a human (the residual ~10–20%):** (a) confirming an
+  ambiguous generic-slug tenant is the *right* company (the `red` /
+  `western` / `tera` problem from the prior entry — a Workday tenant by
+  that name exists but may belong to someone else; needs an eyeball or a
+  board-name fuzzy check); (b) tenants whose site segment isn't in the
+  curated list — a `site:myworkdayjobs.com` search (automatable via a
+  search API, or a ~1-min manual lookup).
+- **Storage decision for the spider step (not made here):**
+  `companies.ats_token` is a bare string (`adobe`). Workday needs all
+  three parts — either overload `ats_token` as `nxp:wd3:careers`, add
+  `wd_datacenter`/`wd_site` columns, or standardize on populating
+  `careers_url` with the full `.../en-US/{site}` URL and parsing it in
+  the spider (matches how `adobe`'s row already looks).
+
+**Go/No-Go: GO — build the Workday spider next.** The discovery mechanism
+is proven on 5 real unambiguous tenants: fully automated tenant→dc→site,
+clean offset pagination with zero page overlap, and API output that
+matches the live board exactly. Prevalence (~10% of the 8,113 neither-set,
+~2.5× the next platform) justifies the extra build cost over GH/Lever
+(a 3-part identifier + an ~18-name site probe vs. a bare slug).
+
+**Verification:** (a) the 5 triples + live careers URLs + NXP redirect/
+render cross-check above; (b) real `jobPostings` retrieved and paginated
+for all 5 (`scripts/discover_workday_triple.py <tenant>` reproduces);
+(c) repeatability assessment above — ~80–90% automatable, residual manual
+work is disambiguation + rare site-name lookups; (d) GO. (e) full suite
+**133 passing**, unchanged (no app code — one new proof script).
+(f) this entry + CLAUDE.md.

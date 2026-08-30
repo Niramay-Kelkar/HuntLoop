@@ -1139,6 +1139,29 @@ nothing scrapes them; treat that as planned, not present.
   public API but ids aren't name-derivable (`Ubisoft`->`Ubisoft2`) and
   only ~4%; Ashby is clean but too rare in this enterprise-skewed set;
   iCIMS has opaque subdomains and mostly no public JSON.
+  **Discovery mechanism proven end-to-end 2026-08-30 on 5 real
+  unambiguous tenants (see SESSIONS.md "Prove Workday {tenant, dc, site}
+  discovery") — GO to build the Workday spider next; still not built.**
+  `scripts/discover_workday_triple.py <tenant>` (one tenant per run, proof
+  tool, not a batch runner): name-slug -> dc via the 404/422 probe over 8
+  `wd{N}` -> site via an 18-name curated `_SITE_CANDIDATES` list (CXS
+  200/404, case/separator-insensitive for standard names). Resolved 5/5
+  fully automatically incl. Salesforce's custom `External_Career_Site`,
+  **no web-search fallback needed**. Real triples:
+  `nxp/wd3/careers`, `regeneron/wd1/careers`, `organon/wd5/searchjobs`,
+  `cdw/wd5/careers`, `salesforce/wd12/External_Career_Site` — each
+  returned real offset-paginated `jobPostings` (0 page overlap); NXP
+  cross-checked against the live rendered board (763 jobs, identical first
+  posting). **No existing careers-URL source for the neither-set** —
+  `companies.careers_url` is populated for only 9/380 rows and
+  `lca_disclosures` has no URL column — but the proof shows the triple is
+  discoverable from the tenant slug alone, so a careers URL isn't
+  required. Residual manual work (~10-20%): disambiguating generic-slug
+  tenants (the `red`/`western` problem) and the rare tenant whose site
+  name isn't in the list (needs a `site:myworkdayjobs.com` search).
+  Storage decision deferred to the spider step: `companies.ats_token` is
+  a bare string today and Workday needs `{tenant, dc, site}` (overload it,
+  add columns, or parse the full `careers_url` like `adobe`'s row).
   **Verified with a
   real `docker compose run app python main.py`: `job_postings` 649 ->
   30,363 (+29,714), every new row's `is_relevant` populated at insert
