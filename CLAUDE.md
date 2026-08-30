@@ -437,6 +437,25 @@ nothing scrapes them; treat that as planned, not present.
   every real job, not ~2%. (`backfill_embeddings.py` still needs to be
   re-run after future scrapes add rows — same as before, not wired into
   the daily orchestrator.)
+  **Audited the live match-score query/UI (`huntloop.api.routers.jobs`)
+  at the new 30,373-row scale 2026-08-30 (see SESSIONS.md) — no code
+  changed, still correct.** Scores now render for ATS-expansion companies
+  in both list and detail views (verified: `pubmatic` 0.68, `vianttechnology`
+  0.66, `sigmacomputing` ~0.63–0.65 — all now outranking the original
+  set; old global max Palantir 0.593 is now rank #42). **Before this
+  backfill, jobs with `embedding IS NULL` (98% of the table) were
+  silently degraded, not broken**: `match_score` came back JSON `null`
+  (frontend "not scored" pill), `nulls_last()` sorted them below every
+  real-scored job, and `min_score` filters excluded them from results
+  *and* the total count — no crash, no zero, no error. **No pgvector
+  index (ivfflat/hnsw) on `job_postings.embedding` and deliberately not
+  added**: the list query is a Seq Scan + top-N heapsort, ~66–122 ms SQL
+  / ~120–245 ms full `GET /jobs` request — acceptable for a single-user
+  local tool; an ANN index is approximate (would change which jobs rank
+  where — forbidden by the "don't change scoring" constraint) and only
+  helps a bare `ORDER BY <=> LIMIT`, not the `count()`/`min_score`/
+  `company`-filtered call patterns. Revisit only past ~100k rows or if
+  the API goes multi-user/remote.
 - **Matched/missing skills-list via Groq exists (`huntloop.skills_matching`),
   added 2026-08-22. Phase 3's matching engine (embeddings + scoring +
   skills matching) is complete and self-sustaining as of 2026-08-22 —

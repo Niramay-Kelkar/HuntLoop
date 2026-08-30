@@ -5499,3 +5499,76 @@ relevance gate is a deliberate separate call).
   `tests/test_relevance_filter.py` (new). No pipeline code changed —
   `JobDataPipeline._classify_relevance` calls the same `classify_relevance`,
   which now honours the split automatically for future inserts.
+
+---
+
+## 2026-08-30 — Audit resume-match-score feature at full 30,373-row scale
+
+**Scope:** verification-and-fix pass on the existing live pgvector
+match-score query/UI only (`huntloop.api.routers.jobs`), triggered by the
+same-day embedding backfill (605 → 30,373). No scoring logic, embedding
+model, or relevance-filter code touched. **No code changed — audit only.**
+
+**1. Scores now display for newly-added companies.** Picked real jobs from
+ATS-expansion companies (not the original Palantir/Figma/Duolingo/Checkr/
+Wealthfront set):
+- `/jobs` list, `sort=-score`: top rows are now `pubmatic` Principal SWE
+  Data Analytics (0.680), `pubmatic` Senior SWE (0.670), `vianttechnology`
+  Sr SWE AI & Data Platforms (0.661), then 7 `sigmacomputing` SWE roles
+  (0.63–0.65). Screenshots taken of both list and detail views.
+- `/jobs/28878` (vianttechnology) detail view: renders match ring 66,
+  `/jobs/20261` (pubmatic): 68. API `GET /jobs/{id}` returns the same.
+
+**2. Before/after — what these jobs actually did pre-backfill.** Not a
+crash, not a zero, not an error. `_score_and_status_columns()` builds
+`match_score = 1 - JobPosting.embedding.cosine_distance(resume_embedding)`;
+with `job_postings.embedding IS NULL` (29,768 of 30,373 rows before today)
+that expression is SQL `NULL`. Concrete consequences, confirmed from code:
+  - `match_score` came back `null` in the JSON. Frontend `ScoreIndicator`
+    rendered the grey **"not scored"** pill (list) / `ScorePill` (table);
+    detail page likewise.
+  - Sort: `score_expr.desc().nulls_last()` — every NULL-embedding job sorted
+    **below every one of the 605 real-scored jobs**, i.e. never on page 1
+    of "best match". Effectively invisible to the default view.
+  - `min_score` filter: `WHERE score_expr >= :min_score` — NULL fails the
+    predicate, so these jobs were **silently excluded** from any filtered
+    list and from its `total` count.
+  - No active-resume case unchanged (`literal(None)` score, order by id).
+  So: the feature was silently degraded (not broken) for ~98% of jobs —
+  they existed in the list only at the very bottom, unscored, and vanished
+  entirely under any `min_score`.
+
+**3. Query performance at 30,373 rows.** No pgvector index
+(ivfflat/hnsw) exists on `job_postings.embedding` — `\d job_postings`
+shows only the pkey and `job_url` unique btree. `EXPLAIN ANALYZE` of the
+list query: **Seq Scan on job_postings (30,373 rows) → Nested Loop →
+top-N heapsort**, execution ~66–122 ms warm (SQL), full `GET /jobs`
+request ~120–245 ms (two seq scans: the `count()` subquery + the main
+query). With a `company=` filter: ~120 ms.
+  **No index added — deliberately, per "only if genuinely needed":**
+  (i) 120–245 ms for a single-user local tool on the default page load is
+  acceptable, not a regression users would notice; (ii) the only pgvector
+  index types (ivfflat/hnsw) are **approximate** — they would change which
+  jobs surface at a given rank, which this task explicitly forbids
+  ("do NOT change the scoring logic … behaves correctly"); (iii) an ANN
+  index only accelerates a bare `ORDER BY embedding <=> x LIMIT n` — it
+  does not help the `count()`, the `min_score` range filter, or a
+  `company`-filtered query, which are half the real call patterns.
+  Revisit only if the table grows well past ~100k rows or the API becomes
+  multi-user/remote; an exact-recall answer at ~150 ms is the right
+  trade-off today.
+
+**4. Sort-by-score correctness across the full set.** `sort=-score` now
+surfaces genuine cross-dataset winners: ranked by live score, the old
+global max (Palantir SWE, 0.593) is now **rank #42** — 41 jobs from
+newly-added companies (`pubmatic`, `vianttechnology`, `sigmacomputing`,
+…) score higher. `figma` best = rank #242, `checkr`/`duolingo` best ≈ rank
+#2200. `min_score=0.6` returns `total=28`, all from expansion companies.
+Sorting/filtering operate over all 30,373, not the original 605.
+
+**Verification:** (a) screenshots of `/jobs?sort=-score` and `/jobs/28878`
+showing real scores for pubmatic/viant/sigmacomputing; (b) before/after
+account above, derived from the actual query construction in
+`huntloop.api.routers.jobs`; (c) measured `EXPLAIN ANALYZE` + `curl`
+timings above, no index needed; (d) rank-#42-for-old-max example;
+(e) full suite **133 passing**, unchanged; (f) this entry + CLAUDE.md.
