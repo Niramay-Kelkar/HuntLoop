@@ -68,6 +68,7 @@ Groq usage (see SESSIONS.md 2026-08-22) - not a guess.
 """
 import argparse
 import collections
+import contextlib
 import logging
 import os
 import sys
@@ -76,7 +77,7 @@ import time
 SRC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
 sys.path.insert(0, SRC_DIR)
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from huntloop.db_models import JobPosting, ResumeVersion
@@ -84,6 +85,38 @@ from huntloop.settings import DATABASE_URL
 from huntloop import skills_matching_router as router
 
 logger = logging.getLogger(__name__)
+
+# Postgres session-level advisory lock guarding against two backfill runs
+# at once. The daily scheduled run (scripts/run_orchestrator_cron.sh
+# stage 2) and an ad hoc manual run have already collided in production
+# (2026-08-30, see SESSIONS.md) - both read the same
+# `matched_skills IS NULL AND is_relevant IS TRUE` list oldest-first and
+# raced the same rows, double-processing ~700 of them and burning real
+# Groq/Gemini quota for nothing. A second invocation now detects the held
+# lock and exits cleanly (return, not raise) before touching anything.
+# The lock is held on a dedicated AUTOCOMMIT connection for the whole run
+# and is auto-released by Postgres if the process dies (session-level
+# advisory locks survive transaction rollback but not connection loss).
+# Key: b"hlsm" as a big-endian int - stable, project-specific, unlikely
+# to collide with anything else using advisory locks on this database.
+_LOCK_KEY = int.from_bytes(b"hlsm", "big")  # 0x686c736d == 1_751_937_901
+
+
+@contextlib.contextmanager
+def _backfill_lock(engine):
+    """Yield True if this process got the advisory lock, False if another
+    backfill instance already holds it. Always releases on exit."""
+    conn = engine.connect().execution_options(isolation_level="AUTOCOMMIT")
+    got = False
+    try:
+        got = conn.execute(
+            text("SELECT pg_try_advisory_lock(:k)"), {"k": _LOCK_KEY}
+        ).scalar()
+        yield bool(got)
+    finally:
+        if got:
+            conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _LOCK_KEY})
+        conn.close()
 
 MODEL_NAME = router.MODEL_NAME
 CHARS_PER_TOKEN = 4
@@ -186,6 +219,29 @@ def _log_backlog(session) -> int:
 
 
 def main(limit: int | None = None):
+    """Acquire the single-instance advisory lock, then run the backfill.
+    A second concurrent invocation logs one clear line and returns 0
+    without racing the first."""
+    lock_engine = create_engine(DATABASE_URL, echo=False)
+    try:
+        with _backfill_lock(lock_engine) as got_lock:
+            if not got_lock:
+                logger.warning(
+                    "Another backfill_skills_matching instance already holds the "
+                    "advisory lock (key %s) - exiting immediately without processing "
+                    "anything. This is the concurrency guard working as intended "
+                    "(e.g. the daily scheduled run overlapping a manual run); "
+                    "nothing raced and no Groq/Gemini quota was spent.",
+                    _LOCK_KEY,
+                )
+                return
+            logger.info("Acquired backfill single-instance lock (key %s)", _LOCK_KEY)
+            _run_backfill(limit=limit)
+    finally:
+        lock_engine.dispose()
+
+
+def _run_backfill(limit: int | None = None):
     engine = create_engine(DATABASE_URL, echo=False)
     Session = sessionmaker(bind=engine)
     session = Session()

@@ -5269,3 +5269,119 @@ isolation intact.
    sampled Gemini rows) — pulls JD skills into `matched`. Worth a
    prompt-tightening pass or a resume-grounding check later; the
    `MAX_PLAUSIBLE_MATCHED_SKILLS` filter does not catch it.
+
+## 2026-08-30 — Two backfill fixes: concurrency lock + Gemini résumé-grounding prompt
+
+Both fixes target failure modes found in the 2026-08-30 full-backlog run
+(previous entry). Groq backend / router **not touched** (`git diff` on
+`skills_matching.py` and `skills_matching_router.py` is empty).
+
+### Fix 1 — single-instance advisory lock (`backfill_skills_matching.py`)
+
+`main()` now acquires a Postgres **session-level advisory lock**
+(`pg_try_advisory_lock`, key `int.from_bytes(b"hlsm","big")` =
+1,751,937,901) on a dedicated AUTOCOMMIT connection held for the whole
+run. A second concurrent invocation gets `False`, logs one WARNING
+("...already holds the advisory lock ... nothing raced and no
+Groq/Gemini quota was spent"), and **returns 0 without touching
+anything**. The run body moved verbatim into `_run_backfill()`. Lock
+auto-releases on context exit and (session-level) on process death.
+
+**Verified for real, two ways:**
+1. *Deterministic:* held the lock in a `psql` session
+   (`SELECT pg_advisory_lock(1751937901); pg_sleep(25)`), ran
+   `python scripts/backfill_skills_matching.py --limit 5` → exit 0
+   immediately, only the guard WARNING logged, zero rows processed, zero
+   API calls.
+2. *Real overlap:* launched two `backfill_skills_matching.py --limit 4`
+   processes at once. At the same millisecond (08:50:53.625) one logged
+   `Acquired backfill single-instance lock` and proceeded; the other
+   logged the guard WARNING and exited 0. No row was processed by both.
+
+`tests/test_backfill_lock.py` (3 tests): second holder refused then lock
+frees; lock actually released (checked via `pg_locks`); `main()` doesn't
+run the backfill while the lock is held. **Full suite: 107 passing**
+(104 + 3).
+
+### Fix 2 — Gemini résumé-grounding (`skills_matching_gemini.py`)
+
+Both `_SYSTEM_PROMPT` and `_BATCH_SYSTEM_PROMPT` gained an explicit
+grounding rule: a skill goes in `matched_skills` **only if the résumé
+itself has specific evidence** (named outright, or a project/role that
+demonstrates it); a skill that appears **only in the job description
+does NOT qualify**; "*the job posting mentions X*" ≠ "*the résumé shows
+X*"; if you can't point to the résumé text, it goes in `missing_skills`.
+Groq's prompt deliberately unchanged (this failure mode wasn't observed
+there in the prior sample).
+
+**A/B verification** — 20 fresh random relevant-NULL jobs (not the
+previously-reviewed rows; `seed=20260830`), each run through
+**`gemini-3.1-flash-lite`** (3.5-flash-lite's 500 RPD was already spent
+today; 3.1 is the documented same-family fallback, identical limits) with
+OLD prompt then NEW prompt, same jobs, same model — only the prompt
+differs. Reviewed by hand against the active résumé (id 3, backend-SWE).
+
+| metric | OLD prompt | NEW prompt |
+|---|---|---|
+| rows with ≥1 ungrounded `matched_skills` entry | **9 / 20 (45%)** | **5 / 20 (25%)** |
+| total ungrounded `matched_skills` entries | **19** | **9** (−53%) |
+| rows improved by NEW | — | 6 |
+| rows regressed by NEW | — | 1 |
+
+Reviewed rows (id — what NEW fixed / didn't):
+- **Fixed:** `6882` Spreetail SWE-III (OLD invented "AI-native
+  development" / "Automated exception handling" / "Anomaly detection" →
+  NEW: API development, microservices, automated tooling — all in résumé);
+  `13064` Verkada Assoc. Solutions Eng (dropped "Networking
+  fundamentals"); `9026` Roblox Privacy Eng (OLD invented "Privacy
+  engineering" / "Data protection regulations" / "Policy-as-code" → NEW
+  `[]`-ish generic); `17727` Epic Technical Designer Animation (dropped
+  "Unreal Engine" — not in résumé).
+- **Improved but not clean:** `23095` Alarm.com Principal SWE (dropped
+  "System architecture"/"Technical leadership"; "Mentoring engineers"
+  still ungrounded); `30808` HighRadius FD Architect (dropped "Process
+  optimization"; "Stakeholder management" still ungrounded).
+- **Not fixed:** `25611` Lightmatter DV Engineer still matches
+  "SystemVerilog" (résumé has none); `25074` Galaxy Digital TPM still
+  matches "JIRA" + "Technical Program Management" (résumé is an SWE, no
+  JIRA anywhere). Both are roles far from the résumé.
+- **Regressed:** `15033` quant-research intern — OLD clean
+  `[Java,Python,C#,C++]`; NEW added vague "Data modeling" + "Large data
+  sets".
+- Correct `matched_skills: []` on both prompts for the non-software roles
+  (`5456` supplier quality, `5329` near-empty JD, `26318` transportation
+  PM, `24584` structural PE).
+
+**Conclusion: the hallucination rate genuinely dropped (~53% fewer
+ungrounded entries; 6 rows improved vs 1 regressed), it did not just
+move.** The gain is concentrated exactly where the failure mode lived —
+software-adjacent roles where the model was copying JD nouns. Residual
+misses are on roles the candidate isn't a fit for (PM → "JIRA",
+verification → "SystemVerilog") and one over-inclusion regression. The
+`MAX_PLAUSIBLE_MATCHED_SKILLS = 20` backstop is unaffected (max in sample
+8). The 20 NEW-prompt results were stored (backlog 11,057 → 11,037).
+
+The A/B ran on 3.1-flash-lite, not the prod 3.5-flash-lite — the prompt
+change is model-agnostic in intent and both are "3.x flash-lite"; the
+daily orchestrator picks up the new prompt automatically once 3.5's RPD
+resets.
+
+### Fix 1's neighbour: Groq no-regression check — blocked by quota, argued from diff
+
+The dedicated fresh 10-row Groq spot-check could **not** complete: Groq's
+200K TPD was exhausted across today's sessions (probes + the two
+concurrent morning runs + earlier verification), so 9/10 calls returned
+`DailyQuotaExhausted` and a follow-up 6-row retry got 6/6 429s. The one
+result obtained (`id=28714` → `matched: ["Python","Bash"]`) is sane and
+conservative. The no-regression claim otherwise rests on: **zero diff to
+`skills_matching.py` and `skills_matching_router.py`** (the Groq prompt
+is byte-identical), plus the 8-row Groq review from earlier today (prior
+entry) which post-dates every Groq change (there have been none).
+
+### Files
+
+- `scripts/backfill_skills_matching.py` — `_LOCK_KEY`, `_backfill_lock()`
+  contextmanager, `main()` now the lock wrapper, body → `_run_backfill()`.
+- `src/huntloop/skills_matching_gemini.py` — grounding rule added to
+  `_SYSTEM_PROMPT` and `_BATCH_SYSTEM_PROMPT`.
+- `tests/test_backfill_lock.py` — new, 3 tests. Suite 104 → 107.

@@ -88,8 +88,15 @@ _SYSTEM_PROMPT = (
     '{"matched_skills": [list of skills the job wants that the resume genuinely demonstrates], '
     '"missing_skills": [list of skills the job wants that the resume does not show]}. '
     "Keep each skill as a short phrase (e.g. \"Python\", \"AWS\", \"B2B marketing campaigns\"). "
-    "Base this only on what's actually written in both texts - do not guess or assume skills "
-    "that aren't stated."
+    "CRITICAL - grounding rule for matched_skills: a skill belongs in matched_skills ONLY if "
+    "the RESUME ITSELF contains specific evidence for it - the skill named outright in the "
+    "resume, or a project, role, or accomplishment described in the resume that clearly "
+    "demonstrates it. A skill that appears only in the job description does NOT qualify. "
+    "'The job posting mentions X' is not the same as 'the resume shows X' - only the second "
+    "earns a place in matched_skills. Before adding any skill to matched_skills, confirm you "
+    "could point to the exact resume text that evidences it; if you cannot, put it in "
+    "missing_skills instead. Do not guess, infer, or assume skills that aren't written in the "
+    "resume, however plausible they seem for this candidate."
 )
 
 _BATCH_SYSTEM_PROMPT = (
@@ -98,9 +105,16 @@ _BATCH_SYSTEM_PROMPT = (
     "asks for. Respond with ONLY a JSON object of this exact shape, no other text: "
     '{"results": [{"job_index": int, "matched_skills": [...], "missing_skills": [...]}, ...]}. '
     "Include exactly one entry per job index, in the same order given. Keep each skill as a short "
-    "phrase (e.g. \"Python\", \"AWS\", \"B2B marketing campaigns\"). Base this only on what's "
-    "actually written in the resume and each job description - do not guess or assume skills "
-    "that aren't stated."
+    "phrase (e.g. \"Python\", \"AWS\", \"B2B marketing campaigns\"). "
+    "CRITICAL - grounding rule for matched_skills: for EVERY job, a skill belongs in that job's "
+    "matched_skills ONLY if the RESUME ITSELF contains specific evidence for it - the skill named "
+    "outright in the resume, or a project, role, or accomplishment described in the resume that "
+    "clearly demonstrates it. A skill that appears only in a job description does NOT qualify. "
+    "'The job posting mentions X' is not the same as 'the resume shows X' - only the second earns "
+    "a place in matched_skills. Before adding any skill to a job's matched_skills, confirm you "
+    "could point to the exact resume text that evidences it; if you cannot, put it in that job's "
+    "missing_skills instead. Do not guess, infer, or assume skills that aren't written in the "
+    "resume, however plausible they seem for this candidate."
 )
 
 

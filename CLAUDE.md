@@ -562,10 +562,16 @@ nothing scrapes them; treat that as planned, not present.
   cap has no margin. It still stops cleanly on the per-day (RPD ≈ 500)
   429 → `DailyQuotaExhausted` → `AllProvidersExhausted`, exit 0. (3)
   **The launchd daily orchestrator's stage-2 backfill and any manual
-  `backfill_skills_matching.py` run share quota and race the same NULL
-  rows — there is no lock.** That day both ran concurrently (07:40 cron
-  catch-up + 07:57 manual); ~700 rows got processed twice. If running a
-  manual catch-up, skip it on days the scheduled job already fired.
+  `backfill_skills_matching.py` run once shared quota and raced the same
+  NULL rows** (2026-08-30: 07:40 cron catch-up + 07:57 manual ran
+  concurrently, ~700 rows processed twice). **FIXED 2026-08-30 — the
+  script now takes a Postgres session-level advisory lock
+  (`pg_try_advisory_lock`, key 1,751,937,901) in `main()`; a second
+  concurrent invocation logs one WARNING and returns 0 without touching
+  anything.** Run body moved to `_run_backfill()`; `_backfill_lock()`
+  contextmanager; `tests/test_backfill_lock.py` (3 tests). Verified with
+  a real deliberately-triggered overlap, not just code review (see
+  SESSIONS.md).
   (4) **Gemini cold-start latency is server-side and sporadic, not a
   first-call warm-up** — ~1% of calls take 30–70s in short
   time-correlated bursts (seen simultaneously across two independent
@@ -576,8 +582,16 @@ nothing scrapes them; treat that as planned, not present.
   frontend role when the résumé has neither) — the inverse of the
   full-resume-dump failure, milder, and **not caught by
   `MAX_PLAUSIBLE_MATCHED_SKILLS = 20`** (these are 2–7 items). Groq is
-  tighter but not immune. A prompt-tightening / résumé-grounding pass is
-  a candidate follow-up; nothing changed this step.
+  tighter but not immune. **PARTLY FIXED 2026-08-30 — both Gemini prompts
+  (`_SYSTEM_PROMPT`, `_BATCH_SYSTEM_PROMPT`) gained an explicit
+  résumé-grounding rule ("*the job posting mentions X*" ≠ "*the résumé
+  shows X*"; only the second earns a `matched_skills` slot). Groq's
+  prompt deliberately untouched.** A/B on 20 fresh jobs (same jobs, same
+  model, OLD vs NEW prompt): rows with ≥1 ungrounded matched-skill
+  45% → 25%, total ungrounded entries 19 → 9 (6 rows improved, 1
+  regressed). Residual misses are on roles far from the résumé (TPM →
+  "JIRA", HW verification → "SystemVerilog"). See SESSIONS.md 2026-08-30
+  "Two backfill fixes".
 - **A hybrid keyword + embedding-similarity relevance pre-filter exists,
   added 2026-08-24 (see SESSIONS.md) — `job_postings.is_relevant`
   (nullable `Boolean`, migration `0900f3514ad2`), meant to flag whether
