@@ -66,10 +66,17 @@ INCLUDE_KEYWORDS = [
 # a bare word would be too broad (e.g. "operations" alone would also
 # match "Site Reliability Operations Analyst" - a real tech-adjacent
 # title - so specific operations phrases are used instead).
-EXCLUDE_KEYWORDS = [
+#
+# HARD excludes: an absolute override - a title containing one of these
+# is not relevant regardless of any other signal. Strong existing
+# evidence these are mostly right (e.g. "sales": 241/253 "Sales
+# Engineer" titles correctly excluded - see SESSIONS.md 2026-08-30
+# diagnostic). "sales" is a candidate for a future soft-exclude look if
+# contradicting evidence turns up, but is deliberately NOT changed here.
+HARD_EXCLUDE_KEYWORDS = [
     # sales / GTM
     "sales", "account executive", "account director", "business development",
-    "solutions consultant", "customer success", "customer support",
+    "customer support",
     "customer enablement", "revenue operations", "sales operations",
     "partner manager", "partnerships",
     # marketing / brand / content
@@ -97,6 +104,29 @@ EXCLUDE_KEYWORDS = [
     "business operations", "deal operations", "deal team",
     "fraud operations", "manufacturing", "warehouse", "retail",
 ]
+
+# SOFT excludes (added 2026-08-30, see SESSIONS.md +
+# scripts/calibrate_soft_exclude_threshold.py): these two phrases sit on
+# both sides of the technical/non-technical line in the real data -
+# "customer success" catches both Rubrik's non-technical "Customer
+# Success Engineer" (post-deployment support) AND Palantir's genuinely
+# technical "Forward Deployed Enablement Engineer - Customer Success";
+# "solutions consultant" catches non-technical pre-sales AND Figma's
+# "Enterprise Solutions Consultant" (deep technical engagement with
+# engineering audiences). A soft-exclude title is excluded ONLY IF its
+# category-reference-text embedding similarity is also below
+# SOFT_EXCLUDE_RESCUE_THRESHOLD (see classify_relevance). The include
+# keyword is deliberately NOT consulted for these - "Customer Success
+# Engineer" contains "engineer" too, and must stay excluded.
+SOFT_EXCLUDE_KEYWORDS = [
+    "customer success",
+    "solutions consultant",
+]
+
+# Back-compat: the full exclude set, for any caller that just wants
+# "is this an exclude-listed title at all". classify_relevance uses the
+# hard/soft split, not this.
+EXCLUDE_KEYWORDS = HARD_EXCLUDE_KEYWORDS + SOFT_EXCLUDE_KEYWORDS
 
 # Describes the *category* of role (software engineering / technical
 # work), not any specific person's background - deliberately distinct
@@ -140,9 +170,23 @@ def keyword_include_match(title: str) -> bool:
     return _contains_any(title.lower(), INCLUDE_KEYWORDS)
 
 
+def keyword_hard_exclude_match(title: str) -> bool:
+    """True if the title contains a HARD-exclude keyword - an absolute
+    override that always wins (see classify_relevance)."""
+    return _contains_any(title.lower(), HARD_EXCLUDE_KEYWORDS)
+
+
+def keyword_soft_exclude_match(title: str) -> bool:
+    """True if the title contains a SOFT-exclude keyword ("customer
+    success" / "solutions consultant") - excluded only if the category
+    embedding similarity is also below SOFT_EXCLUDE_RESCUE_THRESHOLD."""
+    return _contains_any(title.lower(), SOFT_EXCLUDE_KEYWORDS)
+
+
 def keyword_exclude_match(title: str) -> bool:
-    """True if the title contains a keyword indicating a non-technical
-    business function - an override signal (see classify_relevance)."""
+    """True if the title contains any exclude keyword (hard OR soft).
+    Back-compat helper - classify_relevance uses the hard/soft split, not
+    this. Kept for callers that just want "is this exclude-listed at all"."""
     return _contains_any(title.lower(), EXCLUDE_KEYWORDS)
 
 
@@ -161,6 +205,38 @@ def keyword_exclude_match(title: str) -> bool:
 # these examples correctly. 0.29 is the midpoint, giving roughly equal
 # margin on both sides rather than hugging either boundary.
 EMBEDDING_SIMILARITY_THRESHOLD = 0.29
+
+# Rescue threshold for SOFT_EXCLUDE_KEYWORDS (see that list + classify_relevance).
+# A "customer success" / "solutions consultant" titled role is excluded
+# only if its category-reference-text embedding similarity is BELOW this.
+#
+# Calibrated 2026-08-30 from the real category similarities of ALL 318
+# "customer success" / "solutions consultant" titled job_postings rows
+# (scripts/calibrate_soft_exclude_threshold.py). Set HIGHER than
+# EMBEDDING_SIMILARITY_THRESHOLD (0.29): a title that actively names a
+# customer-success / pre-sales function needs a stronger semantic signal
+# to overcome that than a neutrally-worded title does. The three real
+# rows this must get right (task-specified), with their measured
+# category similarities:
+#   Rubrik "Senior Customer Success Engineer"          0.3232  -> keep EXCLUDED
+#     (genuine post-deployment technical *support*, not building)
+#   Figma "Enterprise Solutions Consultant"            0.3403  -> RESCUE
+#     ("go deep technically with an engineering and product audience")
+#   Palantir "Forward Deployed Enablement Engineer     0.4272- -> RESCUE
+#     - Customer Success"                              0.4394
+#     (builds tooling/infra, debugs nebulous technical issues)
+# Usable window is therefore (0.3232, 0.3403]. 0.335 sits in the widest
+# real gap in that window (0.3330 -> 0.3363, the largest spacing between
+# adjacent sorted similarities in the 0.32-0.34 region), giving ~0.012
+# margin above Rubrik and ~0.005 below Figma. At 0.335, 27 of the 318
+# rows flip to relevant (23 distinct titles) - ~19 genuinely technical
+# customer-facing/pre-sales-engineering roles + ~4 residual "Manager"/
+# "Program Manager"/"Ops Analyst" false positives, accepted as MVP noise
+# the same way "GRC Program Manager"/"Product Designer" are for the base
+# filter. The other 282 (Samsara/Planet/Datadog/Okta "Customer Success
+# Manager", low-similarity "Solutions Consultant") correctly stay
+# excluded. Full table + reasoning in SESSIONS.md 2026-08-30.
+SOFT_EXCLUDE_RESCUE_THRESHOLD = 0.335
 
 
 def cosine_similarity(a, b) -> float:
@@ -199,7 +275,19 @@ def classify_relevance(title: str, embedding_similarity: float) -> bool:
     similarity alone would need a very conservative threshold to avoid
     false positives on its own, given the moderate similarity many
     generic corporate titles show to any reference text.
+
+    SOFT excludes ("customer success", "solutions consultant") are a
+    middle ground: checked after the hard excludes, they exclude the
+    title ONLY IF the embedding similarity is also below
+    SOFT_EXCLUDE_RESCUE_THRESHOLD. This rescues genuinely technical
+    customer-facing engineering roles that happen to carry one of those
+    phrases while still excluding the non-technical support/pre-sales
+    roles that share it. The include keyword is deliberately not
+    consulted here (a "Customer Success Engineer" contains "engineer"
+    too and must stay excluded).
     """
-    if keyword_exclude_match(title):
+    if keyword_hard_exclude_match(title):
         return False
+    if keyword_soft_exclude_match(title):
+        return embedding_similarity >= SOFT_EXCLUDE_RESCUE_THRESHOLD
     return keyword_include_match(title) or embedding_similarity >= EMBEDDING_SIMILARITY_THRESHOLD

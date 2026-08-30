@@ -429,6 +429,14 @@ nothing scrapes them; treat that as planned, not present.
   top/bottom-5 ranking (top 5 all Palantir "Software Engineer" roles;
   bottom 5 fraud-ops/creative/marketing roles) — see SESSIONS.md for the
   full numbers.
+  **Embedding coverage backfilled to the full dataset 2026-08-30 (see
+  SESSIONS.md) — was 605 / 30,373 rows (all the original ~9-company set),
+  now 30,373 / 30,373.** Ran `scripts/backfill_embeddings.py` unchanged
+  (batch 100, commit-per-batch, `embedding IS NULL` only) in the `app`
+  Docker image. The resume-vs-job similarity score is now computable for
+  every real job, not ~2%. (`backfill_embeddings.py` still needs to be
+  re-run after future scrapes add rows — same as before, not wired into
+  the daily orchestrator.)
 - **Matched/missing skills-list via Groq exists (`huntloop.skills_matching`),
   added 2026-08-22. Phase 3's matching engine (embeddings + scoring +
   skills matching) is complete and self-sustaining as of 2026-08-22 —
@@ -628,7 +636,33 @@ nothing scrapes them; treat that as planned, not present.
   "Embedded Legal Engineer", "Marketing Engineer"), while include and
   embedding-similarity are OR'd since keywords alone would miss
   obliquely-worded technical titles and embedding similarity alone would
-  need an unnecessarily conservative threshold on its own. **Deliberately
+  need an unnecessarily conservative threshold on its own.
+  **Exclude split into HARD and SOFT as of 2026-08-30 (see SESSIONS.md).**
+  `HARD_EXCLUDE_KEYWORDS` (everything except the two below) is still the
+  unconditional override just described — `sales` stays hard (241/253
+  "Sales Engineer" rows correctly excluded; flagged as a future-look
+  candidate, not changed). `SOFT_EXCLUDE_KEYWORDS = ["customer success",
+  "solutions consultant"]` are excluded **only if the same category
+  embedding similarity is also `< SOFT_EXCLUDE_RESCUE_THRESHOLD = 0.335`**
+  — those two phrases straddle the technical/non-technical line in the
+  real data (Rubrik "Customer Success Engineer" = support, sim 0.3232,
+  stays excluded; Palantir "Forward Deployed Enablement Engineer –
+  Customer Success" = builds tooling, sim 0.44, and Figma "Enterprise
+  Solutions Consultant" = deep technical pre-sales, sim 0.3403, both
+  rescued). `classify_relevance` checks hard first, then `soft_exclude ->
+  (sim >= 0.335)`, then the normal `include OR sim >= 0.29`; the include
+  keyword is deliberately NOT consulted for a soft-exclude title
+  ("Customer Success Engineer" has "engineer" too and must stay excluded
+  on a weak signal). Threshold calibrated from all 318 real
+  soft-exclude-titled rows (`scripts/calibrate_soft_exclude_threshold.py`);
+  0.335 sits in the widest real gap in the (0.3232, 0.3403] window.
+  `scripts/reclassify_soft_excludes.py` (Docker, batched) re-ran those
+  318 rows: 27 flipped to relevant (23 distinct — ~19 genuinely
+  technical, ~4 residual "Manager"/"Program Manager"/"Ops Analyst" false
+  positives accepted as MVP noise; the other 282 real CS-Manager /
+  low-similarity SC roles correctly stay excluded). `EXCLUDE_KEYWORDS`
+  kept as a back-compat alias (= HARD + SOFT); `tests/test_relevance_filter.py`
+  added (26 pure-logic tests). **Deliberately
   does NOT reuse the existing `job_postings.embedding` column** — that
   one is computed from `job_description` alone for resume-match scoring
   (a separate, already-documented purpose); this filter computes its own

@@ -5385,3 +5385,117 @@ entry) which post-dates every Groq change (there have been none).
 - `src/huntloop/skills_matching_gemini.py` — grounding rule added to
   `_SYSTEM_PROMPT` and `_BATCH_SYSTEM_PROMPT`.
 - `tests/test_backfill_lock.py` — new, 3 tests. Suite 104 → 107.
+
+## 2026-08-30 — Relevance filter: soft-exclude rescue for two keywords + full resume-embedding backfill
+
+Two independent fixes.
+
+### Fix 1 — "customer success" / "solutions consultant" become SOFT excludes
+
+`relevance_filter.EXCLUDE_KEYWORDS` was an absolute override. The
+2026-08-30 diagnostic (prior entry) showed two entries wrongly kill
+genuinely technical customer-facing engineering roles. Split into:
+- **`HARD_EXCLUDE_KEYWORDS`** — everything else, unchanged, still an
+  absolute override. (`sales` stays hard: 241/253 "Sales Engineer" rows
+  correctly excluded — noted as a future-look candidate, not touched.)
+- **`SOFT_EXCLUDE_KEYWORDS`** = `["customer success", "solutions consultant"]`
+  — excluded only if the **category-reference-text** embedding similarity
+  (same signal `classify_relevance` already uses; NOT the resume-vs-job
+  embedding) is also `< SOFT_EXCLUDE_RESCUE_THRESHOLD`.
+- `classify_relevance`: `hard_exclude -> False`; else `soft_exclude ->
+  (sim >= rescue_threshold)`; else `include_kw OR sim >= 0.29`. The
+  include keyword is deliberately not consulted for soft-exclude titles
+  ("Customer Success **Engineer**" contains "engineer" and must stay
+  excluded on a weak semantic signal).
+- `EXCLUDE_KEYWORDS` kept as a back-compat alias (`HARD + SOFT`).
+
+**Calibration** (`scripts/calibrate_soft_exclude_threshold.py`, run in
+Docker against all **318** real "customer success"/"solutions consultant"
+titled `job_postings` rows). Measured category similarities of the three
+task-named rows:
+
+| row | sim | required |
+|---|---|---|
+| Rubrik "Senior Customer Success Engineer" | **0.3232** | keep EXCLUDED (real post-deployment *support*) |
+| Figma "Enterprise Solutions Consultant" | **0.3403** | RESCUE ("go deep technically with an engineering audience") |
+| Palantir "Forward Deployed Enablement Engineer – Customer Success" | **0.4272 / 0.4394** | RESCUE (builds tooling/infra, debugs technical issues) |
+
+Usable window: `(0.3232, 0.3403]`. **Chose `SOFT_EXCLUDE_RESCUE_THRESHOLD
+= 0.335`** — it sits in the widest real gap in that window (0.3330 →
+0.3363, the largest spacing between adjacent sorted similarities in the
+0.32–0.34 region), giving ~0.012 margin above Rubrik and ~0.005 below
+Figma. Set above the base 0.29 on purpose: a title that actively names a
+CS / pre-sales function needs a stronger semantic signal to overcome
+that.
+
+**Applied** (`scripts/reclassify_soft_excludes.py`, Docker, batched /
+commit-per-batch — only re-classifies the 318 soft-exclude-titled rows,
+the only rows whose verdict this change can affect): **27 flipped
+`false -> true`, 0 flipped the other way, 291 unchanged.** `is_relevant`
+totals 13,247 → **13,274** (+27). All three named anchors correct
+(Rubrik 11969 stays `false`; Palantir 910/911/912 and Figma 1284 now
+`true`).
+
+**Spot-check of the 27 rescued** (23 distinct titles, descriptions read):
+- ~19 genuinely technical customer-facing / pre-sales-engineering roles:
+  Palantir FDEE-CS, Figma Solutions Consultants (Enterprise / Singapore /
+  Payload — "lead technical discussions, demos, and solution design"),
+  Postman "Customer Success Engineer" ×5 ("business-minded engineers…
+  technical architect… this is no support role"), Appian Senior Solutions
+  Consultants ("architect bespoke POCs"), Cribl / OneTrust /
+  Klaviyo / Celonis "Applied AI" roles, NICE "Technical CSM – Agentic AI"
+  ("deep technical expertise").
+- **~4 residual false positives**, all "Manager" / "Program Manager" /
+  "Operations Analyst" titles: Datadog "Manager, Commercial Customer
+  Success" (0.3405), Rubrik "Lead, Customer Success Operations Analyst"
+  (0.3483), OtterAI "Senior Manager, Customer Success" (0.3611), Celonis
+  "Customer Success Program Manager – Scale Team" (0.3384). Their JD text
+  (product blurb + "automation"/"analytics"/"scalable" language) pushes
+  category similarity just over 0.335. Accepted as MVP noise, same as the
+  base filter's documented "GRC Program Manager" / "Product Designer"
+  false positives.
+- **No mass rescue**: the other 282 soft-exclude rows — every real
+  "Customer Success Manager" account-management role at Samsara / Planet
+  Labs / Datadog / Okta, and the low-similarity "Solutions Consultant"
+  pre-sales roles — correctly stay excluded.
+
+New `tests/test_relevance_filter.py` (26 tests, pure logic, no torch):
+hard/soft split structure, hard excludes still absolute, soft
+embedding-gated, "Customer Success Engineer" not auto-rescued by the
+"engineer" keyword, and the three named real examples pinned with their
+measured similarities.
+
+### Fix 2 — resume-vs-job embedding coverage: 605 → 30,373
+
+Only 605 of 30,373 `job_postings` had a populated `embedding` (all from
+the original ~9-company set). Ran the existing
+`scripts/backfill_embeddings.py` unchanged (batch 100, commit-per-batch,
+`embedding IS NULL` only, resumable) in the `app` Docker image against
+the real local Postgres. **All 29,768 remaining rows embedded in
+1265.4s (~21 min), 0 failures, final coverage 30,373 / 30,373 (100%),
+0 NULL.** Independent of Fix 1. Makes
+`1 - (job.embedding <=> resume.embedding)` computable for every real
+job, not 2%. Resume-match distribution over the full table is now min
+-0.142 / mean 0.312 / max 0.680 (was min 0.033 / mean 0.372 / max 0.593
+on the original 605 - the wider 380-company set has more genuinely-poor-
+fit outliers, as expected). Sample scores for the Fix-1 named rows
+(a separate signal from the relevance gate): Palantir FDEE-CS 0.515,
+Figma ESC 0.419, Rubrik Sr CSE 0.408 (still `is_relevant=false` - the
+relevance gate is a deliberate separate call).
+
+### Verification
+
+- (a) named examples before/after with similarities: table above; all
+  three correct.
+- (b) calibration data + reasoning: `scratch_soft_exclude_calibration.json`
+  (all 318 rows, gitignored), threshold-choice reasoning above.
+- (c) aggregate: 27 flip to relevant (23 distinct); 4 residual FPs, all
+  Manager/Analyst titles; 282 correctly still excluded — no mass rescue.
+- (d) embedding coverage 605 → 30,373.
+- (e) full suite: 133 passing (107 prior + 26 new relevance-filter tests).
+- Files: `src/huntloop/relevance_filter.py`,
+  `scripts/calibrate_soft_exclude_threshold.py` (new),
+  `scripts/reclassify_soft_excludes.py` (new),
+  `tests/test_relevance_filter.py` (new). No pipeline code changed —
+  `JobDataPipeline._classify_relevance` calls the same `classify_relevance`,
+  which now honours the split automatically for future inserts.
