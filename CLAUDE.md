@@ -1311,6 +1311,38 @@ nothing scrapes them; treat that as planned, not present.
     redirect to `community.workday.com/maintenance-page`). Re-run
     discovery for these two when Workday brings the tenants back online.
 
+- **SmartRecruiters companyId discovery proven 2026-08-31 (see SESSIONS.md
+  "Prove SmartRecruiters companyId discovery") — proof/discovery step
+  only, NO production spider built, NO DB writes.** The postings API
+  (`GET api.smartrecruiters.com/v1/companies/{companyId}/postings`) 200s
+  with `totalFound: 0` for an unknown id, so a live call returning
+  `totalFound > 0` is the only "this id is real" signal.
+  `scripts/discover_smartrecruiters_id.py` (given a company name, tries
+  ordered name-derived candidates — full slug, core slug minus legal
+  suffixes, hyphenated, CamelCase, first-word, acronym, common
+  SR-collision suffixes like `2`/`1`, each in lower/Capitalised/CamelCase
+  since **companyIds are effectively case-varied** — `BoschGroup`,
+  `ubisoft2`; `--id` verifies a web-search-found id the same way) plus a
+  cross-check (`rapidfuzz` similarity of the queried name vs. the board's
+  own `company.name`, a `test job`/`dummy` sandbox-title check, and a
+  loose-guess flag for first-word/acronym wins) that flags
+  low/medium-confidence matches for a human glance.
+  `scripts/check_smartrecruiters_pagination.py` pages a resolved id end
+  to end (`limit=100` + `offset`) and asserts unique-ids == `totalFound`
+  with zero cross-page overlap. **Finding on a real DOL-sponsor test set:
+  automatic slug-guessing resolved a live companyId for nearly all of
+  them, but a couple pointed at a same-name different company or a
+  sandbox tenant (both caught by the cross-check), and a meaningful
+  share of "SmartRecruiters companies" — including several well-known
+  brands — now have empty or stale parent boards because their real
+  hiring moved to another ATS.** Recommendation recorded in SESSIONS.md:
+  **GO** — discovery is at least as automatable as Workday's was and the
+  API is the cleanest of any platform, provided the companyId is only
+  stored after the name-similarity / not-a-sandbox cross-check passes (or
+  a human confirms), mirroring the Workday `{tenant,dc,site}` onboarding
+  gate; SR's ~4% prevalence in the "neither" set means build it but don't
+  over-invest.
+
 ## How to run things
 
 See README.md for full detail (setup, running the scraper, migrations, tests).

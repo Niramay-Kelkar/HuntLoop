@@ -6078,3 +6078,160 @@ landing-page redirect, and a `site:myworkdayjobs.com` web search.
 - Files: none (code unchanged). `scratch_workday_discovery.json`
   (gitignored) updated with the resolved/unresolved status + evidence for
   all 6.
+
+---
+
+## 2026-08-31 — Prove SmartRecruiters companyId discovery (proof step, no spider)
+
+SmartRecruiters is the next candidate ATS. Its postings API
+(`GET api.smartrecruiters.com/v1/companies/{companyId}/postings`) is
+clean and paginates, BUT the `companyId` is not reliably derivable from
+the company name, and the endpoint **200s with `totalFound: 0` for an
+unknown id** (never 404), so the only real "this id exists" signal is a
+live call returning `totalFound > 0`. Same "prove it before building it"
+pattern as the Workday `{tenant,dc,site}` step: this task built the
+discovery mechanism and measured how automatable onboarding is. **No
+production spider. No DB writes.** Existing GH/Lever/Workday spiders
+untouched.
+
+### What was built
+
+- **`scripts/discover_smartrecruiters_id.py`** — given a company name,
+  generates an ordered candidate list and live-checks each against the
+  postings endpoint, returning the first with `totalFound > 0`.
+  Candidate kinds: `full-slug` (whole name, no spaces), `core-slug`
+  (drop only true legal suffixes — `inc/llc/corp/ltd/co/usa/us/...`;
+  deliberately NOT `solutions/consulting/technology/global`, which are
+  usually part of the real board name — over-stripping them was a real
+  miss in an earlier pass), hyphenated, CamelCase-per-word,
+  first-word-only, acronym, and `full/core + {2,1,Inc,US,USA,Careers,
+  Group,Global}` (SmartRecruiters appends a digit/word on id collision).
+  Every lexical guess is emitted in lower / Capitalised / CamelCase
+  because ids vary in case (`BoschGroup`, `ubisoft2`). `--id X` verifies
+  a web-search-found id through the identical live check. Each hit is
+  cross-checked (in the spirit of the GH/Lever board-name fuzzy check):
+  `rapidfuzz.token_set_ratio` of the queried name vs. the board's own
+  `company.name`, a `\btest job\b`/`\bdummy\b`/`\bdo not apply\b`
+  sandbox-title scan, and a "loose guess" flag when a bare first
+  word / acronym is what matched. Output confidence: `high` /
+  `medium (loose - confirm)` / `low-suspect (sandbox)` /
+  `low-suspect (name mismatch)`, plus a `[small board - glance]` note
+  when `totalFound < 5`.
+- **`scripts/check_smartrecruiters_pagination.py`** — pages a resolved id
+  end to end (`limit=100`, `offset` stepping), asserts
+  `unique posting ids retrieved == totalFound` and zero cross-page id
+  overlap, and prints the first postings + careers URL for a live
+  eyeball.
+
+### Test set + real results (item a)
+
+Primary set: the 16 real DOL-sponsor employers that `probe_neither_ats_
+platforms.py` had flagged as SmartRecruiters hits (the realistic
+"onboard a new sponsor" population — none are in `companies` under a
+known ATS). Pure name-derived slug-guessing, no forced ids:
+
+| DOL employer | winning candidate kind | companyId | totalFound | verdict |
+|---|---|---|---|---|
+| KOREAI | full-slug | `koreai` | 1 | correct (kore.ai; tiny firm) |
+| ROBERT BOSCH AUTOMOTIVE STEERING | core-slug | `robertbosch` | 6 | **WRONG — sandbox** ("test job one/four"); real Bosch is `boschGroup` (4,781). Auto-flagged `low-suspect (sandbox)` |
+| KIMBERLY-CLARK USA | core-slug | `kimberlyclark` | 1 | correct entity, vestigial board; auto-flagged `low-suspect (name mismatch)` on the hyphen-split name |
+| OCHER TECHNOLOGY GROUP | full-slug | `ochertechnologygroup` | 1 | correct |
+| SKILZMATRIX DIGITAL | first-word-only | `skilzmatrix` | 2 | correct; flagged `medium (loose)` |
+| JADE GLOBAL | full-slug | `jadeglobal` | 6 | correct entity, **stale** (postings released 2019; real hiring on its Workday board, which we already scrape) |
+| AAA TEXAS | core-slug | `aaa-texas` | 2 | correct |
+| KELLTON TECH SOLUTIONS | core-slug | `kelltontech` | 10 | correct |
+| SIA ENGINERING (USA) | first-word-only | `sia` | 579 | **WRONG — different company** (`sia` = Sia Partners, management consulting; not SIA Engineering, Singapore aircraft MRO). Auto-flagged `medium (loose - confirm)` |
+| PA CONSULTING GROUP | core-slug | `paconsulting` | 186 | correct |
+| BYTEDANCE | full-slug | `bytedance` | 2 | correct entity, vestigial board (real hiring on jobs.bytedance.com) |
+| HITACHI SOLUTIONS AMERICA | core-slug | `hitachisolutions` | 62 | correct, live & current |
+| ADVANTAGE IT | full-slug | `advantageit` | 1 | correct |
+| IRON MOUNTAIN INFORMATION MANAGEMENT | core-slug | `ironmountain` | 1 | correct entity, tiny SR board |
+| EUROFINS LANCASTER LABORATORIES | first-word-only | `eurofins` | 2,528 | correct (Eurofins parent; Lancaster Labs is a Eurofins US sub); flagged `medium (loose)` |
+| CLIFFORD CHANCE US | core-slug | `cliffordchance` | 161 | correct, live & current |
+
+Supplementary set (16 well-known names via web search, to probe the
+"famous SR customer" case): slug-guessing resolved 9 to a live board
+(`equinox` 722, `boschGroup` 4,781, `ubisoft2` 289, `publicstorage` 662,
+`colliers` 98, `atos1` 20, plus the DOL overlaps). Web search then
+supplied ids for the other 7 — but of those, only `mcdonaldscorporation`
+(4 postings) returned anything; `Visa`, `Skechers1`, `Biogen`, `IKEA`,
+`Square` (Block) all resolve to a real companyId that returns
+**`totalFound: 0`** on the parent board (jobs migrated to Workday, or
+live only in named regional sub-boards the parent endpoint doesn't
+aggregate). "Square Enix" / "PA Consulting"-as-`pa` are not SR customers.
+
+### Breakdown (item b) — real counts, this test set
+
+- **DOL-16: automatic slug-guess resolved a live companyId for 16 / 16.**
+  Web-search fallback needed: **0 / 16**. Failed entirely: **0 / 16**.
+- **After the name-similarity / sandbox cross-check + manual review:
+  14 / 16 point at the correct company**; **2 / 16 were wrong**
+  (`robertbosch` sandbox, `sia` different company) — **both were
+  automatically flagged** low/medium-confidence by the cross-check, i.e.
+  0 wrong matches would have been stored silently.
+- Of the 14 correct, **~4 boards are stale or vestigial** (`jadeglobal`
+  2019, `bytedance`, `ironmountain`, `kimberlyclark` — real hiring moved
+  to another ATS); ~10 have genuinely live boards.
+- Supplementary set reinforces this: a companyId is almost always
+  findable (slug or one web search), but for large brands it frequently
+  points at an empty parent board.
+
+### Pagination + live cross-check (item c)
+
+`check_smartrecruiters_pagination.py` on 3 resolved ids:
+
+- **`jadeglobal`** — totalFound 6; 1 page, 6 unique ids, 0 overlap; match ✓
+  (postings dated 2019 — confirms the "stale board" finding).
+- **`hitachisolutions`** — totalFound 62; 1 page, 62 unique ids, 0 overlap;
+  match ✓; postings dated 2026-08-31/-28/-26 (current).
+- **`cliffordchance`** — totalFound 161; 2 pages (100 + 61), 161 unique
+  ids, **0 cross-page overlap**; match ✓; postings dated 2026-08-31.
+
+Live careers-page cross-checks (2, task asked for 1):
+- **Clifford Chance** — `careers.smartrecruiters.com/cliffordchance`
+  redirects to the branded `jobs.cliffordchance.com` (SR-powered). Its
+  first ten listings — "Legal Technology Advisor" in Shanghai, then
+  Beijing, then Hong Kong, then "Global HR Service Delivery Specialist"
+  Delhi, … — match the API response's order and content exactly.
+- **Hitachi Solutions** — `careers.smartrecruiters.com/hitachisolutions`
+  ("Careers at Hitachi Solutions", links to `us.hitachi-solutions.com`).
+  API result #2 "Service Delivery Manager (w/m/d)" / Bundesweit, Germany
+  appears on the live board as "Service Delivery Manager (w/m/d) -
+  REF3474T", Bundesweit Germany, "1 job" — exact match incl. the req ref.
+
+### Assessment + go/no-go (item d)
+
+**Recommendation: GO — build the SmartRecruiters spider (with a
+discovery gate).**
+
+- The postings API is the cleanest of any ATS tackled so far: one GET,
+  documented, `limit`/`offset` pagination proven exact with zero overlap,
+  rich structured postings with absolute `releasedDate`.
+- companyId discovery is **at least as automatable as Workday's
+  `{tenant,dc,site}` step was** (which was deemed acceptable): pure
+  name-derived slug-guessing resolved 16/16 here, with **0 web-search
+  fallbacks needed** on the realistic DOL population. The two wrong
+  matches were both auto-flagged, so a gate that stores a companyId only
+  when the name-similarity / not-a-sandbox cross-check passes (or a human
+  confirms) — exactly the Workday onboarding pattern — keeps false
+  positives out.
+- Caveats that bound the payoff, not the decision: SmartRecruiters was
+  only ~4% of the "neither" set (see 2026-08-30 measurement), and a
+  real fraction of matched boards are stale/empty, so net yield of *new,
+  live, technical* postings is modest. Build it, gate the discovery,
+  don't over-invest — prioritise it below anything higher-yield.
+
+### Verification (item e / f)
+
+- Full suite: **166 passing** (unchanged — this task adds no tests, only
+  two standalone discovery scripts).
+- Prod row counts **identical before and after**: `job_postings` 55,115,
+  `companies` 417. This task made no DB writes.
+- CLAUDE.md + this entry updated.
+- Files: `scripts/discover_smartrecruiters_id.py`,
+  `scripts/check_smartrecruiters_pagination.py` (both new, standalone,
+  not wired into `main.py` or CI). Scratch JSON reports written under the
+  job tmp dir, not committed.
+- Note: an unrelated working-tree deletion of `huntloop-claude-code-prompts.md`
+  is present (fallout from a manual revert of the earlier stale-lock
+  commit); left as-is, not part of this change.
