@@ -101,6 +101,158 @@ logger = logging.getLogger(__name__)
 # to collide with anything else using advisory locks on this database.
 _LOCK_KEY = int.from_bytes(b"hlsm", "big")  # 0x686c736d == 1_751_937_901
 
+# --- Stale-lock detection (added 2026-08-31, see SESSIONS.md) ------------
+# The lock guard above works when a second run is *alive* and blocked
+# cleanly. The real gap: a run can die abnormally (an orphaned
+# launchd-spawned child whose parent job exited but the child kept
+# running) and sit holding the lock for hours on an idle DB connection,
+# with nothing detecting it - this happened in production on 2026-08-31
+# and needed a manual SIGTERM after the fact. So when acquisition fails,
+# we now inspect the current holder and, if it's been holding far longer
+# than any real run ever has, log a CRITICAL (distinct from the ordinary
+# "already locked, skipping" WARNING) with everything a human needs to
+# decide what to do.
+#
+# We deliberately DO NOT terminate the backend or force-unlock from here:
+# killing a DB connection on a heuristic can compound an incident, and
+# this project has a standing rule (from the 2026-08-22 data-wipe
+# incident) against unverified automated DB operations. Clearing a stale
+# holder is a separate, human-invoked action - scripts/check_lock_staleness.py.
+#
+# Threshold: 3x the longest real full-backlog run ever logged - 13,373s
+# (~3.7h), SESSIONS.md 2026-08-22. No healthy run has ever come close to
+# 3.7h; 3x leaves room for a pathologically slow-but-real run (heavy
+# Gemini cold-start bursts, an unusually large backlog) while staying
+# well under the 24h daily cadence, so a genuine orphan is always caught
+# within one day's run.
+_LONGEST_OBSERVED_RUN_SECONDS = 13_373  # 222.9 min ~= 3.7h (SESSIONS.md 2026-08-22)
+# 3x the longest real run ~= 11.1h. Override with HUNTLOOP_LOCK_STALE_SECONDS
+# (operationally useful for tuning without a code change; also how the
+# verification runs exercise the CRITICAL path without waiting 11 hours).
+STALE_LOCK_THRESHOLD_SECONDS = int(
+    os.environ.get("HUNTLOOP_LOCK_STALE_SECONDS", 3 * _LONGEST_OBSERVED_RUN_SECONDS)
+)  # default 40_119s ~= 11.1h
+
+# Holder lookup: pg_locks (advisory, granted, our key) joined to
+# pg_stat_activity. The single-arg pg_advisory_lock(bigint) form splits
+# the key across (classid, objid) - recombined here the same way
+# tests/test_backfill_lock.py does. `state_change` is when the holder
+# last changed state; for this lock that's ~when it acquired the lock and
+# went idle (the run does its real work on a *different* connection), so
+# `now() - state_change` is a good proxy for how long the lock's been held.
+_LOCK_HOLDER_QUERY = text(
+    """
+    SELECT a.pid,
+           a.state,
+           a.state_change,
+           a.query_start,
+           a.backend_start,
+           a.xact_start,
+           a.wait_event_type,
+           a.application_name,
+           a.client_addr,
+           a.query AS last_query,
+           EXTRACT(EPOCH FROM (now() - a.state_change))  AS held_seconds,
+           EXTRACT(EPOCH FROM (now() - a.backend_start))  AS backend_age_seconds
+    FROM pg_locks l
+    JOIN pg_stat_activity a ON a.pid = l.pid
+    WHERE l.locktype = 'advisory'
+      AND l.granted
+      AND ((l.classid::bigint << 32) | l.objid::bigint) = :k
+    """
+)
+
+
+def lock_holder_info(engine):
+    """Return a row describing the current advisory-lock holder (pid,
+    state, timestamps, held duration, last query), or None if the lock
+    isn't held / the holding backend has already gone. Shared by the
+    in-run staleness check below and scripts/check_lock_staleness.py."""
+    with engine.connect() as conn:
+        return conn.execute(_LOCK_HOLDER_QUERY, {"k": _LOCK_KEY}).first()
+
+
+def _fmt_duration(seconds: float) -> str:
+    seconds = seconds or 0
+    if seconds < 90:
+        return f"{seconds:.0f}s"
+    if seconds < 5400:
+        return f"{seconds / 60:.1f}m"
+    return f"{seconds / 3600:.2f}h"
+
+
+def _held_seconds(row) -> float:
+    """How long the lock's been held - state_change (~lock acquisition,
+    since the holder goes idle right after) with backend_start as fallback."""
+    return row.held_seconds if row.held_seconds is not None else (row.backend_age_seconds or 0)
+
+
+def _ts(value) -> str:
+    return value.strftime("%Y-%m-%d %H:%M:%S %Z") if value is not None else "?"
+
+
+def _format_holder(row) -> str:
+    return (
+        f"pid={row.pid} state={row.state!r} "
+        f"held={_fmt_duration(_held_seconds(row))} (state_change {_ts(row.state_change)}) "
+        f"backend_age={_fmt_duration(row.backend_age_seconds)} (backend_start {_ts(row.backend_start)}) "
+        f"query_start={_ts(row.query_start)} "
+        f"wait_event_type={row.wait_event_type} "
+        f"application_name={row.application_name!r} client_addr={row.client_addr} "
+        f"last_query={row.last_query!r}"
+    )
+
+
+def check_lock_holder_staleness(engine, threshold_seconds: int = STALE_LOCK_THRESHOLD_SECONDS) -> None:
+    """Inspect whoever currently holds the advisory lock and, if they've
+    held it past `threshold_seconds`, log a CRITICAL alert (distinct from
+    the ordinary 'already locked, skipping' WARNING). Never terminates
+    anything. Best-effort: any inspection failure is logged and swallowed
+    so it can't turn a benign concurrent run into a crash."""
+    try:
+        row = lock_holder_info(engine)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not inspect advisory-lock holder (key %s): %s", _LOCK_KEY, exc)
+        return
+
+    try:
+        _emit_staleness(row, threshold_seconds)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Advisory-lock staleness check failed (key %s): %s", _LOCK_KEY, exc)
+
+
+def _emit_staleness(row, threshold_seconds: int) -> None:
+    if row is None:
+        logger.info(
+            "Advisory lock %s reported busy but no live holder is in pg_stat_activity "
+            "- the holder likely just exited; the next run should acquire it cleanly.",
+            _LOCK_KEY,
+        )
+        return
+
+    held_seconds = _held_seconds(row)
+    if held_seconds >= threshold_seconds:
+        logger.critical(
+            "STALE ADVISORY LOCK ALERT: the backfill_skills_matching single-instance "
+            "lock (key %s) has been held for %s, past the %s staleness threshold "
+            "(3x the longest real full-backlog run, ~3.7h). The holder is very likely an "
+            "orphaned/hung run, not a healthy concurrent one. NO automated action has "
+            "been taken (standing rule: no unverified automated DB operations). To "
+            "inspect and, after confirmation, terminate it, run: "
+            "`PYTHONPATH=src python scripts/check_lock_staleness.py --terminate`. "
+            "Holder: %s",
+            _LOCK_KEY, _fmt_duration(held_seconds), _fmt_duration(threshold_seconds),
+            _format_holder(row),
+        )
+    else:
+        # Under threshold: a healthy concurrent run. Stay quiet at INFO so
+        # the only line an ordinary overlap produces is the existing
+        # "already locked, skipping" WARNING - no false alert.
+        logger.debug(
+            "Advisory lock %s held %s by pid %s, under the %s threshold - healthy.",
+            _LOCK_KEY, _fmt_duration(held_seconds), row.pid, _fmt_duration(threshold_seconds),
+        )
+
 
 @contextlib.contextmanager
 def _backfill_lock(engine):
@@ -234,6 +386,14 @@ def main(limit: int | None = None):
                     "nothing raced and no Groq/Gemini quota was spent.",
                     _LOCK_KEY,
                 )
+                # ...but a "held" lock can also mean a run died holding it.
+                # Inspect the holder; CRITICAL if it's been held longer
+                # than any real run ever has. Runs on the daily
+                # orchestrator path (this script is stage 2 of
+                # run_orchestrator_cron.sh), so a future orphan surfaces
+                # in the normal run logs instead of needing someone to
+                # spot a stuck process by hand.
+                check_lock_holder_staleness(lock_engine)
                 return
             logger.info("Acquired backfill single-instance lock (key %s)", _LOCK_KEY)
             _run_backfill(limit=limit)
