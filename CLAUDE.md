@@ -613,36 +613,9 @@ nothing scrapes them; treat that as planned, not present.
   (`pg_try_advisory_lock`, key 1,751,937,901) in `main()`; a second
   concurrent invocation logs one WARNING and returns 0 without touching
   anything.** Run body moved to `_run_backfill()`; `_backfill_lock()`
-  contextmanager; `tests/test_backfill_lock.py`. Verified with
+  contextmanager; `tests/test_backfill_lock.py` (3 tests). Verified with
   a real deliberately-triggered overlap, not just code review (see
   SESSIONS.md).
-  **Stale-lock detection added 2026-08-31 (see SESSIONS.md "Stale
-  advisory-lock detection") after a real incident — an orphaned
-  launchd-spawned backfill child (parent job already exited) sat holding
-  the lock ~8h on an idle DB connection with nothing surfacing it;
-  needed a manual `SIGTERM` after someone noticed the stuck process.**
-  When `pg_try_advisory_lock` returns false, `check_lock_holder_staleness()`
-  now joins `pg_locks`/`pg_stat_activity` to find the holder's PID /
-  state / `state_change` / last query and how long it's held the lock;
-  past `STALE_LOCK_THRESHOLD_SECONDS` (**3x the longest real full-backlog
-  run ever logged, 13,373s ~= 3.7h -> ~11.1h**; override with
-  `HUNTLOOP_LOCK_STALE_SECONDS`) it logs one **`CRITICAL`** line
-  ("STALE ADVISORY LOCK ALERT", distinct from the ordinary "already
-  locked, skipping" `WARNING`) carrying the PID/duration/state so a human
-  can act without querying the DB by hand. **It never terminates the
-  backend or force-unlocks** — killing a DB connection on a heuristic can
-  compound an incident, and the standing no-unverified-automated-DB-ops
-  rule (2026-08-22 wipe) applies. The check runs on the daily
-  orchestrator path (this script is stage 2 of
-  `run_orchestrator_cron.sh`), so a future orphan surfaces in
-  `logs/huntloop.log` automatically.
-  **`scripts/check_lock_staleness.py`** is the separate human-invoked
-  tool: read-only inspection by default (exit 2 if stale); with
-  `--terminate` it prints the holder, then requires the operator to
-  **retype the holder's PID** before it calls `pg_terminate_backend` —
-  any mismatch aborts with the DB untouched. Not wired into any
-  automated run. Existing lock acquire/release logic (`_backfill_lock`)
-  was not touched.
   (4) **Gemini cold-start latency is server-side and sporadic, not a
   first-call warm-up** — ~1% of calls take 30–70s in short
   time-correlated bursts (seen simultaneously across two independent

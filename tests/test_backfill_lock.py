@@ -8,7 +8,6 @@ now makes a second concurrent invocation exit cleanly instead of racing.
 scripts/ isn't a package / isn't on the pytest pythonpath - same
 sys.path shim as tests/test_detect_and_store_ats.py.
 """
-import logging
 import os
 import sys
 
@@ -69,61 +68,3 @@ def test_main_exits_without_running_backfill_when_lock_held(test_database_url, m
         assert calls == [{"limit": 7}]
     finally:
         holder.dispose()
-
-
-# --- stale-lock detection (added 2026-08-31) --------------------------------
-
-
-def test_lock_holder_info_finds_the_holder_and_is_none_when_free(test_database_url):
-    e = create_engine(test_database_url)
-    try:
-        assert b.lock_holder_info(e) is None
-        with b._backfill_lock(e) as got:
-            assert got
-            row = b.lock_holder_info(e)
-            assert row is not None
-            assert row.pid > 0
-            assert row.held_seconds is not None and row.held_seconds >= 0
-        assert b.lock_holder_info(e) is None
-    finally:
-        e.dispose()
-
-
-def test_staleness_check_logs_critical_only_past_threshold(test_database_url, caplog):
-    holder = create_engine(test_database_url)
-    checker = create_engine(test_database_url)
-    try:
-        with b._backfill_lock(holder) as got:
-            assert got
-
-            # below threshold: no CRITICAL, no WARNING (silent - the caller
-            # already logged the "already locked" WARNING itself)
-            caplog.clear()
-            with caplog.at_level(logging.WARNING, logger=b.logger.name):
-                b.check_lock_holder_staleness(checker, threshold_seconds=10_000)
-            assert caplog.records == []
-
-            # past threshold: exactly one CRITICAL, carrying the real PID
-            caplog.clear()
-            with caplog.at_level(logging.CRITICAL, logger=b.logger.name):
-                b.check_lock_holder_staleness(checker, threshold_seconds=0)
-            crits = [r for r in caplog.records if r.levelno == logging.CRITICAL]
-            assert len(crits) == 1
-            assert "STALE ADVISORY LOCK ALERT" in crits[0].message
-            holder_pid = b.lock_holder_info(checker).pid
-            assert f"pid={holder_pid}" in crits[0].message
-    finally:
-        holder.dispose()
-        checker.dispose()
-
-
-def test_staleness_check_is_quiet_when_lock_is_free(test_database_url, caplog):
-    e = create_engine(test_database_url)
-    try:
-        caplog.clear()
-        with caplog.at_level(logging.WARNING, logger=b.logger.name):
-            b.check_lock_holder_staleness(e, threshold_seconds=0)
-        # no live holder -> one benign INFO at most, never WARNING/CRITICAL
-        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
-    finally:
-        e.dispose()
