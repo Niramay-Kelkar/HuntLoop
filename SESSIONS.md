@@ -5961,3 +5961,120 @@ of the *same* model call. Judged small + low-risk and implemented:
 - Files: `src/huntloop/pipelines.py` (`_classify_and_embed`),
   `src/huntloop/db_models.py` (comment), `tests/test_pipeline.py`
   (assertion). `scripts/backfill_embeddings.py` unchanged.
+
+---
+
+## 2026-08-31 — Resolve the 6 Workday `needs_review` companies
+
+Investigated the 6 companies flagged `needs_review` by the Workday
+discovery pass (`scripts/discover_and_store_workday.py` ->
+`scratch_workday_discovery.json`). Two distinct problems; no code
+changed, no guesses committed.
+
+**Outcome: 1 resolved & verified & scraped (`harman`), 5 left excluded
+(3 disconfirmed as a different company, 2 currently unverifiable due to
+a live Workday-side maintenance outage).**
+
+### Problem 1 — ownership ambiguity (`red`, `western`, `tera`)
+
+Generic one-word slugs: a Workday tenant by that name exists, but may
+belong to someone other than the DOL sponsor. Resolved real ownership by
+fetching live postings (site from robots.txt) and cross-checking the
+board's `hiringOrganization` legal name + posting text against the DOL
+employer name.
+
+- **`red.wd1`** — site `VV`, 10 postings, `hiringOrganization` "LE004 V
+  Cruises US, LLC", posting text references **Virgin Voyages** (Plantation
+  FL). DOL employer is "RED HIBBERT GROUP". **DISCONFIRMED — unrelated.**
+  Left excluded.
+- **`western.wd1`** — site `WESTERN`, 4 postings, `hiringOrganization`
+  "Western Colorado University", all jobs in Gunnison CO, description
+  "Western Colorado University is a residential, public university...".
+  DOL employer is "WESTERN WASHINGTON UNIVERSITY" — a **different
+  institution in a different state**. **DISCONFIRMED.** Left excluded.
+- **`tera.wd3`** — site `TERANET`, 6 postings, `hiringOrganization`
+  "Teranet Inc", description "Teranet is Canada's leader in the delivery
+  and transformation of statutory registry services" (all jobs Toronto).
+  DOL employer is "TERA CLOUDX" (US IT staffing). **DISCONFIRMED —
+  unrelated.** Left excluded.
+
+### Problem 2 — site segment undiscoverable (`harman`, `daiichisankyo`, `wholefoods`)
+
+robots.txt was blank/empty and the 18-name curated candidate list didn't
+match. Tried: an expanded ~55-name candidate list, `sitemap.xml`, the
+landing-page redirect, and a `site:myworkdayjobs.com` web search.
+
+- **`harman.wd3`** — **RESOLVED & VERIFIED & SCRAPED.** Site segment
+  `HARMAN` found via the expanded candidate probe (not standard; not in
+  the 18-name list; robots.txt is only 58 bytes with no `Allow:` lines).
+  Verified to the same standard as the original 5 tenants:
+  - CXS `/jobs` total **556** == live rendered board
+    (`harman.wd3.myworkdayjobs.com/en-US/HARMAN`) "556 JOBS FOUND",
+    identical first posting ("Launch Engineer", R-51068-2026).
+  - `hiringOrganization` = "2100 Harman Becker Automotive Systems
+    Manufacturing Kft" — `token_set_ratio` **100** vs. DOL
+    "HARMAN BECKER AUTOMOTIVE SYSTEMS".
+  - Board "About Us": "About HARMAN International ... wholly-owned
+    subsidiary of Samsung Electronics".
+  - Note: the rendered board shows a "New Careers Site" / "WE'VE MOVED"
+    banner, but the `HARMAN` CXS board is live and actively updated (all
+    556 postings `startDate` 2026-08-31, "Posted Today"); scrape it as-is
+    and revisit only if it goes stale.
+  - Stored: `companies` row `name=harman`, `ats_platform=workday`,
+    `ats_token=harman`,
+    `careers_url=https://harman.wd3.myworkdayjobs.com/en-US/HARMAN` (via
+    `discover_and_store_workday.py --from-report --commit` after editing
+    the scratch report; 1 inserted).
+  - **Scrape** (`docker compose run --rm --build app python
+    scripts/scrape_workday.py harman`): `item_scraped_count` 556, DB
+    `job_postings` for harman **556**, `is_relevant` NULL **0** (387
+    true), `date_posted` NULL **0**, `embedding` NULL **0**. Global
+    `job_postings` 54,559 -> 55,115. 1 transient `406` on robots (ignored,
+    same as prior Workday runs), 0 real errors.
+- **`daiichisankyo.wd1`** — **CURRENTLY UNVERIFIABLE — not stored.** Site
+  segment `DSI` identified (Google-indexed URL pattern
+  `daiichisankyo.wd1.myworkdayjobs.com/en-US/DSI/job/...`; dc `wd1`
+  confirmed via the 404/422 probe). Could NOT do real job retrieval:
+  the CXS `/jobs` POST returns `403 {"errorCode":"S22","message":
+  "permission denied"}`, `/en-US/DSI` 302-redirects to
+  `www.myworkday.com/wday/drs/outage?t=daiichisankyo&s=dsi`, and
+  `DSI/siteMap.xml` redirects to `community.workday.com/maintenance-page`.
+  This is a Workday-side maintenance/lockdown on the tenant, persistent
+  across ~15 min of spaced retries. Re-run discovery when the tenant is
+  back online; the site name is almost certainly `DSI`.
+- **`wholefoods.wd5`** — **CURRENTLY UNVERIFIABLE — not stored.** Site
+  segment `wholefoods` identified **authoritatively** from robots.txt
+  (`Allow: /wholefoods/` + `Sitemap: .../wholefoods/siteMap.xml`; sibling
+  boards `/wholefoodscanada/ /wholefoodsUK/ /365/ /wfmprivateposting/`).
+  dc `wd5` confirmed. Could NOT do real job retrieval: the CXS `/jobs`
+  POST returns a persistent `502` (`{"errorCode":"HTTP_502"}` — from
+  Workday), and `wholefoods/siteMap.xml` redirects to
+  `community.workday.com/maintenance-page`. Workday-side outage on the
+  tenant, persistent across ~15 min of spaced retries. Re-run discovery
+  when back online; the site name is `wholefoods`.
+
+### Verification
+
+- (a) per-company outcome: table above. 1 resolved-and-verified
+  (`harman`), 3 disconfirmed (`red`/`western`/`tera` — a different
+  company owns the tenant), 2 unverifiable-right-now
+  (`daiichisankyo`/`wholefoods` — site known, Workday tenant in a
+  maintenance outage).
+- (b) `harman` verified at the same level as the original 5: CXS total ==
+  rendered board total, identical first posting, exact
+  `hiringOrganization` name match, board branding match.
+- (c) `harman` scrape: real run, 556 rows, 0 unexpected NULLs across
+  `is_relevant` / `date_posted` / `embedding`.
+- (d) full suite **166 passing**. (First run had 3 failures in
+  `tests/test_backfill_lock.py` — an orphaned `backfill_skills_matching.py`
+  from the 3am launchd orchestrator, hung ~8h with its DB connection idle
+  ~5h, was holding advisory lock `1751937901`; `SIGTERM`'d it — the
+  script is interrupt-safe by design — lock freed, all 166 green. Not a
+  regression from this work, which touches no backfill/lock code.)
+- (e) this entry + CLAUDE.md.
+- (f) prod row counts identical before/after the test suite (isolation
+  intact); the only intended DB change is the `harman` company row + its
+  556 postings.
+- Files: none (code unchanged). `scratch_workday_discovery.json`
+  (gitignored) updated with the resolved/unresolved status + evidence for
+  all 6.

@@ -1286,6 +1286,30 @@ nothing scrapes them; treat that as planned, not present.
   vs `SALESFORCE`). `scripts/scrape_workday.py [names...]` is a
   Workday-only entrypoint (reads `companies`, same pipeline) for proving
   / re-running without a full `main.py` crawl.
+  **The 6 `needs_review` companies from that pass were investigated
+  2026-08-31 (see SESSIONS.md "Resolve the 6 Workday `needs_review`
+  companies") — 1 resolved, 5 stay excluded:**
+  - **`harman` — RESOLVED, stored, scraped.** Site `HARMAN` (wd3), found
+    via an expanded site-candidate probe (robots.txt was empty). Verified
+    to the original-5 standard: CXS total 556 == live rendered board,
+    identical first posting, `hiringOrganization` "Harman Becker
+    Automotive Systems" is an exact match to the DOL employer (Samsung
+    subsidiary). 556 rows scraped, 0 NULL `is_relevant`/`date_posted`/
+    `embedding`. `careers_url` =
+    `https://harman.wd3.myworkdayjobs.com/en-US/HARMAN`.
+  - **`red`, `western`, `tera` — DISCONFIRMED, stay excluded.** The
+    generic-slug tenant belongs to a *different* company: `red.wd1` =
+    Virgin Voyages / "V Cruises US, LLC" (not "RED HIBBERT GROUP");
+    `western.wd1` = Western Colorado University (not "WESTERN WASHINGTON
+    UNIVERSITY"); `tera.wd3` = Teranet Inc, Canada (not "TERA CLOUDX").
+    Confirmed by live `hiringOrganization` + posting text.
+  - **`daiichisankyo`, `wholefoods` — site known, currently
+    UNVERIFIABLE, not stored.** Site segments identified
+    (`daiichisankyo`/wd1 -> `DSI` via web search; `wholefoods`/wd5 ->
+    `wholefoods` via authoritative robots.txt) but both tenants are in a
+    Workday-side maintenance outage (CXS returns 403 `S22`/502; sitemaps
+    redirect to `community.workday.com/maintenance-page`). Re-run
+    discovery for these two when Workday brings the tenants back online.
 
 ## How to run things
 
