@@ -12,6 +12,7 @@ from scrapy.utils.project import get_project_settings
 
 from huntloop.spiders.greenhouse_spider import GreenhouseScraper
 from huntloop.spiders.lever_spider import LeverScraper
+from huntloop.spiders.workday_spider import WorkdayScraper
 from huntloop.settings import DATABASE_URL
 from huntloop.db_models import Company
 from huntloop import metrics
@@ -26,6 +27,7 @@ logger = logging.getLogger(__name__)
 SPIDERS_BY_PLATFORM = {
     "greenhouse": GreenhouseScraper,
     "lever": LeverScraper,
+    "workday": WorkdayScraper,
 }
 
 
@@ -43,14 +45,17 @@ def get_companies_by_platform():
     try:
         detected_rows = session.query(Company).filter(Company.ats_platform.isnot(None)).all()
         by_platform = {}
+        careers_urls = {}
         for company in detected_rows:
             by_platform.setdefault(company.ats_platform, []).append(company.name)
+            if company.careers_url:
+                careers_urls[company.name] = company.careers_url
 
         unset_platform_names = [
             company.name for company in session.query(Company).filter(Company.ats_platform.is_(None)).all()
         ]
 
-        return by_platform, unset_platform_names
+        return by_platform, unset_platform_names, careers_urls
     finally:
         session.close()
 
@@ -68,7 +73,7 @@ def run_multi_ats_scrape():
     pushed to the Pushgateway as a single batch - see huntloop.metrics."""
     start_time = time.perf_counter()
     try:
-        by_platform, unset_platform_names = get_companies_by_platform()
+        by_platform, unset_platform_names, careers_urls = get_companies_by_platform()
 
         if unset_platform_names:
             logger.warning(
@@ -89,7 +94,25 @@ def run_multi_ats_scrape():
                 continue
 
             logger.info(f"Running {spider_class.name} for {len(tokens)} companies: {tokens}")
-            process.crawl(spider_class, companies=tokens)
+            if platform == "workday":
+                # Workday needs each company's {tenant, dc, site}, stored
+                # in companies.careers_url (see huntloop.workday_url).
+                # Companies routed here without one (e.g. ambiguous
+                # generic-slug tenants flagged for review by
+                # scripts/discover_and_store_workday.py) are skipped by
+                # the spider, not guessed at.
+                wd_urls = {name: careers_urls[name] for name in tokens if name in careers_urls}
+                missing = [name for name in tokens if name not in wd_urls]
+                if missing:
+                    logger.warning(
+                        f"Workday: {len(missing)} companies have ats_platform='workday' but no "
+                        f"careers_url - skipping: {missing}"
+                    )
+                if not wd_urls:
+                    continue
+                process.crawl(spider_class, companies=list(wd_urls), careers_urls=wd_urls)
+            else:
+                process.crawl(spider_class, companies=tokens)
             scheduled_any = True
 
         if scheduled_any:

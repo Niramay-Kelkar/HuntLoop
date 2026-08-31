@@ -5750,3 +5750,132 @@ for all 5 (`scripts/discover_workday_triple.py <tenant>` reproduces);
 work is disambiguation + rare site-name lookups; (d) GO. (e) full suite
 **133 passing**, unchanged (no app code — one new proof script).
 (f) this entry + CLAUDE.md.
+
+---
+
+## 2026-08-30 — Build the Workday spider
+
+Built the Workday spider on the proven CXS mechanism, ran discovery +
+scraping for the 37 (of 43) confirmed-Workday hits that resolved
+cleanly, `is_relevant` wired in via the existing pipeline.
+
+### 1. Storage schema — `companies.careers_url`, no migration
+
+Workday needs `{tenant, dc, site}`. Chose to **store the full careers URL
+`https://{tenant}.{dc}.myworkdayjobs.com/en-US/{site}` in the existing
+`companies.careers_url` column** and parse it back out
+(`huntloop.workday_url.parse_workday_careers_url`). `ats_token` stays the
+bare tenant slug, exactly like every other platform's row. Why this over
+the alternatives:
+- `careers_url` already exists and is semantically *exactly* "the
+  company's careers page"; the one pre-existing Workday row (`adobe`)
+  already stores this precise format. Zero schema churn, zero new
+  convention, and the data is human-readable / clickable.
+- Encoding `ats_token` as `nxp:wd3:careers` overloads a column that's a
+  bare identifier everywhere else and needs a split-on-every-read.
+- New `wd_datacenter` / `wd_site` columns are sparse (one platform only)
+  and still don't give you a URL you can open.
+Cost: a small parser in the spider — covered by `tests/test_workday_url.py`
+(25 cases). `main.py` gets one `platform == "workday"` branch that also
+passes `careers_urls={name: url}`; a workday-routed company with no
+`careers_url` is skipped with a warning (the flagged-ambiguous cases),
+never guessed.
+
+### 2. The spider — `src/huntloop/spiders/workday_spider.py`
+
+`WorkdayScraper`, `name = "workday_api"`, same shape as Greenhouse/Lever
+(`companies` arg, `JobPostingItem` out, `JobDataPipeline` unchanged).
+Flow: `POST {cxs}/jobs` offset-0 → read `total`, fan out all pages
+(`offset` += 20 while `< total`) and one `GET {cxs}{externalPath}` per
+job → `parse_detail` builds the item from `jobPostingInfo`. The per-job
+detail fetch isn't optional: the list response has no description
+(needed for relevance/embeddings) and only a relative date. `job_id` is
+namespaced `{tenant}_{jobReqId}` so a bare Workday req id can't
+false-collide in the pipeline's global `gh_job_id` dedup; `job_url` is
+the canonical `externalUrl`.
+
+### 3. `postedOn` format — RELATIVE TEXT, normalization implemented
+
+**Checked against real API responses (5 tenants, ~1,400 postings): the
+list endpoint's `postedOn` is relative text — `"Posted Today"`,
+`"Posted Yesterday"`, `"Posted N Days Ago"` (N=2..30), `"Posted 30+ Days
+Ago"`. No absolute date, no hours/weeks/months variants.** But the
+**per-job detail endpoint** returns `jobPostingInfo.startDate` as an
+absolute `YYYY-MM-DD` — verified it's the real posting date (NXP: today
+− "2 Days Ago" = `2026-08-28` = `startDate`). `normalize_workday_date()`
+uses `startDate` as the source of truth and parses the relative
+`postedOn` only as a fallback (flooring `"30+"` to 30 days). In the real
+23,588-row run, **0 rows have a NULL `date_posted`** and dates range
+2018→2026 — a spread the relative text alone could never produce, i.e.
+`startDate` carried ~100% of them.
+
+### 4. Discovery + 5-tenant proof
+
+`scripts/discover_and_store_workday.py` over the 43
+`scratch_neither_ats_probe.json` Workday hits. Site resolution now reads
+the tenant's **`robots.txt`** — it lists every published board as
+`Allow: /{Site}/` + `Sitemap: .../{Site}/siteMap.xml`, authoritative and
+guess-free (`discover_workday_triple.site_from_robots()`, picking the
+non-secondary board with the most postings); the 18-name candidate list
+is only the fallback for a blocked/empty robots.txt.
+- **37 stored, 6 needs_review.** The 6: `red` / `western` / `tera` —
+  generic one-word slugs, flagged not stored (a Workday tenant by that
+  name exists but may not be this employer — the task's "flag, don't
+  guess"); `harman` / `daiichisankyo` / `wholefoods` — robots.txt
+  blocked/empty and no candidate-list name matched, needs a
+  `site:myworkdayjobs.com` search. The `hiringOrganization` legal name is
+  logged as an informational cross-check only, never a gate (too noisy:
+  `"621 Salesforce.com India Private Limited Hyderabad Branch"` vs
+  `SALESFORCE`).
+- **5-tenant proof run first** (`scrape_workday.py nxp organon cdw`, then
+  the full set): `nxp` 763, `regeneron` 577, `organon` 118, `cdw` 114,
+  `salesforce` 1516 — **every count matches the manually-verified CXS
+  `total` exactly** (organon was 121 at proof time, now 118 — the board
+  changed; still an exact match to the live total). NXP first posting
+  and count also matched the live rendered board screenshot from the
+  prior step.
+
+### 5. Full run — 37 companies via the `app` Docker image
+
+`docker compose run --rm app python scripts/scrape_workday.py` (Docker
+because relevance classification needs torch, same as the daily
+scraper). 77 min, `finish_reason: finished`.
+- **`job_postings` +23,588** (workday_api: 995 → **23,588** across **37
+  companies**; greenhouse_api 26,710 and lever_api 3,663 untouched).
+- **`is_relevant`: 0 NULL** — classified at insert for every single row
+  (9,112 / 23,588 ≈ 39% relevant; sensible spread — `pwc` 1,693/4,198,
+  `ochsner` hospital 17/1,893, `stout` 0/39). Reused
+  `JobDataPipeline._classify_relevance` / `classify_relevance()`
+  unchanged — the spider just yields `JobPostingItem`s.
+- **`date_posted`: 0 NULL**, all absolute.
+- **1 error in 24,820 requests**: a transient Workday `VPS Internal
+  Server Error` on one `hitachi` detail fetch — caught, error metric
+  incremented, that one job skipped, run continued. No crash.
+- `embedding` is NULL on all 23,588 (expected — embeddings are a
+  separate `scripts/backfill_embeddings.py` backfill for every source,
+  not computed at insert; needs a follow-up run, same as after any
+  scrape).
+
+### Verification
+
+- (a) schema decision + reasoning: §1 above. `careers_url`, no migration.
+- (b) 5 proven tenants: counts match manual verification exactly (§4).
+- (c) `postedOn` is relative text; `startDate` (detail endpoint) is the
+  absolute source of truth; `normalize_workday_date()` implements both
+  (§3); 0 NULL dates in the real run.
+- (d) full run: +23,588 rows, 37 companies, **0 `is_relevant` NULL**,
+  0 `date_posted` NULL, 1 gracefully-handled transient error (§5).
+- (e) full suite **166 passing** (133 prior + 25 `test_workday_url` + 8
+  `test_workday_spider`).
+- (f) this entry + CLAUDE.md.
+- Files: `src/huntloop/workday_url.py`,
+  `src/huntloop/spiders/workday_spider.py`,
+  `scripts/discover_and_store_workday.py`, `scripts/scrape_workday.py`
+  (all new); `main.py`, `scripts/discover_workday_triple.py` (robots.txt
+  site resolution) modified; `tests/test_workday_url.py`,
+  `tests/test_workday_spider.py` new.
+- Deliberately NOT done: the 6 `needs_review` companies (manual
+  `site:` search / disambiguation), a `backfill_embeddings.py` run for
+  the new rows, wiring `workday_api` into `run_orchestrator_cron.sh`
+  (`main.py` already routes it — the daily wrapper is a separate step),
+  Ashby/SmartRecruiters/iCIMS spiders.

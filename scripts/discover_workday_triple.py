@@ -20,6 +20,7 @@ Discovery, in order (each step fully automated):
 
 Run:  python scripts/discover_workday_triple.py <tenant-slug>
 """
+import re
 import sys
 
 import requests
@@ -48,6 +49,80 @@ def _post(url, payload):
         return None
 
 
+# Site-name fragments that mark a NON-primary board (campus/intern/internal/
+# alumni/private) - deprioritised when a tenant publishes several sites.
+_SECONDARY_SITE_HINTS = (
+    "campus", "intern", "student", "grad", "university", "private",
+    "internal", "alumni", "returnship", "apprentic", "contingent",
+    "temp", "referral", "military", "veteran",
+)
+
+
+def _site_total(tenant, dc, site):
+    """Postings visible on this site, or None if the site path is invalid."""
+    r = _post(
+        f"https://{tenant}.{dc}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs",
+        {"limit": 1, "offset": 0, "appliedFacets": {}},
+    )
+    if r is None or r.status_code != 200:
+        return None
+    try:
+        return int(r.json().get("total", 0))
+    except (ValueError, AttributeError):
+        return 0
+
+
+def _verify_site(tenant, dc, site):
+    return _site_total(tenant, dc, site) is not None
+
+
+def site_from_robots(tenant, dc):
+    """A Workday tenant's robots.txt lists every published site as
+    ``Allow: /{Site}/`` and ``Sitemap: .../{Site}/siteMap.xml`` - the
+    authoritative, guess-free way to get the site segment. Returns the
+    best (primary) site name, verified against the CXS API, or None."""
+    try:
+        resp = requests.get(
+            f"https://{tenant}.{dc}.myworkdayjobs.com/robots.txt", headers=_UA, timeout=_TIMEOUT
+        )
+    except requests.RequestException:
+        return None
+    if resp.status_code != 200:
+        return None
+
+    sites = []
+    for line in resp.text.splitlines():
+        line = line.strip()
+        if line.lower().startswith("allow:"):
+            seg = line.split(":", 1)[1].strip().strip("/")
+            if seg and "/" not in seg:
+                sites.append(seg)
+        elif line.lower().startswith("sitemap:"):
+            m = re.search(r"myworkdayjobs\.com/([A-Za-z0-9_-]+)/siteMap", line)
+            if m:
+                sites.append(m.group(1))
+
+    seen = set()
+    unique = [s for s in sites if not (s in seen or seen.add(s))]
+    if not unique:
+        return None
+
+    # Score every valid site: primary sites (no campus/intern/private/...
+    # fragment) beat secondary ones, then more postings wins - the main
+    # careers board almost always carries the most open roles.
+    scored = []
+    for site in unique[:8]:  # cap probes for pathological multi-site tenants
+        total = _site_total(tenant, dc, site)
+        if total is None:
+            continue
+        secondary = any(h in site.lower() for h in _SECONDARY_SITE_HINTS)
+        scored.append((not secondary, total, site))
+    if not scored:
+        return None
+    scored.sort(reverse=True)
+    return scored[0][2]
+
+
 def find_dc(tenant):
     for dc in _DCS:
         r = _post(
@@ -60,12 +135,14 @@ def find_dc(tenant):
 
 
 def find_site(tenant, dc):
+    # robots.txt is authoritative (lists every real site); fall back to
+    # brute-forcing the common-name list for the rare tenant that blocks
+    # or empties its robots.txt.
+    site = site_from_robots(tenant, dc)
+    if site:
+        return site
     for site in _SITE_CANDIDATES:
-        r = _post(
-            f"https://{tenant}.{dc}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs",
-            {"limit": 1, "offset": 0, "appliedFacets": {}},
-        )
-        if r is not None and r.status_code == 200:
+        if _verify_site(tenant, dc, site):
             return site
     return None
 

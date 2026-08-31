@@ -1141,10 +1141,12 @@ nothing scrapes them; treat that as planned, not present.
   iCIMS has opaque subdomains and mostly no public JSON.
   **Discovery mechanism proven end-to-end 2026-08-30 on 5 real
   unambiguous tenants (see SESSIONS.md "Prove Workday {tenant, dc, site}
-  discovery") — GO to build the Workday spider next; still not built.**
+  discovery"), then the spider was BUILT 2026-08-30 (see the Workday
+  spider bullet below and SESSIONS.md "Build the Workday spider").**
   `scripts/discover_workday_triple.py <tenant>` (one tenant per run, proof
   tool, not a batch runner): name-slug -> dc via the 404/422 probe over 8
-  `wd{N}` -> site via an 18-name curated `_SITE_CANDIDATES` list (CXS
+  `wd{N}` -> site via robots.txt (authoritative) then an 18-name curated
+  `_SITE_CANDIDATES` fallback list (CXS
   200/404, case/separator-insensitive for standard names). Resolved 5/5
   fully automatically incl. Salesforce's custom `External_Career_Site`,
   **no web-search fallback needed**. Real triples:
@@ -1199,13 +1201,63 @@ nothing scrapes them; treat that as planned, not present.
   `ats_platform` rows (grouped by platform) plus a separate NULL-platform
   query (logged, not silently excluded). `run_multi_ats_scrape()` routes
   each platform through `SPIDERS_BY_PLATFORM` (`{"greenhouse":
-  GreenhouseScraper, "lever": LeverScraper}`) - one `process.crawl()` call
-  per platform with its full token list, not one call per company. A
-  platform missing from that dict (`"ashby"`, `"workday"`, and the
-  literal string `"unknown"` all hit the same lookup-miss path - no
+  GreenhouseScraper, "lever": LeverScraper, "workday": WorkdayScraper}`) -
+  one `process.crawl()` call per platform with its full token list, not
+  one call per company. A platform missing from that dict (`"ashby"` and
+  the literal string `"unknown"` hit the same lookup-miss path - no
   special-casing needed) gets a `logger.warning()` and is skipped, never
   a crash or a silent drop. When adding a new spider, add its platform
-  string as a key here - that's the only wiring required.
+  string as a key here - that's the only wiring required (Workday needed
+  one extra branch, below, because it also passes `careers_urls`).
+- **Workday spider (`WorkdayScraper`, `src/huntloop/spiders/workday_spider.py`,
+  name `workday_api`, added 2026-08-30 - see SESSIONS.md "Build the
+  Workday spider").** Scrapes a company's Workday board via its public
+  CXS JSON API (the same endpoint the rendered board's own JS calls):
+  `POST {tenant}.{dc}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs`
+  (offset pagination, `{"limit":20,"offset":N,"appliedFacets":{}}`, stop
+  when `offset >= total`; `total` only reliable on the offset-0 response
+  so all pages are fanned out from there) then one
+  `GET {cxs}{externalPath}` **per job** for the description + absolute
+  date. **Storage: the 3-part `{tenant, dc, site}` identifier lives in
+  the existing `companies.careers_url`** as the full
+  `https://{tenant}.{dc}.myworkdayjobs.com/en-US/{site}` URL (exactly the
+  format `adobe`'s pre-existing row already used); `ats_token` stays the
+  bare tenant slug like every other platform. `huntloop.workday_url`
+  (`parse_workday_careers_url` / `build_cxs_base` / `normalize_workday_date`)
+  holds the pure, unit-tested parsing. No migration - `careers_url`
+  already existed and is semantically exactly right; a bare-string
+  `ats_token` or new sparse columns would both be worse. `main.py`
+  branches for `platform == "workday"` to also pass
+  `careers_urls={name: careers_url}` to the spider; a company routed
+  there with no `careers_url` (the ambiguous cases below) is skipped with
+  a warning, never guessed. **`date_posted`: the CXS list `postedOn` is
+  RELATIVE TEXT ("Posted 3 Days Ago" / "Posted Today" / "Posted 30+ Days
+  Ago" - verified against ~1,400 real postings, no hours/weeks/months
+  variants). The per-job detail endpoint's `jobPostingInfo.startDate` is
+  an absolute `YYYY-MM-DD` and is used as the source of truth (~100% of
+  real rows); `normalize_workday_date()` parses the relative text only as
+  a fallback, flooring "30+" to 30 days.** Relevance classification is
+  automatic - the spider yields plain `JobPostingItem`s through the same
+  source-agnostic `JobDataPipeline`, which already calls
+  `classify_relevance()` on every insert (needs torch -> run via the
+  `app` Docker image, same as the daily scraper).
+- **Workday discovery: `scripts/discover_and_store_workday.py`** turns
+  the confirmed-Workday hits from `scratch_neither_ats_probe.json` into
+  `companies` rows. Per hit: parse `{slug, dc}`, then resolve `site` via
+  **the tenant's `robots.txt`** (it lists every published board as
+  `Allow: /{Site}/` + `Sitemap: .../{Site}/siteMap.xml` - authoritative,
+  guess-free; `scripts/discover_workday_triple.py`'s `site_from_robots()`,
+  picking the non-secondary board with the most postings), falling back
+  to an 18-name candidate list only when robots is blocked/empty.
+  Ambiguity handling (task: "flag, don't guess"): a hit on a generic
+  one-word slug (`red`, `western`, `tera`, ...) is **not stored** - it
+  goes to the report's `needs_review` list, since a Workday tenant by
+  that name existing doesn't prove it's this employer's. The board's
+  `hiringOrganization` legal name is an informational cross-check only,
+  never a gate (too noisy: `"621 Salesforce.com India Private Limited"`
+  vs `SALESFORCE`). `scripts/scrape_workday.py [names...]` is a
+  Workday-only entrypoint (reads `companies`, same pipeline) for proving
+  / re-running without a full `main.py` crawl.
 
 ## How to run things
 
