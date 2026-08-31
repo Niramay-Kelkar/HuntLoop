@@ -406,9 +406,18 @@ nothing scrapes them; treat that as planned, not present.
   it with the bare `pgvector.sqlalchemy.Vector` or add another
   `vector`-typed column using anything else — see the conftest.py
   incident bullet above for exactly why.**
+  **`job_postings.embedding` is computed at insert time by
+  `JobDataPipeline._classify_and_embed` (2026-08-31), in the same single
+  model call as `is_relevant` — so a new ATS source no longer needs a
+  manual embedding pass after its first scrape.** Same graceful
+  degradation as `is_relevant`: NULL when the pipeline runs torch-less
+  (local `.venv`) or an isolated per-row failure.
   `scripts/backfill_embeddings.py` embeds the active resume (recomputed
   every run) and backfills `job_postings` in batches of 100 (only
-  `embedding IS NULL` rows, safe to interrupt/resume). **This project's
+  `embedding IS NULL` rows, safe to interrupt/resume) — still the right
+  tool for bulk re-scrapes (batch-of-100 vs. the pipeline's one row at a
+  time) and for cleaning up NULLs from torch-less runs, so it stays.
+  **This project's
   local dev venv (macOS, Intel, Python 3.13) cannot run
   `sentence-transformers`/`torch` — confirmed by actually trying to
   install `torch` and finding no compatible wheel (PyPI's last
@@ -418,12 +427,13 @@ nothing scrapes them; treat that as planned, not present.
   Postgres via `docker compose run --rm -e
   DATABASE_URL="...@host.docker.internal:5432/<db>" app python
   scripts/backfill_embeddings.py` — not the docker-compose `db` on 5433.
-  Match scores are **computed at query time** via pgvector's `<=>`
+  Match *scores* are **computed at query time** via pgvector's `<=>`
   cosine-distance operator (`similarity = 1 - distance`), deliberately
-  **not stored** — with one active resume and ~600 jobs a live query is
-  trivial, and a stored score would need an invalidation mechanism (on
-  every scrape/resume update) that doesn't exist; revisit only if live
-  scoring ever becomes measurably slow. Verified end-to-end against the
+  **not stored** — a stored score would need an invalidation mechanism
+  (on every scrape/resume update) that doesn't exist; revisit only if
+  live scoring ever becomes measurably slow. (The per-job *embedding* IS
+  stored — it doesn't change unless the description does; only the
+  score, which depends on the active resume, is left to query time.) Verified end-to-end against the
   real resume + all 605 real job postings: healthy, non-degenerate score
   distribution (min 0.033, max 0.593, mean 0.372) and a by-eye-sane
   top/bottom-5 ranking (top 5 all Palantir "Software Engineer" roles;
@@ -434,9 +444,16 @@ nothing scrapes them; treat that as planned, not present.
   now 30,373 / 30,373.** Ran `scripts/backfill_embeddings.py` unchanged
   (batch 100, commit-per-batch, `embedding IS NULL` only) in the `app`
   Docker image. The resume-vs-job similarity score is now computable for
-  every real job, not ~2%. (`backfill_embeddings.py` still needs to be
-  re-run after future scrapes add rows — same as before, not wired into
-  the daily orchestrator.)
+  every real job, not ~2%.
+  **Full coverage again 2026-08-31 after the Workday scrape (see
+  SESSIONS.md): 30,373 → 53,961 / 53,961.** Ran `backfill_embeddings.py`
+  unchanged in Docker for the 23,588 new `workday_api` rows (which
+  predated the insert-time wiring above). Spot-checked: Workday jobs now
+  score and rank in the live UI (`jadeglobal` "Java Backend + AI Agent
+  Developer" 0.665, `nxp` "Software DevOps Engineer – for Gen AI" 0.664,
+  `jabil` 0.661 — top of "Best match" alongside the ATS-expansion set).
+  Going forward the insert-time wiring keeps new rows covered; the
+  backfill is only needed for a bulk historical gap like this one.
   **Audited the live match-score query/UI (`huntloop.api.routers.jobs`)
   at the new 30,373-row scale 2026-08-30 (see SESSIONS.md) — no code
   changed, still correct.** Scores now render for ATS-expansion companies
@@ -723,6 +740,13 @@ nothing scrapes them; treat that as planned, not present.
   the scrape; the same applies to an isolated per-row embedding failure
   (any other exception), which leaves just that row's `is_relevant`
   NULL rather than rolling back its whole insert.
+  **As of 2026-08-31 the same method (`_classify_and_embed`, renamed from
+  `_classify_relevance`) also computes and stores
+  `job_postings.embedding` — the resume-match embedding of the
+  description — in the same batched model call, so the identical
+  graceful-degradation rules apply to both columns and a new ATS source
+  no longer needs a manual `backfill_embeddings.py` pass after its first
+  scrape (see SESSIONS.md).**
   **The "real scheduled scrapes leave is_relevant NULL" gap noted when
   this was first wired in is now closed, as of 2026-08-24 (see the next
   bullet and SESSIONS.md) — the daily scraper itself now runs via
@@ -1236,11 +1260,15 @@ nothing scrapes them; treat that as planned, not present.
   variants). The per-job detail endpoint's `jobPostingInfo.startDate` is
   an absolute `YYYY-MM-DD` and is used as the source of truth (~100% of
   real rows); `normalize_workday_date()` parses the relative text only as
-  a fallback, flooring "30+" to 30 days.** Relevance classification is
-  automatic - the spider yields plain `JobPostingItem`s through the same
-  source-agnostic `JobDataPipeline`, which already calls
-  `classify_relevance()` on every insert (needs torch -> run via the
-  `app` Docker image, same as the daily scraper).
+  a fallback, flooring "30+" to 30 days.** Relevance classification AND
+  the resume-match embedding are both automatic - the spider yields
+  plain `JobPostingItem`s through the same source-agnostic
+  `JobDataPipeline`, whose `_classify_and_embed` populates
+  `is_relevant` + `embedding` on every insert (needs torch -> run via
+  the `app` Docker image, same as the daily scraper). The initial
+  23,588-row Workday scrape predated the embedding wiring and needed a
+  one-off `backfill_embeddings.py` pass (2026-08-31, see SESSIONS.md);
+  future Workday scrapes don't.
 - **Workday discovery: `scripts/discover_and_store_workday.py`** turns
   the confirmed-Workday hits from `scratch_neither_ats_probe.json` into
   `companies` rows. Per hit: parse `{slug, dc}`, then resolve `site` via

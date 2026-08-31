@@ -36,12 +36,13 @@ def test_process_item_inserts_job_posting(pipeline, db_session):
     assert row.gh_job_id == str(item["job_id"])
     assert row.company.name == "TestCo"
     assert [loc.location_name for loc in row.locations] == ["Remote - US"]
-    # is_relevant is classified at insert time (see JobDataPipeline.
-    # _classify_relevance) - this test env has no torch/sentence-
-    # transformers installed (see CLAUDE.md), so the pipeline degrades
-    # gracefully rather than raising: is_relevant stays NULL rather than
+    # is_relevant AND embedding are both computed at insert time (see
+    # JobDataPipeline._classify_and_embed) - this test env has no torch/
+    # sentence-transformers installed (see CLAUDE.md), so the pipeline
+    # degrades gracefully rather than raising: both stay NULL rather than
     # the insert failing outright.
     assert row.is_relevant is None
+    assert row.embedding is None
 
 
 def test_duplicate_job_url_hits_integrity_error_handler(pipeline, db_session, caplog):

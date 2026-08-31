@@ -5851,10 +5851,10 @@ scraper). 77 min, `finish_reason: finished`.
 - **1 error in 24,820 requests**: a transient Workday `VPS Internal
   Server Error` on one `hitachi` detail fetch — caught, error metric
   incremented, that one job skipped, run continued. No crash.
-- `embedding` is NULL on all 23,588 (expected — embeddings are a
-  separate `scripts/backfill_embeddings.py` backfill for every source,
-  not computed at insert; needs a follow-up run, same as after any
-  scrape).
+- `embedding` was NULL on all 23,588 at this point (embeddings were a
+  separate `scripts/backfill_embeddings.py` step then) — **backfilled
+  2026-08-31, and embedding is now computed at insert time like
+  `is_relevant`; see the next entry.**
 
 ### Verification
 
@@ -5874,8 +5874,90 @@ scraper). 77 min, `finish_reason: finished`.
   (all new); `main.py`, `scripts/discover_workday_triple.py` (robots.txt
   site resolution) modified; `tests/test_workday_url.py`,
   `tests/test_workday_spider.py` new.
-- Deliberately NOT done: the 6 `needs_review` companies (manual
-  `site:` search / disambiguation), a `backfill_embeddings.py` run for
-  the new rows, wiring `workday_api` into `run_orchestrator_cron.sh`
+- Deliberately NOT done in this entry (embedding backfill done the next
+  day): the 6 `needs_review` companies (manual `site:` search /
+  disambiguation), wiring `workday_api` into `run_orchestrator_cron.sh`
   (`main.py` already routes it — the daily wrapper is a separate step),
   Ashby/SmartRecruiters/iCIMS spiders.
+
+---
+
+## 2026-08-31 — Workday embedding backfill + wire embedding into the pipeline
+
+### 1. Backfill (task item 1–2)
+
+`scripts/backfill_embeddings.py` unchanged, in the `app` Docker image,
+against the 23,588 `workday_api` rows (all `embedding IS NULL`, all from
+the prior day's first Workday scrape which predated the pipeline wiring
+in §3).
+
+| | before | after |
+|---|---|---|
+| `job_postings` total | 53,961 | 53,961 |
+| with `embedding` | **30,373** | **53,961** |
+| missing | **23,588** | **0** |
+| by source (missing) | greenhouse 0 / lever 0 / **workday 23,588** | 0 / 0 / **0** |
+
+Exit 0, 0 failures. Resume embedding recomputed as usual.
+
+### 2. UI spot-check (verify item b)
+
+Real Workday jobs now score and rank in the live UI (API + frontend
+screenshots):
+- `/jobs?sort=-score` list: `jadeglobal` "Java Backend + AI Agent
+  Developer" **0.665**, `nxp` "Software DevOps Engineer – for Gen AI"
+  **0.664**, `jabil` "Full Stack AI Lead Developer" **0.661** — mixed
+  into the top of "Best match" alongside `pubmatic` (0.68) /
+  `vianttechnology` (0.66).
+- `/jobs/31351` (nxp Workday) detail page: match ring **66**, `ATS:
+  workday`, real cleaned description, `Posted Mar 25, 2026`.
+Before the backfill all 23,588 came back `match_score: null` ("not
+scored" pill, sorted last, excluded from `min_score`) — the same silent
+degradation documented for the pre-2026-08-30 Greenhouse/Lever gap.
+
+### 3. Recommendation → implemented: embedding at insert time
+
+This was the **second** time a new ATS source needed a manual embedding
+backfill after the fact (Greenhouse/Lever expansion, then Workday). The
+pipeline **already ran the embedding model at insert time** — for
+`is_relevant` (`_classify_relevance` embedded `title+description` vs.
+`REFERENCE_TEXT`). Storing `job_postings.embedding` (the
+description-only vector for resume-match scoring) is one more vector out
+of the *same* model call. Judged small + low-risk and implemented:
+
+- `_classify_relevance` → **`_classify_and_embed(title, description)`**,
+  returns `(is_relevant, match_embedding)` from **one batched
+  `embed_texts([title+desc, desc])` call** (efficient — the relevance
+  vector and the stored vector come back together, not two model
+  invocations). `process_item` passes `embedding=job_embedding` into the
+  `JobPosting(...)` constructor.
+- **Identical graceful degradation** to `is_relevant`: torch not
+  importable → both NULL (one warning per run); isolated per-row failure
+  → that row's both NULL, insert not rolled back. The daily scraper runs
+  in Docker, so in production both populate.
+- **`backfill_embeddings.py` stays** — it's still the right tool for
+  bulk re-scrapes (batches of 100 vs. the pipeline's one row at a time)
+  and for cleaning up NULLs from any torch-less run, and it's the only
+  thing that embeds the resume. It's just no longer a *mandatory* step
+  after every new scrape.
+- Not done: re-embedding when a description *changes* on re-scrape (the
+  pipeline dedups on `gh_job_id` and skips repeats entirely, so a job's
+  embedding is fixed at first insert — same as `is_relevant`; a
+  description-drift refresh is a separate future concern, noted not
+  built).
+
+### Verification
+
+- (a) before/after coverage: table in §1 — 30,373 → 53,961 / 53,961,
+  0 missing, verified by direct `psql` per-source counts.
+- (b) UI spot-check: §2 — 3 Workday jobs scoring 0.66+ in list + one
+  detail page, screenshots.
+- (c) recommendation: §3 — implemented (`_classify_and_embed`), small
+  diff, mirrors the existing `is_relevant` wiring exactly, backfill
+  retained for bulk/torch-less cases.
+- (d) full suite **166 passing** (`test_process_item_inserts_job_posting`
+  now also asserts `row.embedding is None` in the torch-less test env).
+- (e) this entry + CLAUDE.md + `db_models.py` column comment.
+- Files: `src/huntloop/pipelines.py` (`_classify_and_embed`),
+  `src/huntloop/db_models.py` (comment), `tests/test_pipeline.py`
+  (assertion). `scripts/backfill_embeddings.py` unchanged.
