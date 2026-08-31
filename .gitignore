@@ -21,3 +21,4 @@ scratch_*
 
 # HuggingFace / model cache when running scripts in Docker with the repo mounted
 .cache/
+huntloop-claude-code-prompts.md
