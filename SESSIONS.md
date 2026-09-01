@@ -6602,3 +6602,151 @@ it against today's 641-row, DOL-derived company set would find ~1 company.
 - Files: `scripts/discover_ashby_job_board.py` (new),
   `scratch_ashby_discovery.json` (gitignored, full test-set results),
   CLAUDE.md, SESSIONS.md.
+
+---
+
+## 2026-09-01 — Source LCA-verified startup candidates for a future Ashby pass (sourcing/verification only — no Ashby discovery, no DB writes)
+
+Groundwork for the Ashby gap: `companies` only holds sponsors with
+>= 20 LCA filings (an ATS-matching-era cutoff, not a data limit), and
+Ashby skews hard toward smaller/startup employers that cutoff excludes.
+Before any Ashby-specific build, establish a real pipeline for startups
+that are (a) plausible Ashby users AND (b) have genuine LCA sponsorship
+evidence — even a single filing. The "real sponsorship evidence required"
+principle is not relaxed: a startup with zero LCA filings is never
+eligible, however well-known.
+
+### (a) Candidate sourcing — 53 startups, each with a real source
+
+`scripts/discover_startup_sponsors.py` carries the candidate list inline
+with a `source` per entry (not guessed). Sources:
+- Ashby's own customer surface reached via web search
+  ("companies using Ashby ATS ...", "'powered by Ashby' careers") plus
+  the aggregator `jobspipe.dev/companies-using/ashby` — Notion, Linear,
+  Ramp, Vanta, OpenAI, Anysphere/Cursor, Replit, Supabase, Docker, Modal,
+  PostHog, Payabli, Substack, Mercury, Vercel, Deel, Clerk, ElevenLabs,
+  Sierra, LangChain, Ironclad, Lemonade, Lime, Gorgias, UiPath, Clay,
+  Harvey, Deliveroo, Zapier, Retool, Plaid.
+- Live `jobs.ashbyhq.com/{slug}` boards confirmed in the prior
+  Ashby-discovery task (2026-09-01) — Watershed, Baseten, Rentman,
+  Sisense, Jiga, Superbolt, Immunic Therapeutics, Agave, Hex.
+- Sector-targeted `site:jobs.ashbyhq.com` searches, each name confirmed by
+  a real posting URL in the results — Middesk, Clera, insitro, Semgrep,
+  Decagon, Firecrawl, Airwallex, Suno, Homebase, AgentMail, Basis AI,
+  Essential AI, Distyl AI.
+
+### (b) LCA verification — full `lca_disclosures`, existing fuzzy mechanism
+
+Each candidate run through
+`huntloop.matching.fuzzy_match.find_matching_employers` unchanged —
+rapidfuzz `token_set_ratio`, threshold 88, `sponsor_name_overrides`
+checked first — against the **full** table (no >= 20 filter anywhere).
+Filing count = `count(*)` grouped by `employer_name_normalized`.
+
+**Raw fuzzy result: 44 / 53 candidates produced a match >= 88.**
+
+### (c) Spot-check — the raw match rate is misleading; common-word names collide badly
+
+Pulled real `job_title` / `worksite_city` / `worksite_state` rows for
+every questionable match (12 examined, well beyond the 3-5 asked). Short,
+common-word company names collided with unrelated, wrong-sector real
+employers at score >= 88:
+
+| Candidate | Wrong match (score 88-100) | What it actually is |
+|---|---|---|
+| Linear | LINEAR DIMENSIONS SEMICONDUCTOR | Houston semiconductor firm |
+| Mercury | HDS MERCURY | logistics-automation employer (CV/industrial-eng roles, NJ/LA) |
+| Clerk | CLERK OF THE CIRCUIT COURT OF VOLUSIA COUNTY | a Florida county govt office |
+| Lemonade | ALEXS LEMONADE STAND FOUNDATION | childhood-cancer charity |
+| Lime | CARMEUSE LIME & STONE | Pittsburgh industrial-minerals firm |
+| Clay | CLAY COUNTY HEALTHCARE AUTHORITY | Alabama county healthcare authority |
+| Harvey | GREGORY T HARVEY DMD | an individual dentist's practice |
+| Watershed | MYSTIC RIVER WATERSHED ASSOCIATION | Massachusetts environmental nonprofit |
+| Immunic Therapeutics | C4 THERAPEUTICS | a different Watertown MA biotech |
+| Clera | CLEYRA | unrelated data-eng employer (edit-distance collision) |
+| Homebase | HOMECARE HOMEBASE | Dallas home-health software vendor (distinct co) |
+
+**11 confirmed false positives**, none added to `sponsor_name_overrides`
+(that table is for confirmed *correct* mappings, not exclusions) — they
+are simply not treated as verified. **2 more flagged needs-review**
+(Sierra → BLUE SIERRA; Basis AI → BASIS — plausible but unconfirmable
+from filing data alone). This is exactly the residual ambiguity
+`fuzzy_match.py`'s own threshold comment says a single global cutoff
+can't eliminate. The verdicts are encoded in the script
+(`_CONFIRMED_FALSE_POSITIVE` / `_NEEDS_MANUAL_REVIEW`) so the run is
+reproducible.
+
+Spot-checked positives (job titles/locations all consistent with the real
+company): NOTION LABS, RAMP BUSINESS CORPORATION, ANYSPHERE, MODAL LABS,
+LANGCHAIN, DECAGON AI, SEMGREP, MIDDESK, BASETEN LABS, SUNO (Cambridge MA
+research scientists — Suno is the Cambridge AI-music startup), DISTYL AI,
+HEX TECHNOLOGIES, INSITRO, GORGIAS, IRONCLAD — all correct.
+
+### (d) / final list — 31 LCA-verified startup candidates, ready for a future Ashby-discovery pass
+
+**31 / 53 (58.5%) carry real, spot-checked LCA sponsorship evidence.**
+Matched DOL sponsor name + real filing count:
+
+| Candidate | Matched `employer_name_normalized` | Filings |
+|---|---|---|
+| Plaid | PLAID | 108 |
+| UiPath | UIPATH | 101 |
+| Notion | NOTION LABS | 71 |
+| Ramp | RAMP BUSINESS CORPORATION | 61 |
+| Ironclad | IRONCLAD | 53 |
+| Vanta | VANTA | 35 |
+| insitro | INSITRO | 34 |
+| Retool | RETOOL | 30 |
+| Airwallex | AIRWALLEX US | 29 |
+| Baseten | BASETEN LABS | 15 |
+| Replit | REPLIT | 13 |
+| Substack | SUBSTACK | 13 |
+| Gorgias | GORGIAS | 13 |
+| Decagon | DECAGON AI | 12 |
+| Vercel | VERCEL | 10 |
+| Deel | DEEL | 10 |
+| OpenAI | OPENAI | 8 |
+| Middesk | MIDDESK | 8 |
+| Semgrep | SEMGREP | 8 |
+| Anysphere | ANYSPHERE | 7 |
+| Distyl AI | DISTYL AI | 7 |
+| Modal | MODAL LABS | 6 |
+| LangChain | LANGCHAIN | 6 |
+| Sisense | SISENSE | 6 |
+| Suno | SUNO | 6 |
+| Docker | DOCKER | 4 |
+| Hex Technologies | HEX TECHNOLOGIES | 3 |
+| ElevenLabs | ELEVEN LABS | 2 |
+| Agave | AGAVE TECH | 2 |
+| Supabase | SUPABASE | 1 |
+| Essential AI | ESSENTIAL AI LABS | 1 |
+
+**22 of the 31 have 1-15 filings — below the current >= 20 cutoff — so
+they are real sponsors the `companies` table excludes today. The gap
+hypothesis holds:** Ashby's user base includes many genuine-but-small
+sponsors DOL's high-volume filers don't represent. (The other 9 already
+clear 20 and several of those are Ashby-plausible but likely already
+tracked or large.)
+
+**9 / 53 had NO LCA match at all** — reported honestly, not dropped:
+PostHog, Payabli, Deliveroo, Zapier, Rentman, Jiga, Superbolt, Firecrawl,
+AgentMail. Mixed reasons: non-US HQ (Deliveroo UK, Rentman NL), very
+young / tiny (Firecrawl, AgentMail, Payabli), or a name the matcher
+genuinely missed and a human should re-check (Zapier, PostHog are
+established US tech employers — worth a manual look).
+
+**2 need a manual glance** before use: Sierra (→ BLUE SIERRA) and
+Basis AI (→ BASIS).
+
+### Verification
+
+- **(d) `companies` table completely unchanged** — before & after:
+  641 rows; `greenhouse` 318 / `smartrecruiters` 224 / `lever` 60 /
+  `workday` 38 / `ashby` 1. `job_postings` 75,809.
+  `sponsor_name_overrides` still 1 row. No row added, removed, or edited.
+- **(e) full suite: 175 passed** (unchanged — no application code
+  touched).
+- Nothing stored, no Ashby discovery run — that is the next task.
+- Files: `scripts/discover_startup_sponsors.py` (new),
+  `scratch_startup_sponsor_candidates.json` (gitignored, full results),
+  SESSIONS.md, CLAUDE.md.

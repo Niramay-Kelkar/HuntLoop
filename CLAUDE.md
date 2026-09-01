@@ -1435,6 +1435,37 @@ nothing scrapes them; treat that as planned, not present.
   not-an-empty-board cross-check (or a human confirm), mirroring the
   Workday/SR gates. `scratch_ashby_discovery.json` (gitignored) holds the
   full test-set results.
+- **Startup-sponsor sourcing groundwork for Ashby done 2026-09-01
+  (sourcing/verification only — no Ashby discovery, no DB writes; see
+  SESSIONS.md "Source LCA-verified startup candidates for a future Ashby
+  pass").** The `companies` table's >= 20-filing floor structurally
+  excludes the smaller employers Ashby skews toward, so
+  `scripts/discover_startup_sponsors.py` assembles 53 web-search-sourced
+  likely-Ashby startups (each with a real `source` recorded inline) and
+  checks every one against the **full** `lca_disclosures` table (no
+  >= 20 filter) via `find_matching_employers()` unchanged (token_set_ratio,
+  threshold 88, overrides first). **The "real sponsorship evidence
+  required" principle is NOT relaxed — a startup with 0 LCA filings is
+  never eligible.** Raw fuzzy hit rate (44/53) is misleading: a
+  spot-check of every questionable match against real
+  `job_title`/`worksite` rows found **11 confirmed false positives** —
+  short common-word company names (Linear, Mercury, Clerk, Lemonade,
+  Lime, Clay, Harvey, Watershed, Immunic Therapeutics, Clera, Homebase)
+  each colliding with an unrelated wrong-sector real employer at score
+  >= 88 (the residual ambiguity `fuzzy_match.py`'s own threshold comment
+  describes). Those verdicts are encoded in the script
+  (`_CONFIRMED_FALSE_POSITIVE` / `_NEEDS_MANUAL_REVIEW`) — none were
+  added to `sponsor_name_overrides` (that table is for confirmed
+  *correct* mappings, not exclusions). **Final: 31/53 carry real,
+  spot-checked LCA evidence — 22 of them with 1-15 filings, i.e. genuine
+  sponsors the current cutoff excludes, confirming the gap.** 9 had no
+  LCA match at all (reported, not dropped: PostHog, Payabli, Deliveroo,
+  Zapier, Rentman, Jiga, Superbolt, Firecrawl, AgentMail — mix of non-US
+  HQ, very young, or a genuine matcher miss worth manual review); 2
+  (Sierra, Basis AI) flagged needs-review. **Nothing stored — the 31
+  verified names are the input to a future Ashby-discovery-then-onboard
+  pass, not yet run.** `scratch_startup_sponsor_candidates.json`
+  (gitignored) holds the full results.
 
 ## How to run things
 
