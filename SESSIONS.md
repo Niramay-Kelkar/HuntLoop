@@ -6960,3 +6960,79 @@ Every one of the 26 companies: `null_rel=0 null_emb=0`. The insert-time
   `.gitignore` (`confirmed_*.txt`); CLAUDE.md, SESSIONS.md.
   `scratch_ashby_onboarding.json` + `confirmed_ashby_slugs.txt`
   (gitignored) hold the onboarding run + the 3 confirmations.
+
+---
+
+## 2026-09-01 — Onboard Anysphere (Ashby `cursor`), closing the confirmations-file gap
+
+Single confirmed-slug addition + scrape. Anysphere's real Ashby
+jobBoardName is `cursor` (not name-derivable) — discovered + cross-checked
+against the live board in the prior Ashby-discovery task, LCA-verified in
+the same batch as the other 31 startups, but left out of
+`confirmed_ashby_slugs.txt` during the first onboarding run, so it stayed
+unstored.
+
+### (a) Fresh live re-verification
+
+`GET https://api.ashbyhq.com/posting-api/job-board/cursor` → **HTTP 200**,
+`{"jobs":[…119…], "apiVersion":…}`, first titles "Software Engineer,
+Growth" / "Software Engineer, Infrastructure" / "Software Engineer, Core
+Services". Not assumed from the earlier run — called directly at the
+start of this task.
+
+### Confirmations file + gate
+
+`confirmed_ashby_slugs.txt` gained one line, `Anysphere<TAB>cursor`. The
+bare-slug lines (`hex` / `ironcladhq` / `distyl`) already worked for
+boards the resolver *found* via a weak candidate; a company whose board
+isn't name-derivable at all needs the slug supplied as a forced
+candidate. `read_confirmations()` now also parses `Name<TAB>slug` into a
+`{name: forced_slug}` map that `evaluate()` passes to the UNCHANGED
+resolver's existing `forced_slug` argument. **The gate's confidence rules
+(`gate()`, `_NON_AUTO_KINDS`, the `needs_review` hold) are untouched** —
+`cursor` still resolves to `low-suspect` (the hosted board page is
+unlisted, so the resolver reads org name "Jobs"), lands in `held`, and is
+admitted only because its slug is in the confirmations file. The
+discovery script and the Ashby spider were not modified.
+
+### (b) Stored
+
+`companies` row: `name='cursor'`, `ats_platform='ashby'`,
+`ats_token='cursor'`, `careers_url='https://jobs.ashbyhq.com/cursor'`.
+Onboarding run: "1 companies rows inserted" (the other 3 confirmed slugs
+already present).
+
+### (c) Scrape + live cross-check
+
+`scripts/scrape_ashby.py cursor` via the `app` Docker image: **119
+`job_postings` rows**, `item_scraped_count: 119`, exit 0, no errors.
+
+Live board cross-check: `jobs.ashbyhq.com/cursor` itself 404s — Cursor
+keeps the hosted Ashby board unlisted and embeds it on **cursor.com/careers**,
+which renders the same jobBoardName `cursor` data. That page shows
+**119 "· Full-time ·" listing rows** — exact match to the 119 scraped —
+and every spot-checked title is present verbatim: "AI Deployment
+Manager", "Software Engineer, Pretraining", "Research Scientist",
+"Software Engineer, RL Data", "Account Executive - Commercial".
+
+### (d) Zero-NULL (direct query, no backfill)
+
+```
+cursor rows: 119   NULL is_relevant: 0   NULL embedding: 0
+```
+
+### (e) Verification
+
+- **Full suite: 182 passed** (unchanged).
+- **Row counts** — before: `companies` 666, `job_postings` 78,817.
+  After: `companies` 667 (+1; 27 `ashby`), `job_postings` 78,936 (+119).
+- Only `scripts/discover_and_store_ashby.py` changed (the confirmations
+  parser + one `evaluate()` arg). No other company touched; discovery
+  script, gate confidence logic, and the Ashby spider all untouched.
+- Files: `scripts/discover_and_store_ashby.py`; `confirmed_ashby_slugs.txt`
+  (gitignored); CLAUDE.md, SESSIONS.md.
+
+**The confirmations-file gap is closed** — all 32 of the resolvable
+LCA-verified startups (31 auto/confirmed + Anysphere) are now onboarded;
+the only ones still out are Sierra and Basis AI (LCA `needs_review`, held
+by design) and Retool (no live Ashby board).

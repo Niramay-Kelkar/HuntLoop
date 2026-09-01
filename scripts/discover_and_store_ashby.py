@@ -81,17 +81,34 @@ def load_candidates() -> list[dict]:
     return out
 
 
-def read_confirmations(path: str | None) -> set[str]:
+def read_confirmations(path: str | None) -> tuple[set[str], dict[str, str]]:
+    """Returns (approved_slugs, forced_slug_by_name).
+
+    Line formats (blank / '#' lines ignored):
+      * ``slug``                - a bare human-approved jobBoardName (the
+        original format; used for a board the resolver *did* find, just
+        via a weak candidate kind - e.g. ``hex`` / ``ironcladhq``).
+      * ``Company Name<TAB>slug`` - also supplies ``slug`` as a forced
+        candidate for a company whose real board is NOT derivable from its
+        name by any pattern (e.g. ``Anysphere<TAB>cursor``). The slug is
+        fed to the UNCHANGED resolver's existing ``forced_slug`` argument
+        and still goes through the exact same confidence gate.
+    """
     if not path:
-        return set()
+        return set(), {}
     approved: set[str] = set()
+    forced: dict[str, str] = {}
     with open(path) as fh:
         for line in fh:
-            line = line.strip()
-            if not line or line.startswith("#"):
+            line = line.rstrip("\n")
+            if not line.strip() or line.lstrip().startswith("#"):
                 continue
-            approved.add(line.split("\t")[-1].strip().lower())
-    return approved
+            parts = [p.strip() for p in line.split("\t") if p.strip()]
+            slug = parts[-1].lower()
+            approved.add(slug)
+            if len(parts) >= 2:
+                forced[parts[0].lower()] = slug
+    return approved, forced
 
 
 # Belt-and-braces, mirroring the SmartRecruiters gate's _NON_AUTO_KINDS: a
@@ -115,10 +132,11 @@ def gate(ashby_confidence: str, lca_verdict: str, winning_candidate_kind: str | 
     return "held"
 
 
-def evaluate(cand: dict) -> dict:
+def evaluate(cand: dict, forced_slugs: dict[str, str] | None = None) -> dict:
     name = cand["name"]
+    forced_slug = (forced_slugs or {}).get(name.lower())
     try:
-        res = resolver.discover(name)
+        res = resolver.discover(name, forced_slug) if forced_slug else resolver.discover(name)
     except Exception as exc:
         logger.warning("Ashby resolve failed for %r: %s", name, exc)
         return {**cand, "resolved_slug": None, "ashby_confidence": "error",
@@ -172,7 +190,7 @@ def main() -> None:
 
     engine = create_engine(DATABASE_URL, echo=False)
     session = sessionmaker(bind=engine)()
-    approved = read_confirmations(args.confirmations)
+    approved, forced_slugs = read_confirmations(args.confirmations)
     existing_names = {c.name for c in session.query(Company.name).all()}
     existing_platform = {c.name: c.ats_platform for c in session.query(Company.name, Company.ats_platform).all()}
 
@@ -180,7 +198,7 @@ def main() -> None:
     logger.info("Evaluating %d LCA-verified startup candidates against Ashby%s",
                 len(candidates), f"; {len(approved)} human-approved slugs loaded" if approved else "")
 
-    results = [evaluate(c) for c in candidates]
+    results = [evaluate(c, forced_slugs) for c in candidates]
 
     resolved = [r for r in results if r["resolved_slug"]]
     auto = [r for r in resolved if r["gate"] == "auto"]

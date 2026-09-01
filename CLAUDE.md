@@ -1519,6 +1519,22 @@ conventions" and SESSIONS.md for the real current state).
   rows across 26 companies, 0 NULL `is_relevant`, 0 NULL `embedding`, no
   backfill.** Live cross-checks (real browser): Semgrep board "Open
   Positions (10)" == 10 rows, Hex "(29)" == 29, Notion "(132)" == 132.
+  **Follow-up 2026-09-01 — Anysphere onboarded, closing the
+  confirmations-file gap (see SESSIONS.md "Onboard Anysphere").**
+  Anysphere's board is `cursor` (not name-derivable), so
+  `confirmed_ashby_slugs.txt` now also accepts a `Name<TAB>slug` line that
+  `read_confirmations()` turns into a forced candidate for the UNCHANGED
+  resolver (`evaluate()` passes it to the resolver's existing
+  `forced_slug` arg) — the gate's confidence rules are untouched, `cursor`
+  still resolves `low-suspect` and is admitted only via the confirmations
+  file. Stored (`name`/`ats_token` = `cursor`) + scraped: **119 rows, 0
+  NULL is_relevant/embedding**. Live cross-check: `jobs.ashbyhq.com/cursor`
+  404s (Cursor keeps the hosted board unlisted, embeds it on
+  cursor.com/careers) but cursor.com/careers renders the same `cursor`
+  jobBoardName data — 119 listings, exact title matches. All 32 resolvable
+  LCA-verified startups now onboarded; only Sierra + Basis AI (LCA
+  `needs_review`, held by design) and Retool (no live Ashby board) remain
+  out. Now 27 `ashby` companies.
 
 ## How to run things
 
