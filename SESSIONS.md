@@ -6819,3 +6819,144 @@ is a genuine true negative, not a matcher miss. They stay in the
   spot-check + Zapier/PostHog findings recorded inline),
   `scratch_startup_sponsor_candidates.json` (unchanged output),
   SESSIONS.md, CLAUDE.md.
+
+---
+
+## 2026-09-01 — Build the Ashby spider + gated onboarding for the LCA-verified startups
+
+Turns the 33-company LCA-verified startup candidate list (31 fully
+spot-checked + 2 `needs_review`: Sierra, Basis AI) into real `companies`
+rows and a real scrape.
+
+### The spider
+
+`AshbyScraper` (`src/huntloop/spiders/ashby_spider.py`, name `ashby_api`)
+— `GET api.ashbyhq.com/posting-api/job-board/{jobBoardName}`, **no
+pagination** (one response = every listed job), **no per-job detail
+fetch** (`descriptionHtml` + `jobUrl` are inline). Yields plain
+`JobPostingItem`s through the same source-agnostic `JobDataPipeline`, so
+`is_relevant` + `embedding` are computed at insert like every other
+source, zero Ashby-specific wiring, zero manual backfill. `date_posted`
+= the inline `publishedAt` ISO timestamp (absolute, no relative-text
+parsing like Workday). 404 / empty-`jobs` boards are skipped with a
+logged reason + a `scrape_errors` metric, never a crash. `custom_settings`
+sets `ROBOTSTXT_OBEY: False` for this spider only (API client, same as
+the SmartRecruiters spider's carve-out). Added to `main.py`'s
+`SPIDERS_BY_PLATFORM`; `scripts/scrape_ashby.py` is the scoped
+entrypoint. `tests/test_ashby_spider.py` (7 tests, real-shaped JSON).
+
+### The gate
+
+`scripts/discover_and_store_ashby.py` reuses
+`scripts/discover_ashby_job_board.py` UNCHANGED and gates:
+- **auto** = Ashby confidence `high` **AND** LCA verdict `verified`
+  **AND** the winning slug candidate is not weak
+  (`_NON_AUTO_KINDS = {suffix-variant, first-word-only, acronym}` —
+  mirrors the SmartRecruiters onboarding's identical carve-out).
+- **held** = anything else that resolved (medium / low-suspect /
+  `found-unverifiable` 0-job board; a weak-candidate win; **or a
+  `needs_review` LCA verdict — a strong Ashby match never upgrades an
+  unverified sponsor**).
+- **skip** = no live board.
+Held rows store only if their slug is in a `--confirmations` file.
+
+### (a) Per-company discovery + gate results — all 33
+
+| Company | LCA | Slug | Ashby confidence | Cand. kind | Gate |
+|---|---|---|---|---|---|
+| Plaid | verified | `plaid` | high | full-slug | **auto** |
+| UiPath | verified | `uipath` | high | full-slug | **auto** |
+| Notion | verified | `notion` | high | full-slug | **auto** |
+| Ramp | verified | `ramp` | high | full-slug | **auto** (already onboarded) |
+| Vanta | verified | `vanta` | high | full-slug | **auto** |
+| insitro | verified | `insitro` | high | full-slug | **auto** |
+| Airwallex | verified | `airwallex` | high | full-slug | **auto** |
+| Baseten | verified | `baseten` | high | full-slug | **auto** |
+| Replit | verified | `replit` | high | full-slug | **auto** |
+| Substack | verified | `substack` | high | full-slug | **auto** |
+| Gorgias | verified | `gorgias` | high | full-slug | **auto** |
+| Decagon | verified | `decagon` | high | full-slug | **auto** |
+| OpenAI | verified | `openai` | high | full-slug | **auto** |
+| Middesk | verified | `middesk` | high | full-slug | **auto** |
+| Semgrep | verified | `semgrep` | high | full-slug | **auto** |
+| Modal | verified | `modal` | high | full-slug | **auto** |
+| LangChain | verified | `langchain` | high | full-slug | **auto** |
+| Sisense | verified | `sisense` | high | full-slug | **auto** |
+| Suno | verified | `suno` | high | full-slug | **auto** |
+| Docker | verified | `docker` | high | full-slug | **auto** |
+| ElevenLabs | verified | `elevenlabs` | high | full-slug | **auto** |
+| Agave | verified | `agave` | high | full-slug | **auto** |
+| Supabase | verified | `supabase` | high | full-slug | **auto** |
+| Hex Technologies | verified | `hex` | high | first-word-only | held → **confirmed** |
+| Ironclad | verified | `ironcladhq` | high | suffix-variant | held → **confirmed** |
+| Distyl AI | verified | `distyl` | high | first-word-only | held → **confirmed** |
+| Deel | verified | `deel` | found-unverifiable (0 jobs) | full-slug | **held** |
+| Vercel | verified | `vercel` | found-unverifiable (0 jobs) | full-slug | **held** |
+| Essential AI | verified | `essentialai` | found-unverifiable (0 jobs) | full-slug | **held** |
+| Sierra | needs_review | `sierra` | high | full-slug | **held** |
+| Basis AI | needs_review | `basis-ai` | high | hyphenated | **held** |
+| Retool | verified | — | unresolved | — | **skip** |
+| Anysphere | verified | — | unresolved | — | **skip** |
+
+- Retool: `jobs.ashbyhq.com/retool` page 200s but the posting API 404s —
+  no live Ashby board (Retool's real careers are on Greenhouse).
+- Anysphere: real board is `cursor` (not name-derivable); the resolver
+  run by name alone can't reach it. A future `--slug cursor` +
+  confirmation would onboard it.
+
+### (d) Sierra & Basis AI — held, as designed
+
+Both resolved to a `high`-confidence live Ashby board (`sierra` 206 jobs,
+`basis-ai` 36 jobs), but their **LCA sponsorship verdict is
+`needs_review`** (Sierra → `BLUE SIERRA`, Basis AI → `BASIS` — plausible
+but unconfirmed from filing data). The gate holds them regardless of
+Ashby confidence: a strong ATS match is not evidence of sponsorship.
+Neither was added to the confirmations file. They stay out of `companies`
+until their LCA match is independently confirmed.
+
+### (b) Scrape results (`scripts/scrape_ashby.py` via the `app` Docker image)
+
+**25 companies stored** (23 auto − `ramp` already onboarded + 3
+human-confirmed = 25 inserts), **26 scraped** (the 25 + pre-existing
+`ramp`). **3,008 new `job_postings` rows**, exit 0, no `DataError`s.
+
+Per company: openai 766, airwallex 605, elevenlabs 251, decagon 140,
+ramp 137, notion 132, uipath 120, vanta 106, langchain 104, plaid 102,
+baseten 83, replit 73, suno 63, docker 62, supabase 57, modal 31,
+ironcladhq 29, distyl 29, hex 29, middesk 21, insitro 16, gorgias 16,
+substack 12, semgrep 10, agave 7, sisense 7.
+
+**Live board cross-checks (`jobs.ashbyhq.com/{slug}`, real browser):**
+- Semgrep — board header "Open Positions (10)" == 10 stored rows; titles
+  all Semgrep (supply-chain security, Guardian).
+- Hex — "Open Positions (29)" == 29 stored rows; header "HEX", data/AI
+  roles ("Data Person", AI Research Engineer) — confirms the
+  first-word-only `hex` slug is the right board.
+- Notion — "Open Positions (132)" == 132 stored rows; Notion-specific
+  roles ("Outcomes Architect"), global offices.
+
+### (c) Zero-NULL check (direct query, no backfill run)
+
+```
+total ashby_api postings: 3008  across 26 companies
+rows with NULL is_relevant: 0
+rows with NULL embedding:   0
+```
+Every one of the 26 companies: `null_rel=0 null_emb=0`. The insert-time
+`_classify_and_embed` path covered all 3,008 rows.
+
+### (e) Verification
+
+- **Full suite: 182 passed** (175 prior + 7 new `test_ashby_spider.py`).
+- **Row counts** — before: `companies` 641, `job_postings` 75,809.
+  After: `companies` 666 (+25; 26 `ashby` incl. pre-existing `ramp`),
+  `job_postings` 78,817 (+3,008).
+- Greenhouse / Lever / Workday / SmartRecruiters spiders + discovery
+  scripts untouched. Existing `companies` rows untouched (only inserts +
+  `NULL/'unknown'`-fill).
+- Files: `src/huntloop/spiders/ashby_spider.py`,
+  `scripts/discover_and_store_ashby.py`, `scripts/scrape_ashby.py`,
+  `tests/test_ashby_spider.py` (new); `main.py` (one dict entry + import);
+  `.gitignore` (`confirmed_*.txt`); CLAUDE.md, SESSIONS.md.
+  `scratch_ashby_onboarding.json` + `confirmed_ashby_slugs.txt`
+  (gitignored) hold the onboarding run + the 3 confirmations.

@@ -19,12 +19,12 @@ normalizes into `JobPostingItem` → the single, source-agnostic
 Platforms without an implemented spider (ashby, workday) or companies with no
 detected platform are skipped with a clear log message, not silently dropped.
 
-Broader vision (not yet built): aggregate job postings across many sources
-beyond Greenhouse/Lever, and add sponsorship-aware matching so candidates can
-filter for companies that actually sponsor visas (e.g. H1B). Ashby and
-Workday spiders are deliberately not built yet — `detect_ats()` already
-identifies companies on those platforms (see `companies.ats_platform`), but
-nothing scrapes them; treat that as planned, not present.
+Broader vision: aggregate job postings across many sources and add
+sponsorship-aware matching so candidates can filter for companies that
+actually sponsor visas (e.g. H1B). **Update: Greenhouse, Lever, Workday,
+SmartRecruiters, and Ashby spiders are all built now** (this overview
+paragraph predates them — see the spider bullets under "Tech stack and
+conventions" and SESSIONS.md for the real current state).
 
 ## Tech stack and conventions
 
@@ -1481,6 +1481,44 @@ nothing scrapes them; treat that as planned, not present.
   distributed employers that don't sponsor US visas), not a matcher miss.
   Fuzzy-matching logic (token_set_ratio / threshold 88 /
   `sponsor_name_overrides`) was not modified.
+- **Ashby spider BUILT + onboarded 2026-09-01 (see SESSIONS.md "Build the
+  Ashby spider + gated onboarding").** `AshbyScraper`
+  (`src/huntloop/spiders/ashby_spider.py`, name `ashby_api`) — one
+  `GET api.ashbyhq.com/posting-api/job-board/{jobBoardName}` per company,
+  **no pagination, no per-job detail fetch** (`descriptionHtml` +
+  `jobUrl` are inline — the simplest of any platform). Yields plain
+  `JobPostingItem`s through the shared `JobDataPipeline`; `is_relevant` +
+  `embedding` computed at insert like every other source, zero manual
+  backfill. `date_posted` = the inline `publishedAt` ISO timestamp.
+  404 / empty-`jobs` boards are skipped with a logged reason + a
+  `scrape_errors` metric, never a crash. `custom_settings` sets
+  `ROBOTSTXT_OBEY: False` for this spider only (API client, same
+  carve-out reasoning as the SmartRecruiters spider). `companies.name` ==
+  `ats_token` == the lower-cased jobBoardName slug; `careers_url` =
+  `https://jobs.ashbyhq.com/{slug}` (parity with the pre-existing `ramp`
+  row — not needed to scrape). Added to `main.py`'s
+  `SPIDERS_BY_PLATFORM` (falls in the plain `companies=tokens` branch);
+  `scripts/scrape_ashby.py` is the scoped entrypoint.
+  **Onboarding gate: `scripts/discover_and_store_ashby.py`** reuses
+  `discover_ashby_job_board.py` unchanged over the 33-company
+  LCA-verified startup list. Auto-store requires Ashby confidence `high`
+  **AND** LCA verdict `verified` **AND** a strong slug candidate
+  (`_NON_AUTO_KINDS = {suffix-variant, first-word-only, acronym}` never
+  auto-passes — mirrors the SmartRecruiters gate). Held: 0-job
+  (`found-unverifiable`) boards, weak-candidate wins, and — critically —
+  **any `needs_review` LCA verdict (Sierra, Basis AI) is held regardless
+  of a strong Ashby match; an ATS hit is not sponsorship evidence.**
+  Held rows store only via a `--confirmations` file (gitignored
+  `confirmed_*.txt`). **Real run: 31/33 resolved; 23 auto-passed, 3
+  held-then-human-confirmed after a live board cross-check (`hex`,
+  `ironcladhq`, `distyl` — all reached via a weak candidate kind), 8
+  held total (incl. Sierra/Basis AI and 3 empty boards: deel / vercel /
+  essentialai), 2 unresolved (Retool — no live Ashby board; Anysphere —
+  real board is `cursor`, not name-derivable).** 25 `companies` rows
+  stored (+ pre-existing `ramp`), then scraped: **3,008 `job_postings`
+  rows across 26 companies, 0 NULL `is_relevant`, 0 NULL `embedding`, no
+  backfill.** Live cross-checks (real browser): Semgrep board "Open
+  Positions (10)" == 10 rows, Hex "(29)" == 29, Notion "(132)" == 132.
 
 ## How to run things
 
@@ -1580,9 +1618,9 @@ full loop from detection to real scraped data works end-to-end:
   0 jobs (its real Lever board has 0 open postings right now, confirmed
   live — not a detection or spider bug).
 
-Not yet started / explicitly deferred: Ashby/Workday spiders (`ramp`,
-`adobe` will keep getting skipped until one exists — deliberately out of
-scope, future work once there's demand), broadening the curated company
+Not yet started / explicitly deferred (NOTE: this list predates the
+Workday, SmartRecruiters, and Ashby spiders — all now built; see their
+bullets above): broadening the curated company
 list beyond the current 9, automating the
 `detect_and_store_ats.py` -> `main.py` sequence (currently two separate
 manual steps), broader scraper coverage generally, any UI/API surface for
