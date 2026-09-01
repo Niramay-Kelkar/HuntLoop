@@ -7036,3 +7036,126 @@ cursor rows: 119   NULL is_relevant: 0   NULL embedding: 0
 LCA-verified startups (31 auto/confirmed + Anysphere) are now onboarded;
 the only ones still out are Sierra and Basis AI (LCA `needs_review`, held
 by design) and Retool (no live Ashby board).
+
+---
+
+## 2026-09-01 — Resolve the two needs_review LCA matches (Sierra, Basis AI)
+
+Sierra and Basis AI each had a fuzzy LCA match that was never individually
+spot-checked against real `job_title`/`worksite` rows. Their live Ashby
+boards were already verified (`sierra` 209 jobs, `basis-ai` 36) — only the
+LCA sponsorship evidence was open.
+
+### (a) Sierra → matched "Blue Sierra, Inc."
+
+**Matched record:** `BLUE SIERRA` — "Blue Sierra, Inc.", 2 filings, both
+"Software Engineer", San Francisco CA, $206,315/yr, Certified, Dec 2024.
+SF + SWE + high comp *looks* consistent with Sierra AI — but "Blue
+Sierra" is a distinct name (substantive extra word, not a legal suffix),
+and the match rode the shared token "SIERRA" to a 90.9 score.
+
+**What the real Sierra AI files as:** searching all `%SIERRA%` employers
+turned up **"Sierra Technologies, Inc." — 14 certified filings**: "Agent
+Engineer" ×3, "Research Engineer", "Engineer, Platform Engineering",
+"Product Manager", "Commercial Counsel", "Security and Compliance
+Manager", "Engineer" ×4; San Francisco (13) + New York (1); wages
+$150,000–$310,000; 2024–2025. "Agent Engineer" is Sierra AI's signature
+role title; SF HQ + NYC office; founded 2023 and scaled fast — this is
+unmistakably Bret Taylor / Clay Bavor's Sierra (sierra.ai). The fuzzy
+matcher never picked it because `token_set_ratio("SIERRA","SIERRA
+TECHNOLOGIES")` ≈ 66 < the 88 threshold, so "BLUE SIERRA" (90.9) won.
+
+**Verdict: the matched record (Blue Sierra, Inc.) is a FALSE POSITIVE,
+but Sierra AI is a CONFIRMED genuine LCA sponsor** under "Sierra
+Technologies, Inc." (14 filings). Fixed by curating a
+`sponsor_name_overrides` row (`sierra` → `SIERRA TECHNOLOGIES`) — the
+project's designated manual-correction mechanism, used exactly as the
+pre-existing `kraken` entry was; `find_matching_employers()` already
+checks that table first, so no logic changed. `find_matching_employers("Sierra")`
+now returns `SIERRA TECHNOLOGIES` (100, override). Sierra's verdict in
+`scratch_startup_sponsor_candidates.json` is now `verified` (14 filings).
+
+### (a) Basis AI → matched "Basis LLC"
+
+**Matched record:** `BASIS` — "Basis LLC", 2 filings (one posting,
+dual-filed), "Strategic Business Design Manager", New York NY, $122,000/yr,
+Certified, Jul 2024.
+
+**Reasoning it is NOT the AI-accounting startup Basis (getbasis.ai):**
+1. **"LLC".** Basis raised $100M from Khosla Ventures / Accel / GV at a
+   >$1B valuation — institutional-VC-backed startups are Delaware
+   C-corps, essentially never LLCs (an LLC can't cleanly issue the
+   preferred stock / option pool VCs require).
+2. **The role.** "Strategic Business Design Manager" is not a role Basis
+   hires — its actual open roles (its own Ashby board) are "Member of
+   Technical Staff", "Member of Accounting Staff", "Deployed Intelligence
+   Strategist", "Sales Engineer, Accounting Solutions", "Account
+   Executive". "Strategic Business Design Manager" reads like a
+   design/innovation consultancy.
+3. **Wage.** $122k for a "Manager" in NYC is low for a company that just
+   raised $100M.
+4. **No real match exists.** A full scan of `employer_name` for "Basis
+   AI", "Basis Technologies", "Basis Platform", "Basis, Inc." / "Basis
+   Inc" returned **nothing**. The only `%BASIS%` employers are BASIS
+   RESEARCH INSTITUTE (a separate cognitive-science nonprofit), BASIS
+   VECTORS, BASIS SOFTWARE, BASIS GLOBAL TECHNOLOGIES, BASIS EDUCATIONAL
+   GROUP, IBASIS — none the accounting startup.
+Only the NYC worksite lines up, and NYC is a huge hub.
+
+**Verdict: FALSE POSITIVE. No LCA sponsorship evidence exists for Basis
+AI under any reasonable name variant.** Moved to
+`_CONFIRMED_FALSE_POSITIVE` in `scripts/discover_startup_sponsors.py`;
+verdict is now `false_positive`. **Not stored, will not be stored.**
+
+### (b) Sierra — onboarded + scraped
+
+`scripts/discover_and_store_ashby.py --commit --confirmations …` re-run
+(unchanged): Sierra now `lca=verified`, resolves `sierra` at `high`
+confidence via a `full-slug` candidate → **gate auto-pass → stored**
+(`name`/`ats_token` = `sierra`, `careers_url` = jobs.ashbyhq.com/sierra).
+1 row inserted.
+
+`scripts/scrape_ashby.py sierra` via the `app` Docker image: **209
+`job_postings` rows**, `item_scraped_count: 209`, `finish_reason:
+finished`, no errors.
+
+**Live cross-check** — `jobs.ashbyhq.com/sierra` header reads **"Open
+Positions (209)"**, exact match. Board is unmistakably Sierra AI:
+departments "Agent Engineering" / "Agent Product Management" / "Agent
+Strategist", roles "Software Engineer, Agent", "AI Voice Designer",
+"Executive Assistant, Office of the Co-Founders"; SF 119 / NYC 61 /
+London 39; comp $180K–$390K (consistent with the LCA $150K–$310K base).
+Exact title matches DB↔board: "AI Voice Designer", "Accounting Lead",
+"Agent Experience Designer, Voice (Multilingual)", "Enterprise Sales
+Engineer".
+
+### (c) Basis AI — NOT stored
+
+Confirmed: `select count(*) from companies where name ilike '%basis%'` →
+**0**. Basis AI is excluded (`load_candidates()` in the onboarding gate
+only admits `verified` / `needs_review`; it is now `false_positive`, so
+it drops out of the population entirely).
+
+### (d) Zero-NULL (direct query, no backfill)
+
+```
+sierra rows: 209   NULL is_relevant: 0   NULL embedding: 0
+```
+
+### (e) Verification
+
+- **Full suite: 182 passed** (unchanged).
+- **Row counts** — before: `companies` 667, `job_postings` 78,936.
+  After: `companies` 668 (+1; 28 `ashby`), `job_postings` 79,145 (+209).
+- `sponsor_name_overrides` now has 2 rows (`kraken`, `sierra`). No other
+  company touched. Fuzzy-matching logic, the Ashby discovery script, and
+  the onboarding gate's confidence rules were not modified — only a
+  data-table row was added and two per-company spot-check verdicts in the
+  sourcing script updated.
+- Files: `scripts/discover_startup_sponsors.py` (verdict dicts);
+  `sponsor_name_overrides` DB row; regenerated (gitignored)
+  `scratch_startup_sponsor_candidates.json`; CLAUDE.md, SESSIONS.md.
+
+**All 33 candidates are now resolved: 32 confirmed genuine sponsors (31 +
+Sierra) — all onboarded except Retool (no live Ashby board) — and 1
+confirmed false positive (Basis AI), permanently excluded.**

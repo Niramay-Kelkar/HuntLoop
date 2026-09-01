@@ -1531,10 +1531,31 @@ conventions" and SESSIONS.md for the real current state).
   NULL is_relevant/embedding**. Live cross-check: `jobs.ashbyhq.com/cursor`
   404s (Cursor keeps the hosted board unlisted, embeds it on
   cursor.com/careers) but cursor.com/careers renders the same `cursor`
-  jobBoardName data — 119 listings, exact title matches. All 32 resolvable
-  LCA-verified startups now onboarded; only Sierra + Basis AI (LCA
-  `needs_review`, held by design) and Retool (no live Ashby board) remain
-  out. Now 27 `ashby` companies.
+  jobBoardName data — 119 listings, exact title matches.
+  **Follow-up 2026-09-01 — the two `needs_review` LCA matches resolved
+  (see SESSIONS.md "Resolve the two needs_review LCA matches").**
+  - **Sierra:** the fuzzy hit "Blue Sierra, Inc." (2 filings, generic SWE
+    role) is a FALSE POSITIVE, but the real Sierra AI is a genuine sponsor
+    filing as **"Sierra Technologies, Inc." — 14 certified filings**
+    ("Agent Engineer" ×3, "Research Engineer", etc.; SF+NYC; $150K–310K).
+    The matcher missed it (`token_set_ratio("SIERRA","SIERRA
+    TECHNOLOGIES")` < 88). Fixed with a `sponsor_name_overrides` row
+    (`sierra` → `SIERRA TECHNOLOGIES`) — the designated manual-correction
+    mechanism, same as the pre-existing `kraken` entry; no logic changed.
+    Sierra → `verified`, auto-passed the gate, **stored + scraped: 209
+    rows, 0 NULL is_relevant/embedding**. Live cross-check:
+    `jobs.ashbyhq.com/sierra` "Open Positions (209)", board is
+    unmistakably Sierra AI ("Agent Engineering" dept, "Software Engineer,
+    Agent", "Executive Assistant, Office of the Co-Founders").
+  - **Basis AI:** the fuzzy hit "Basis LLC" (2 filings, "Strategic
+    Business Design Manager", NYC, $122k) is a CONFIRMED FALSE POSITIVE —
+    an "LLC" (Basis raised $100M and is a C-corp), not a role Basis hires,
+    and **no "Basis AI/Technologies/Platform/Inc" exists anywhere in
+    `lca_disclosures`**. No sponsorship evidence → **not stored, stays
+    excluded** (`discover_startup_sponsors.py` verdict `false_positive`).
+  `sponsor_name_overrides` now has 2 rows (`kraken`, `sierra`). 28 `ashby`
+  companies; only Retool (no live Ashby board) and Basis AI (false
+  positive) remain out of the 33.
 
 ## How to run things
 

@@ -132,6 +132,17 @@ _CONFIRMED_FALSE_POSITIVE = {
     "Clay": ("CLAY COUNTY HEALTHCARE AUTHORITY", "an Alabama county healthcare authority - not Clay the CRM startup"),
     "Harvey": ("GREGORY T HARVEY DMD", "an individual dentist's practice - not Harvey the legal-AI startup"),
     "Mercury": ("HDS MERCURY", "computer-vision/industrial-engineer roles (Jersey City/LA) - a logistics-automation employer, not Mercury the fintech bank"),
+    # 2026-09-01 needs_review resolution: the fuzzy match "BASIS" ("Basis LLC",
+    # 2 filings, "Strategic Business Design Manager", NYC, $122k) is NOT the
+    # VC-backed AI-accounting startup Basis (getbasis.ai). A company that
+    # raised $100M from Khosla/Accel/GV is a Delaware C-corp, never an "LLC";
+    # "Strategic Business Design Manager" is not a role Basis hires (its
+    # actual roles are "Member of Technical/Accounting Staff", "Deployed
+    # Intelligence Strategist"); $122k is low for a funded AI startup; and NO
+    # "Basis AI"/"Basis Technologies"/"Basis Platform"/"Basis, Inc." exists
+    # anywhere in lca_disclosures. Only the NYC worksite lines up, and NYC is
+    # a huge hub. -> confirmed false positive, stays excluded.
+    "Basis AI": ("BASIS", "'Basis LLC' (2 filings, 'Strategic Business Design Manager', NYC, $122k) is not the VC-backed AI-accounting startup Basis - it's an LLC (Basis raised $100M and is a C-corp), the role isn't one Basis hires, and no 'Basis AI/Technologies/Platform' exists anywhere in lca_disclosures"),
 }
 # All 31 fuzzy matches accepted as "verified" have now been individually
 # spot-checked against real job_title/worksite rows (batch 1 in the
@@ -158,10 +169,22 @@ _CONFIRMED_FALSE_POSITIVE = {
 # alone (no obvious mismatch, but no strong positive signal either) -
 # reported separately, not folded into the "ready" list without a human
 # glance.
-_NEEDS_MANUAL_REVIEW = {
-    "Sierra": ("BLUE SIERRA", "San Francisco Software Engineer roles are consistent with Sierra AI's profile, but 'Blue Sierra' isn't an obvious legal-name variant of 'Sierra' - not independently confirmed"),
-    "Basis AI": ("BASIS", "'BASIS' (2 filings, a 'Strategic Business Design Manager' role in NYC) plausibly is the NYC accounting-automation startup Basis, but 'BASIS' is a common word and the match can't be confirmed from the filing data alone"),
-}
+# 2026-09-01: both prior needs_review entries were resolved with real
+# job_title/worksite evidence.
+#  * Sierra: the fuzzy hit "BLUE SIERRA" IS a false positive (a distinct SF
+#    company, one generic SWE role), BUT the real Sierra AI (sierra.ai,
+#    Bret Taylor / Clay Bavor) is a genuine, strongly-evidenced sponsor
+#    filing as "Sierra Technologies, Inc." (14 certified filings: "Agent
+#    Engineer" x3, "Research Engineer", "Engineer, Platform Engineering",
+#    "Product Manager", "Commercial Counsel"; SF + NYC; $150k-310k). The
+#    matcher missed it because token_set_ratio("SIERRA","SIERRA
+#    TECHNOLOGIES") < 88. Fixed with a sponsor_name_overrides row
+#    (sierra -> SIERRA TECHNOLOGIES) - the project's designated
+#    manual-correction mechanism, same as the pre-existing kraken entry -
+#    so find_matching_employers("Sierra") now resolves correctly and
+#    Sierra's verdict is "verified".
+#  * Basis AI: confirmed false positive (see _CONFIRMED_FALSE_POSITIVE).
+_NEEDS_MANUAL_REVIEW: dict[str, tuple[str, str]] = {}
 
 
 def filing_count(session: Session, employer_name_normalized: str) -> int:
