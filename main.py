@@ -14,6 +14,7 @@ from huntloop.spiders.greenhouse_spider import GreenhouseScraper
 from huntloop.spiders.lever_spider import LeverScraper
 from huntloop.spiders.workday_spider import WorkdayScraper
 from huntloop.spiders.smartrecruiters_spider import SmartRecruitersScraper
+from huntloop.spiders.ashby_spider import AshbyScraper
 from huntloop.settings import DATABASE_URL
 from huntloop.db_models import Company
 from huntloop import metrics
@@ -23,13 +24,14 @@ from sqlalchemy.orm import sessionmaker
 logger = logging.getLogger(__name__)
 
 # Only platforms with an implemented spider. Companies detected as some
-# other platform (e.g. ashby, workday) or with ats_platform "unknown"/NULL
+# other platform (e.g. an unimplemented one) or with ats_platform "unknown"/NULL
 # are skipped, not silently dropped - see run_multi_ats_scrape() below.
 SPIDERS_BY_PLATFORM = {
     "greenhouse": GreenhouseScraper,
     "lever": LeverScraper,
     "workday": WorkdayScraper,
     "smartrecruiters": SmartRecruitersScraper,
+    "ashby": AshbyScraper,
 }
 
 
@@ -67,7 +69,7 @@ def run_multi_ats_scrape():
     its detected ATS platform (companies.ats_platform, populated by
     scripts/detect_and_store_ats.py), running each implemented spider once
     with the full list of company tokens for that platform. Platforms
-    without an implemented spider (e.g. ashby, workday) and companies with
+    without an implemented spider and companies with
     no detected platform (ats_platform "unknown" or NULL) are skipped with
     a clear log message, not silently dropped or crashed on. At the end
     of the run (success or failure), this run's metrics (jobs scraped/
