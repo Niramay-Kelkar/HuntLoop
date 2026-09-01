@@ -13,6 +13,7 @@ from scrapy.utils.project import get_project_settings
 from huntloop.spiders.greenhouse_spider import GreenhouseScraper
 from huntloop.spiders.lever_spider import LeverScraper
 from huntloop.spiders.workday_spider import WorkdayScraper
+from huntloop.spiders.smartrecruiters_spider import SmartRecruitersScraper
 from huntloop.settings import DATABASE_URL
 from huntloop.db_models import Company
 from huntloop import metrics
@@ -28,6 +29,7 @@ SPIDERS_BY_PLATFORM = {
     "greenhouse": GreenhouseScraper,
     "lever": LeverScraper,
     "workday": WorkdayScraper,
+    "smartrecruiters": SmartRecruitersScraper,
 }
 
 
