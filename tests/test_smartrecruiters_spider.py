@@ -135,3 +135,15 @@ def test_parse_detail_falls_back_to_list_posting_fields():
     assert item["job_locations"] == ["Remote"]
     assert item["date_posted"] == "2026-01-01T00:00:00.000Z"
     assert item["job_description"] is None
+
+
+def test_parse_detail_long_companyid_uses_sr_prefix_to_fit_varchar50():
+    spider = SmartRecruitersScraper(companies=["internationalqualityhomecarecorporation"])
+    body = {"id": "743999659167870", "name": "Personal Care Assistant",
+            "postingUrl": "https://jobs.smartrecruiters.com/x/743999659167870"}
+    req = Request(f"{API}/companies/internationalqualityhomecarecorporation/postings/743999659167870",
+                  meta={"company_id": "internationalqualityhomecarecorporation", "list_posting": {}})
+    resp = TextResponse(req.url, body=json.dumps(body).encode(), request=req, encoding="utf-8")
+    item = list(spider.parse_detail(resp))[0]
+    assert item["job_id"] == "sr_743999659167870"
+    assert len(item["job_id"]) <= 50

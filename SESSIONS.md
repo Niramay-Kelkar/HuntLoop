@@ -6235,3 +6235,211 @@ discovery gate).**
 - Note: an unrelated working-tree deletion of `huntloop-claude-code-prompts.md`
   is present (fallout from a manual revert of the earlier stale-lock
   commit); left as-is, not part of this change.
+
+---
+
+## 2026-09-01 — Build the SmartRecruiters spider
+
+Turned the 2026-08-31 discovery proof into a production spider, a real
+confidence-gated onboarding step, and a full-population onboarding +
+scrape run. Existing Greenhouse/Lever/Workday spiders and the discovery
+resolver's core logic untouched; the ingestion pipeline's
+classification/embedding untouched (only confirmed it fires for the new
+source).
+
+### 1. Spider (`src/huntloop/spiders/smartrecruiters_spider.py`)
+
+`SmartRecruitersScraper`, `name = "smartrecruiters_api"`, same shape as
+the other three. `GET /v1/companies/{companyId}/postings?limit=100&offset=N`
+paginated on `totalFound`; then one `GET .../postings/{id}` per posting
+(the list response has structured metadata but no description, which the
+relevance filter + embedding need). Yields plain `JobPostingItem`s — the
+source-agnostic `JobDataPipeline` does company/source rows, dedup on the
+namespaced `job_id` (`{companyId}_{postingId}`), `is_relevant` + the
+resume-match `embedding` at insert. Zero SmartRecruiters-specific
+pipeline wiring.
+
+- **`companies.name` == `ats_token` == the lower-cased companyId.**
+  SmartRecruiters lookup is case-insensitive (verified live:
+  `cliffordchance` / `CliffordChance` / `CLIFFORDCHANCE` all return the
+  same board), so no case to preserve and no `careers_url` / 3-tuple
+  like Workday. `main.py`'s existing `else` branch
+  (`process.crawl(spider, companies=tokens)`) handles it after adding
+  `"smartrecruiters": SmartRecruitersScraper` to `SPIDERS_BY_PLATFORM` -
+  no Workday-style special branch needed.
+- **`ROBOTSTXT_OBEY: False` in this spider's `custom_settings` only.**
+  `api.smartrecruiters.com/robots.txt` is `Disallow: /` for `*` (with an
+  `Allow: /v1/companies/` carve-out scoped to `LinkedInBot`). The
+  Posting API is SmartRecruiters' *documented public read API*
+  (developers.smartrecruiters.com) - the feed LinkedIn/Indeed/Google
+  Jobs consume - so this spider is an API client, like the GH/Lever/
+  Workday spiders are for their vendors' APIs. Found the hard way: the
+  first scrape attempt logged thousands of `Forbidden by robots.txt` and
+  scraped nothing. Project-wide `ROBOTSTXT_OBEY=True` unchanged.
+- **Graceful failure (task item 4):** `totalFound: 0` or a non-JSON /
+  malformed response -> `logger.warning` with the companyId + reason and
+  a `scrape_errors_total` metric, spider continues. A stale/vestigial
+  board that *does* return postings is scraped as-is - staleness is a
+  downstream relevance concern, the spider doesn't editorialise.
+- Tests: `tests/test_smartrecruiters_spider.py`, 9 cases (pagination
+  fan-out, later-page no-refan, empty-board skip, bad JSON, item build
+  incl. the `companyDescription`-dropped description join, list-posting
+  fallback, missing-id skip, long-companyId `sr_` fallback) - real-shaped
+  API JSON, no network.
+
+### 2. Onboarding gate (`scripts/discover_and_store_smartrecruiters.py`)
+
+Reuses `scripts/discover_smartrecruiters_id.py` unchanged. Population:
+every distinct DOL sponsor employer with >= 20 LCA filings, minus those
+already resolved to Greenhouse/Lever and minus existing `companies`
+rows - 8,113 employers (same "neither" set the Workday feasibility work
+used).
+
+**The gate is enforced, not documented:** `--commit` writes a
+`companies` row ONLY when
+
+  - the resolver returned `confidence == "high"` **AND** the winning
+    candidate was a real base slug (`full-slug` / `core-slug`), OR
+  - the resolved companyId appears in a `--confirmations` file (explicit
+    human approval).
+
+The collision-suffix carve-out is the important addition (an onboarding
+policy layered on the reused resolver, not a resolver change): a
+`{name}2` / `{name}Inc` companyId is issued by SmartRecruiters only when
+`{name}` is already taken, so a big enterprise (`APPLE` -> `apple2`,
+`ACCENTURE` -> `accenture1`, `INFOSYS LIMITED` -> `infosys2`) reachable
+*only* at a suffixed id is, in practice, an abandoned years-old
+free-trial tenant - the resolver still says "high" because whoever made
+the trial named the board correctly. This treats a `suffix-variant` win
+exactly the way the resolver already treats its own weak
+`first-word-only` / `acronym` candidates ("loose - confirm"). Without it,
+332 such tenants would have auto-onboarded as junk. `--from-report`
+re-buckets + commits from the saved scan JSON so the ~3h network scan
+isn't repeated.
+
+### 3. Real onboarding run (task item a) — full 8,113-employer population
+
+| bucket | count |
+|---|---|
+| population evaluated | **8,113** |
+| resolved to a live companyId (slug-guess) | **715** |
+| — gate PASS, auto-stored (high conf + real base slug) | **227** |
+| — gate HOLD, needs human confirmation | **488** |
+|    · of which resolver-"high" but only a collision-suffix match | 332 |
+|    · resolver medium / "loose" | 111 |
+|    · resolver low-suspect | 45 |
+| — explicitly human-confirmed this run (`--confirmations`) | **5** (`eurofins` ×2 DOL entities, `nagarro1`, `nationalvision1`, `collabera2`) |
+| — still blocked (not confirmed) | 483 |
+| unresolved (no live board on any candidate) | **7,398** |
+| already in `companies` (skipped) | 2 |
+| **`companies` rows stored** (224 distinct: 220 auto + 4 confirmed ids) | **224** |
+
+Net: `companies` 417 -> 641 (`smartrecruiters` platform: 224).
+Onboarding yield ≈ 227 / 8,113 ≈ 2.8% of the "neither" set, in line with
+the earlier ~4% SR-prevalence estimate.
+
+**Gate correctly blocking (task item d)** — real examples from the run
+(all held, none auto-stored):
+
+```
+  'APPLE'                -> 'apple2'         (board 'Apple', 1 posting,  high) -- collision-suffix, abandoned 2016 trial
+  'TESLA'                -> 'tesla1'         (board 'Tesla', 1 posting,  high) -- collision-suffix, 2017 solar-sales trial
+  'INFOSYS LIMITED'      -> 'infosys2'       (board 'Infosys', 7,       high) -- collision-suffix, 2017-2020 data
+  "DOMINO'S PIZZA"       -> 'dominos'        (board "Domino's", 24664, medium loose)   -- real, but a bare-first-word guess; needs a human
+  'RED HIBBERT GROUP'    -> 'rhg'            (board 'Radisson Hotel Group', 932, medium) -- acronym collision, wrong company
+  'EQUINOX IT SOLUTIONS' -> 'equinox'        (board 'Equinox' [the gym], 720, medium)   -- wrong entity
+  8x  'S** G** S**'      -> 'sgs'            (board 'SGS' [inspection giant], ~4,397)    -- acronym collision across 8 unrelated IT firms
+```
+
+The 4 human-confirmed ids were each checked against their live board
+first: `eurofins` (board "Eurofins", 2,529 postings, released 2026-09),
+`nagarro1` ("Nagarro", 880, 2026-08-31), `nationalvision1` ("National
+Vision", 854, 2026-09), `collabera2` ("Collabera", 1,683 - a real IT
+staffing firm's board, but stale 2017 data; stored anyway per item 4).
+
+**Residual gate limitation (honest):** `citibankna` (7 postings, all
+2015, titles are Indonesian spam like "service solahart jakarta ...")
+passed on a `full-slug` high-confidence match - a squatter tenant whose
+board display name ("Citibank N.A") matches the DOL employer, the same
+failure mode as the proof step's `sia` -> Sia Partners. Its postings are
+neutralised downstream (`is_relevant` comes back false). A future
+onboarding-gate freshness signal (newest posting age) would catch this
+class; deliberately not added here since the task scopes staleness
+filtering to a separate downstream step.
+
+### 4. Real scrape (task items b, c)
+
+Ran via `docker compose run --rm` on the pre-built `huntloop-app` image
+(torch-capable) with a `src`/`scripts` volume overlay for the new code.
+(A `--build` attempt exhausted the host disk - it was already at 99% -
+and crashed Docker Desktop; recovered with `docker builder prune -af` +
+image/container prune, ~58 GB freed, disk to 85%, then ran off the cached
+image.)
+
+- `scrapy` stats: `item_scraped_count` **19,081**, `downloader/request_count`
+  19,467, `elapsed_time_seconds` 10,242 (~2.85 h at ~80 rows/min, the
+  per-row torch embedding being the limiter), `finish_reason: finished`,
+  `log_count/ERROR: 1`.
+- **`job_postings` 55,115 -> 75,809.** SmartRecruiters-attributable:
+  **19,165 postings across all 224 companies**, **0 duplicate `job_url`s**.
+  (The extra ~1,500 non-SR rows are a concurrent launchd 3 am
+  orchestrator cycle - GH +544 / Workday +948 / Lever +37 - all genuine
+  new postings, dedup clean; SmartRecruiters is now part of that daily
+  loop since it's in `SPIDERS_BY_PLATFORM`.)
+- **(c) zero-NULL proof** - direct DB query over the 19,165 SR rows:
+  `is_relevant IS NULL` -> **0**, `embedding IS NULL` -> **0**,
+  `date_posted IS NULL` -> **0**. No `backfill_relevance.py` /
+  `backfill_embeddings.py` run - the pipeline's `_classify_and_embed`
+  fired at insert for every row, same standard as the Workday rows.
+  6,330 SR rows classified `is_relevant = true` (33%).
+- **The 1 `ERROR`**: `internationalqualityhomecarecorporation` +
+  15-digit posting id = 54 chars, over `job_postings.gh_job_id`'s
+  `varchar(50)`. The pipeline caught the `StringDataRightTruncation`,
+  rolled back that one row, logged it, and finished normally (exit 0) -
+  graceful, same class as the Workday `job_locations` `varchar(255)`
+  overflow. Fixed spider-side: for a companyId long enough to overflow,
+  `job_id` falls back to `sr_{postingId}` (SmartRecruiters posting ids
+  are globally unique, so it still can't cross-source collide);
+  re-scraped that one company (its 1 posting now stored, `is_relevant` +
+  `embedding` populated). Every other companyId fits, so the 19,164
+  already-scraped rows keep their `{companyId}_{postingId}` ids.
+- **(b) live cross-checks** (5 - task asked 3-5):
+  - `careers.smartrecruiters.com/nationalvision1` rendered board -
+    "Sales Associate – Optical - Part Time", "Sales Associate -
+    Keyholder", "Optometrist" - match the API's first postings.
+  - `careers.smartrecruiters.com/nagarro1` rendered board - Nagarro's
+    distinctive "Staff Engineer / Senior Staff Engineer" title ladder
+    ("...DevOps", "...CRM Dynamics", "...Salesforce Architect") - matches.
+  - DB row vs. live posting page `<title>` + `itemprop="datePosted"`,
+    exact to the millisecond:
+    - `hitachisolutions` "Jr. Finance Analyst" -> "Hitachi Solutions Jr.
+      Finance Analyst", `2026-08-31T08:46:56.970Z`.
+    - `publicstorage` "Customer Service - Self Storage Manager" ->
+      "Public Storage Customer Service - Self Storage Manager",
+      `2026-09-01T11:25:59.088Z`.
+    - `servicenow` "Research Engineer/Scientist" -> "ServiceNow Research
+      Engineer/Scientist", `2026-09-01T05:01:27.643Z`.
+
+### Verification
+
+- **(e) full suite: 175 passed** (166 baseline + 9 new
+  `test_smartrecruiters_spider.py`). An earlier run showed 172/3 - the 3
+  were `tests/test_backfill_lock.py` failing because the legitimately
+  in-progress daily skills-matching backfill (the 3 am launchd
+  `run_orchestrator_cron.sh` stage 2, processing the ~26 k backlog my SR
+  scrape had just grown) held the global advisory lock `1751937901`
+  those tests need exclusively. Re-ran after that backfill finished on
+  its own -> all 175 green. No backfill/lock code was touched by this
+  task; the active backfill was left to run rather than killed for a
+  green number.
+- **(e) row counts** - before: `job_postings` 55,115, `companies` 417.
+  After onboarding: `companies` 641 (224 `smartrecruiters`). After
+  scrape: `job_postings` 75,809 (+19,165 SmartRecruiters, rest a
+  concurrent daily cycle). This task deliberately adds real rows.
+- **(a) onboarding**: table in §3.  **(d) gate blocking**: examples in §3.
+- Files: `src/huntloop/spiders/smartrecruiters_spider.py`,
+  `scripts/discover_and_store_smartrecruiters.py`,
+  `scripts/scrape_smartrecruiters.py`,
+  `tests/test_smartrecruiters_spider.py` (new); `main.py` (one dict
+  entry); CLAUDE.md, SESSIONS.md. `scratch_smartrecruiters_discovery.json`
+  (gitignored) holds the full 8,113-row scan.

@@ -1311,9 +1311,41 @@ nothing scrapes them; treat that as planned, not present.
     redirect to `community.workday.com/maintenance-page`). Re-run
     discovery for these two when Workday brings the tenants back online.
 
-- **SmartRecruiters companyId discovery proven 2026-08-31 (see SESSIONS.md
-  "Prove SmartRecruiters companyId discovery") — proof/discovery step
-  only, NO production spider built, NO DB writes.** The postings API
+- **SmartRecruiters spider BUILT + onboarded 2026-09-01 (see SESSIONS.md
+  "Build the SmartRecruiters spider").** `SmartRecruitersScraper`
+  (`src/huntloop/spiders/smartrecruiters_spider.py`, name
+  `smartrecruiters_api`) pages `GET /v1/companies/{companyId}/postings`
+  (`limit=100` + `offset`, stop at `totalFound`) then one
+  `GET .../postings/{id}` per posting for the description (the list
+  response has none). Yields plain `JobPostingItem`s through the same
+  source-agnostic `JobDataPipeline` — `is_relevant` + `embedding` are
+  computed at insert like every other source, zero SmartRecruiters-
+  specific wiring, zero manual backfill. `companies.name` == `ats_token`
+  == the lower-cased companyId (SR lookup is case-insensitive, verified);
+  no `careers_url` / 3-tuple needed (unlike Workday). Added to
+  `main.py`'s `SPIDERS_BY_PLATFORM`, so the daily orchestrator picks it
+  up automatically; `scripts/scrape_smartrecruiters.py` is the scoped
+  entrypoint. **`custom_settings` sets `ROBOTSTXT_OBEY: False` for this
+  spider only** — `api.smartrecruiters.com/robots.txt` is `Disallow: /`
+  for `*`, but the Posting API is SR's documented public read feed (the
+  same one LinkedIn/Indeed/Google Jobs consume); the project-wide
+  `ROBOTSTXT_OBEY=True` is unchanged for everything else. An empty /
+  erroring board is skipped with a logged reason + a `scrape_errors`
+  metric, never a crash; a stale-but-real board is scraped as-is
+  (staleness is a downstream relevance concern).
+  **Onboarding gate: `scripts/discover_and_store_smartrecruiters.py`**
+  reuses `discover_smartrecruiters_id.py` unchanged and enforces a REAL
+  gate before writing a `companies` row: auto-store ONLY a resolver
+  `confidence == "high"` reached via a non-collision candidate
+  (`full-slug` / `core-slug`); a `name+2` / `name+Inc` collision-suffix
+  win, or `first-word-only` / `acronym`, or `medium`/`low` confidence,
+  is held and stored only if its id is listed in a `--confirmations`
+  file (explicit human approval). `--from-report` re-buckets/commits
+  from the saved scan JSON without re-running the ~3h network scan.
+  Re-run cadence: after each quarterly DOL LCA ingest, like
+  `detect_ats_for_sponsors.py`.
+  **The earlier proof step (2026-08-31, kept below for context):** the
+  postings API
   (`GET api.smartrecruiters.com/v1/companies/{companyId}/postings`) 200s
   with `totalFound: 0` for an unknown id, so a live call returning
   `totalFound > 0` is the only "this id is real" signal.
@@ -1342,6 +1374,18 @@ nothing scrapes them; treat that as planned, not present.
   a human confirms), mirroring the Workday `{tenant,dc,site}` onboarding
   gate; SR's ~4% prevalence in the "neither" set means build it but don't
   over-invest.
+  **Real onboarding run (2026-09-01, full 8,113-employer "neither"
+  population):** slug-guessing resolved a live board for 715; the gate
+  auto-passed 227 (high confidence via a real base slug), held 488 for
+  review (332 of them resolver-"high" but only matched via a `name+2`
+  collision suffix — overwhelmingly abandoned free-trial tenants like
+  `apple2` / `tesla1` / `infosys2`, all 2015-2017 data), and 5 were
+  explicitly human-confirmed. 224 `companies` rows stored. One residual
+  gate limitation: a squatter tenant whose board name matches the
+  employer (`citibankna`, 2015-era Indonesian spam postings) passed on a
+  full-slug high-confidence match — its junk postings are neutralised
+  downstream by the relevance filter (`is_relevant=False`); a future
+  onboarding-gate freshness signal would catch it.
 
 ## How to run things
 

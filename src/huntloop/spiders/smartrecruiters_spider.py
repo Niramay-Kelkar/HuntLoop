@@ -204,8 +204,13 @@ class SmartRecruitersScraper(scrapy.Spider):
         item = JobPostingItem()
         # Namespaced so a bare SmartRecruiters posting id can't false-
         # collide with another source's id in the pipeline's global dedup.
-        # job_url stays the canonical unique key.
-        item["job_id"] = f"{company_id}_{posting_id}"
+        # job_url stays the canonical unique key. gh_job_id is varchar(50),
+        # so for a long companyId (e.g.
+        # "internationalqualityhomecarecorporation_...") fall back to an
+        # "sr_" prefix - SmartRecruiters posting ids are globally unique,
+        # so it still can't collide with another source.
+        namespaced = f"{company_id}_{posting_id}"
+        item["job_id"] = namespaced if len(namespaced) <= 50 else f"sr_{posting_id}"
         item["job_title"] = detail.get("name") or list_posting.get("name")
         item["job_url"] = detail.get("postingUrl") or list_posting.get("postingUrl") or response.url
         item["job_description"] = self._description(detail)
