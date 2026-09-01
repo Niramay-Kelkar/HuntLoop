@@ -1466,6 +1466,21 @@ nothing scrapes them; treat that as planned, not present.
   verified names are the input to a future Ashby-discovery-then-onboard
   pass, not yet run.** `scratch_startup_sponsor_candidates.json`
   (gitignored) holds the full results.
+  **Follow-up 2026-09-01 — all 31 matches now individually spot-checked
+  (verification only, no DB writes).** The 14 accepted on distinctive-name
+  grounds in the sourcing pass (PLAID, UIPATH, RETOOL, AIRWALLEX US,
+  REPLIT, SUBSTACK, VERCEL, DEEL, OPENAI, DOCKER, ELEVEN LABS, AGAVE TECH,
+  SUPABASE, ESSENTIAL AI LABS) were each checked against real
+  `job_title`/`worksite` rows — **all 14 confirmed, zero new false
+  positives**, so the verified count stays **31** (unchanged). **Zapier
+  and PostHog ("no LCA match") were investigated directly:** a full-table
+  scan of `employer_name`/`employer_name_normalized`/`trade_name_dba` for
+  any `ZAPIER`/`POSTHOG` variant returned nothing, and a low-threshold
+  fuzzy pass found only unrelated companies (nearest: `ZPAPER` 83,
+  `SHOP PO` 71) — a genuine true negative (both are fully-remote/
+  distributed employers that don't sponsor US visas), not a matcher miss.
+  Fuzzy-matching logic (token_set_ratio / threshold 88 /
+  `sponsor_name_overrides`) was not modified.
 
 ## How to run things
 

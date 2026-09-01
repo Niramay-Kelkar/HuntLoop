@@ -6750,3 +6750,72 @@ Basis AI (→ BASIS).
 - Files: `scripts/discover_startup_sponsors.py` (new),
   `scratch_startup_sponsor_candidates.json` (gitignored, full results),
   SESSIONS.md, CLAUDE.md.
+
+---
+
+## 2026-09-01 — Finish spot-checking the startup-sponsor candidates + resolve Zapier/PostHog (verification only — no DB writes)
+
+Follow-up to the sourcing task: individually spot-check every LCA match
+that hadn't been checked yet, and stop treating Zapier/PostHog's "no
+match" as final without investigating.
+
+### (a) Per-match spot-check — the 14 previously-unchecked matches
+
+Pulled real `job_title` / `worksite_city` / `worksite_state` rows for each
+match not covered by the first batch. **All 14 confirmed correct — zero
+new false positives.**
+
+| Candidate | Matched sponsor (filings) | Evidence | Verdict |
+|---|---|---|---|
+| Plaid | PLAID (108) | SF: TPM-Platform, "Security Engineer, GRC", Fraud & Abuse Ops Lead | confirmed |
+| UiPath | UIPATH (101) | Bellevue WA / NYC: Software Engineer II, Principal Eng Manager, Platform Product Marketing | confirmed |
+| Retool | RETOOL (30) | SF / NYC: Software Engineer, Data Scientist-Product Analytics, Product Designer | confirmed |
+| Airwallex | AIRWALLEX US (29) | SF: Senior/Staff Product Manager, Partner Marketing | confirmed |
+| Replit | REPLIT (13) | Foster City CA (Replit's real HQ): Senior Product Designer, Staff Data Scientist-Growth | confirmed |
+| Substack | SUBSTACK (13) | NYC / LA: Trust & Safety Specialist, Creator Partnerships Manager | confirmed |
+| Vercel | VERCEL (10) | San Jose / Brooklyn: Software Engineer, "DX Engineer, Frameworks" (unmistakably Vercel) | confirmed |
+| Deel | DEEL (10) | NYC / Brooklyn: Director Product, "Global Payroll GTM Operations" (unmistakably Deel) | confirmed |
+| OpenAI | OPENAI (8) | SF / NYC: "Member of Go To Market Staff" (OpenAI's own title convention) | confirmed |
+| Docker | DOCKER (4) | Palo Alto CA: Director Engineering, Software Engineer, VP Corp BD | confirmed |
+| ElevenLabs | ELEVEN LABS (2) | SF: Full Stack Engineer; NYC: Senior Account Executive | confirmed |
+| Agave | AGAVE TECH (2) | SF: Software Engineer, Technical Product Manager | confirmed |
+| Supabase | SUPABASE (1) | Pleasanton CA: "PostgreSQL Expert" (Supabase is a Postgres company) | confirmed |
+| Essential AI | ESSENTIAL AI LABS (1) | SF: "MTS: Machine Learning Infrastructure Engineer" | confirmed |
+
+Combined with the first batch, **all 31 accepted matches are now
+individually spot-checked.**
+
+### (b) Updated verified candidate list
+
+**Before this task: 31 verified. After: 31 verified — unchanged.** No new
+false positives found; nothing removed. The 2 needs-review entries
+(Sierra → BLUE SIERRA, Basis AI → BASIS) and 11 confirmed false positives
+from the prior task are unchanged. The final list stands as recorded in
+the prior SESSIONS entry.
+
+### (c) Zapier / PostHog — real investigation, not "no match" at face value
+
+Direct full-table scan (`employer_name`, `employer_name_normalized`,
+`trade_name_dba`) for any row containing `ZAPIER`, `POSTHOG`, `POST HOG`,
+`POST-HOG`, `ZAPPIER`: **zero rows, all three columns.** Low-threshold
+(70) fuzzy pass surfaced only unrelated companies — nearest to "Zapier"
+is `ZPAPER` (83.3, a healthcare-document company), nearest to "PostHog"
+is `SHOP PO` (71.4). **No plausible legal-entity-name variant exists in
+the full dataset for either.** Both are well-documented fully-remote /
+distributed employers (Zapier's careers materials state it does not
+sponsor US work visas; PostHog is UK-registered and distributed) — this
+is a genuine true negative, not a matcher miss. They stay in the
+"no LCA sponsorship evidence" list and are **not** eligible.
+
+### Verification
+
+- **(d) `companies` table completely unchanged** — 641 rows;
+  `greenhouse` 318 / `smartrecruiters` 224 / `lever` 60 / `workday` 38 /
+  `ashby` 1. `job_postings` 75,809. `sponsor_name_overrides` 1. Nothing
+  added / removed / edited. No Ashby discovery run.
+- **(e) full suite: 175 passed** (unchanged — no application code
+  touched; fuzzy-matching logic untouched).
+- Files: `scripts/discover_startup_sponsors.py` (comments only —
+  spot-check + Zapier/PostHog findings recorded inline),
+  `scratch_startup_sponsor_candidates.json` (unchanged output),
+  SESSIONS.md, CLAUDE.md.

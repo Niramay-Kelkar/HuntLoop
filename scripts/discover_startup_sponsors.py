@@ -133,6 +133,27 @@ _CONFIRMED_FALSE_POSITIVE = {
     "Harvey": ("GREGORY T HARVEY DMD", "an individual dentist's practice - not Harvey the legal-AI startup"),
     "Mercury": ("HDS MERCURY", "computer-vision/industrial-engineer roles (Jersey City/LA) - a logistics-automation employer, not Mercury the fintech bank"),
 }
+# All 31 fuzzy matches accepted as "verified" have now been individually
+# spot-checked against real job_title/worksite rows (batch 1 in the
+# 2026-09-01 sourcing task; batch 2 - PLAID, UIPATH, RETOOL, AIRWALLEX US,
+# REPLIT, SUBSTACK, VERCEL, DEEL, OPENAI, DOCKER, ELEVEN LABS, AGAVE TECH,
+# SUPABASE, ESSENTIAL AI LABS - in the 2026-09-01 follow-up). Batch 2 found
+# zero new false positives: every one had tech-sector job titles at a
+# worksite consistent with the real company (e.g. REPLIT -> Foster City CA
+# product/data roles; SUPABASE -> a "PostgreSQL Expert" role; VERCEL ->
+# "DX Engineer, Frameworks"; OPENAI -> "Member of ... Staff" titles;
+# DEEL -> Global Payroll GTM roles). See SESSIONS.md for the full per-match
+# evidence table.
+#
+# Zapier and PostHog (both "no LCA match") were investigated directly, not
+# accepted at face value: a full-table scan for any employer_name /
+# employer_name_normalized / trade_name_dba containing "ZAPIER" or
+# "POSTHOG" (and spacing/hyphen variants) returned nothing, and a
+# low-threshold fuzzy pass surfaced only unrelated companies (ZPAPER 83,
+# SHOP PO 71). Both are well-documented fully-remote/distributed employers
+# that do not sponsor US work visas - a genuine true negative, not a
+# matcher miss.
+
 # Plausible but not independently confirmable from job-title/worksite data
 # alone (no obvious mismatch, but no strong positive signal either) -
 # reported separately, not folded into the "ready" list without a human
