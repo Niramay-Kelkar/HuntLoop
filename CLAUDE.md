@@ -1386,6 +1386,55 @@ nothing scrapes them; treat that as planned, not present.
   full-slug high-confidence match — its junk postings are neutralised
   downstream by the relevance filter (`is_relevant=False`); a future
   onboarding-gate freshness signal would catch it.
+- **Ashby discovery PROVEN 2026-09-01 (proof/discovery step only — no
+  spider, no DB writes; see SESSIONS.md "Prove Ashby job-board
+  discovery"). Recommendation: GO.** `scripts/discover_ashby_job_board.py`
+  (given a company name, tries ordered name-derived slug candidates —
+  full slug, core slug minus legal suffixes, hyphenated, first-word,
+  acronym, `hq`/`careers`/`1`/`2` variants — and live-checks each against
+  `GET https://api.ashbyhq.com/posting-api/job-board/{slug}`;
+  `--slug` verifies a web-search-found slug the same way). Real response
+  shapes: **unknown slug → HTTP 404 plain "Not Found"; real board → 200
+  `{"jobs":[...],"apiVersion":...}`; real-but-nothing-listed board → 200
+  with `jobs: []`.** So "resolved" = 200 with a NON-EMPTY jobs array;
+  200-but-empty is reported separately as "found, unverifiable". **No
+  pagination** — one response returns every listed job (verified on
+  boards up to 768 jobs; only keys are `jobs`/`apiVersion`, no
+  cursor/offset/nextToken). Each job already carries `descriptionHtml` +
+  `descriptionPlain` + `jobUrl` (`jobs.ashbyhq.com/{slug}/{id}`), so —
+  unlike Workday/SmartRecruiters — a spider needs **no per-job detail
+  fetch**. Confidence signal (same spirit as the SR board-name
+  cross-check): the API response has no org-name field, so the script
+  fetches the public board page `jobs.ashbyhq.com/{slug}` and fuzzy-
+  compares its `<title>`/`og:title` ("<Org> Jobs") to the queried name;
+  a generic/loose-guess slug with a weak name match, an empty board, or a
+  page that yields no org name is flagged for a human glance. **Test set
+  (27): 22 web-search-sourced likely-Ashby employers (startup-weighted —
+  the DOL-sponsor `companies` table has just 1 `ashby` row, and 0 rows
+  currently have no ATS platform, so set (a) was a false-positive check
+  against 5 known non-Ashby DB companies instead — all 5 correctly
+  UNRESOLVED).** Of 19 confirmed-live Ashby boards in the set, **18
+  resolved by slug-guess alone, 1 (Anysphere → `cursor`) needed the
+  web-search/`--slug` fallback, 0 failed**; 3 more resolved to real but
+  currently-empty boards (Airtable/Mercury/Fractile — the same
+  empty/stale-board ambiguity SR has). 3 aggregator-listed "Ashby"
+  companies (GetYourGuide, Opendoor, Clay) did not resolve —
+  GetYourGuide confirmed migrated to Greenhouse, i.e. genuine
+  not-on-Ashby, not a discovery miss; **third-party "companies using
+  Ashby" lists are stale and must be live-verified.** Completeness
+  cross-check: Linear's live board shows "Open Positions (28)", exactly
+  matching the API's 28 unique job ids and titles. **Hypothesis "Ashby
+  is more common among real target employers than the DOL sample
+  suggested" — holds in general (Ashby is clearly ubiquitous among the
+  smaller/startup tech employers DOL sponsor data underrepresents), but
+  NOT for the current `companies` table**: none of the resolved Ashby
+  users are in it, and the mid/large DOL companies tested are not on
+  Ashby — so an Ashby spider pays off only alongside a separate
+  startup-company sourcing path, not against today's company set.
+  Onboarding, when built, must gate on the name-similarity /
+  not-an-empty-board cross-check (or a human confirm), mirroring the
+  Workday/SR gates. `scratch_ashby_discovery.json` (gitignored) holds the
+  full test-set results.
 
 ## How to run things
 

@@ -6443,3 +6443,162 @@ image.)
   `tests/test_smartrecruiters_spider.py` (new); `main.py` (one dict
   entry); CLAUDE.md, SESSIONS.md. `scratch_smartrecruiters_discovery.json`
   (gitignored) holds the full 8,113-row scan.
+
+---
+
+## 2026-09-01 — Prove Ashby job-board discovery (proof/discovery only — no spider, no DB writes)
+
+Same "prove it before building it" step done for Workday `{tenant,dc,site}`
+and the SmartRecruiters companyId. Goal: can a company name be resolved to
+its real, live-verified Ashby `jobBoardName` reliably enough to build a
+spider and an onboarding gate on top of it?
+
+### API reality (confirmed live)
+
+- `GET https://api.ashbyhq.com/posting-api/job-board/{jobBoardName}`
+  - unknown name → **HTTP 404, plain body `Not Found`**
+  - real board with listings → **200 `{"jobs":[ {...} ], "apiVersion": ...}`**
+  - real board, nothing listed right now → **200 `{"jobs": [], ...}`**
+    (seen for `airtable`, `mercury`, `fractile`)
+- **No pagination.** One response returns every listed job — verified on
+  `openai` (768), `ramp` (137), `baseten` (82). Response has only `jobs`
+  and `apiVersion` keys — no cursor, offset, nextToken, or Link header.
+- Each job object already includes `descriptionHtml`, `descriptionPlain`,
+  `jobUrl` (`https://jobs.ashbyhq.com/{slug}/{id}`), `applyUrl`,
+  `location`/`secondaryLocations`, `department`/`team`, `employmentType`,
+  `publishedAt`, `isListed`. A spider needs **no per-job detail fetch**
+  (unlike Workday and SmartRecruiters).
+- The API response carries **no org-identifying field** — only the slug,
+  echoed in each `jobUrl`. The confidence cross-check therefore fetches
+  the public board page `https://jobs.ashbyhq.com/{slug}` and reads its
+  `<title>` / `og:title` (`"<Org> Jobs"`).
+
+### The script
+
+`scripts/discover_ashby_job_board.py` — given a name, generates ordered
+candidate slugs (full slug, core slug minus legal/geo suffixes,
+hyphenated, first-two-words, first-word-only, acronym, plus
+`hq`/`careers`/`jobs`/`team`/`inc`/`global`/`1`/`2` suffix variants),
+live-checks each, and returns the first that comes back 200. `--slug`
+verifies a web-search-found slug first, through the same check. For a hit
+it fetches the board page, fuzzy-matches (`rapidfuzz.token_set_ratio`,
+normalized) the org display name to the queried name, and assigns:
+`high` (non-empty board, sim ≥ 85), `medium` (loose/generic slug or
+55 ≤ sim < 85 or no org name from the page), `low-suspect` (sim < 55),
+or `found-unverifiable` (board is real but currently lists 0 jobs).
+One bug found and fixed mid-run: the initial "hyphenated" candidate was
+being stripped of its hyphens by the shared slugifier, so
+`immunic-therapeutics` (a real hyphenated Ashby slug) was missed — added
+a hyphen-preserving slug form.
+
+### Test set (27) and results
+
+The DOL-sponsor `companies` table has **1** `ashby` row and **0** rows
+with no ATS platform at all, so set (a) ("DB companies not matched to any
+ATS") is empty. Substituted a false-positive check: 5 DB companies known
+to be on other platforms (`pubmatic`/greenhouse, `pathrobotics`/greenhouse,
+`wealthfront`/lever, `nxp`/workday, `winsupply`/smartrecruiters) — **all
+5 correctly UNRESOLVED** (404 on every candidate).
+
+Set (b): 22 web-search-sourced likely-Ashby employers, startup-weighted.
+
+| Company | Slug tried → winner | Jobs | Method | Confidence |
+|---|---|---|---|---|
+| Linear | `linear` (full) | 28 | slug-guess | high |
+| Notion | `notion` (full) | 133 | slug-guess | high |
+| Ramp | `ramp` (full) | 137 | slug-guess | high |
+| Vanta | `vanta` (full) | 108 | slug-guess | high |
+| Watershed | `watershed` (full) | 31 | slug-guess | high |
+| Hex Technologies | `hextechnologies`✗ → `hex` (first-word) | 28 | slug-guess | high (sim 100) |
+| OpenAI | `openai` (full) | 768 | slug-guess | high |
+| Rentman | `rentman` (full) | 14 | slug-guess | high |
+| Sisense | `sisense` (full) | 7 | slug-guess | high |
+| Jiga | `jiga` (full) | 12 | slug-guess | high |
+| Superbolt | `superbolt` (full) | 1 | slug-guess | high |
+| Immunic Therapeutics | `immunictherapeutics`✗ → `immunic-therapeutics` (hyphenated) | 5 | slug-guess | high |
+| Agave | `agave` (full) | 7 | slug-guess | high |
+| Modal Labs | `modallabs`✗ `modal-labs`✗ → `modal` (first-word) | 31 | slug-guess | high (sim 100) |
+| Baseten | `baseten` (full) | 82 | slug-guess | high |
+| Anysphere | `anysphere*` all ✗ → `cursor` (`--slug`) | 119 | **web-search** | low-suspect (board page gave org name "Jobs"; human confirms cursor=Anysphere) |
+| Airtable | `airtable` (full) | 0 | slug-guess | found-unverifiable |
+| Mercury | `mercury` (full) | 0 | slug-guess | found-unverifiable |
+| Fractile | `fractile` (full) | 0 | slug-guess | found-unverifiable |
+| GetYourGuide | all ✗ | — | **failed** | — (confirmed migrated to Greenhouse: `job-boards.greenhouse.io/getyourguide`) |
+| Opendoor | all ✗ | — | **failed** | — (no live Ashby board) |
+| Clay | all ✗ | — | **failed** | — (no live Ashby board) |
+
+### (b) Breakdown — automatic slug-guess vs web-search fallback vs failed
+
+Counting only companies with a **confirmed live Ashby board** in the set
+(19: the 15 high-confidence + `cursor` + the 3 empty boards):
+
+- **18 / 19 (94.7%) resolved by slug-guessing alone** — 14 on the plain
+  full slug, 2 on first-word (`hex`, `modal`, both sim 100 so trusted),
+  1 hyphenated (`immunic-therapeutics`), 1 more (`hextechnologies` tried
+  first, fell through to `hex`).
+- **1 / 19 needed a web-search fallback** — Anysphere's board is `cursor`,
+  not name-derivable; the `--slug` path verified it live and the
+  confidence signal correctly flagged it low (name ≠ slug, board page
+  title just "Jobs").
+- **0 / 19 confirmed-Ashby companies failed to resolve.**
+- 3 aggregator-listed "Ashby users" (GetYourGuide, Opendoor, Clay) did
+  not resolve — at least GetYourGuide is definitively **not on Ashby
+  anymore** (now Greenhouse), i.e. these are stale-list entries, not
+  discovery misses. Third-party "companies using Ashby" lists (bloomberry
+  etc.) are stale and must be live-verified.
+
+### (c) Completeness / pagination proof
+
+- **No pagination** — established above; re-confirmed here that boards of
+  28 / 31 / 82 / 137 / 768 jobs all return in a single response with all
+  ids unique and every job carrying `descriptionHtml`, `isListed: true`.
+- **Live board cross-check — Linear.** API returned 28 jobs. Opened
+  `https://jobs.ashbyhq.com/linear` in a real browser: header reads
+  **"Open Positions (28)"**, department facet counts sum to 28
+  (GTM 11 / Operations 4 / Product 13), and the visible titles match the
+  API set exactly (e.g. "Senior / Staff Fullstack Engineer" is the API's
+  first job). Exact match.
+- Watershed (31) and Baseten (82): API ids all unique, all with
+  descriptions — no follow-up fetch needed.
+
+### (d) Go / No-Go — **GO**
+
+Ashby discovery is the **cleanest of any platform onboarded so far**:
+a single unauthenticated GET, a clean 404-vs-200 split for
+unknown-vs-real, full job descriptions inline, no pagination, and a
+~95% name→slug hit rate on confirmed users (usually the bare full slug).
+The board-page `og:title` gives a working confidence cross-check
+(sim 100 on every true positive; correctly flagged the one `cursor`
+case). Caveats to carry into the spider/onboarding step, all with known
+precedents:
+1. **Empty-board ambiguity** (Airtable / Mercury / Fractile) — a real
+   board with 0 current listings looks identical to a squatted one; the
+   onboarding gate must treat "found, 0 jobs" as needs-review, like SR's
+   near-empty-board handling.
+2. **Slug ≠ name** (Anysphere → `cursor`) — needs the web-search
+   fallback + human confirm for the minority whose slug isn't derivable.
+3. **Stale aggregator lists** — never store a slug without a live check.
+
+**Hypothesis "Ashby is more common among real target employers than the
+DOL sample suggested":** *Holds in the general sense* — Ashby is plainly
+ubiquitous among the smaller / startup / high-growth tech employers this
+project's DOL sponsor data underrepresents (Notion, Linear, Ramp, OpenAI,
+Vanta, Baseten, Modal, Watershed all resolved trivially). *But it does
+not help the current `companies` table*: none of the resolved Ashby users
+are in it, and the mid/large DOL-sponsor companies tested (`pubmatic`,
+`nxp`, `wealthfront`, …) are not on Ashby. An Ashby spider only pays off
+in combination with a separate startup-company sourcing path — building
+it against today's 641-row, DOL-derived company set would find ~1 company.
+
+### (e) Verification
+
+- **Full suite: 175 passed** (unchanged — this task added no application
+  code or tests).
+- **Production row counts unchanged** — before and after:
+  `job_postings` 75,809, `companies` 641. No company or posting rows
+  written.
+- Did not modify any existing Greenhouse / Lever / Workday /
+  SmartRecruiters spider or discovery script.
+- Files: `scripts/discover_ashby_job_board.py` (new),
+  `scratch_ashby_discovery.json` (gitignored, full test-set results),
+  CLAUDE.md, SESSIONS.md.
