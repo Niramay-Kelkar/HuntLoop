@@ -209,7 +209,11 @@ def _rank(r: dict) -> tuple:
 
 def discover(name: str, forced_slug: str | None = None) -> dict:
     tried: list[str] = []
-    ordered = ([(_slugify_hyphen(forced_slug), "forced")] if forced_slug else []) + candidate_slugs(name)
+    # A forced slug is a known/verified value (e.g. from a web search) —
+    # used verbatim, not re-derived. _slugify_hyphen() would strip a real
+    # trailing hyphen some Gem slugs genuinely have (e.g. Instrumental,
+    # Inc.'s real slug is "instrumental-inc-", confirmed live).
+    ordered = ([(forced_slug.strip().lower(), "forced")] if forced_slug else []) + candidate_slugs(name)
     best: dict | None = None
     for slug, kind in ordered:
         if not slug or slug in tried:
