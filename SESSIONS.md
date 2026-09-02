@@ -7533,3 +7533,137 @@ Follow-ups: the 39 still-held generic-slug boards need a human glance;
 primehealthcare can be re-scraped to completion if its clinical roles
 ever matter; a fuller onboarding sweep past `--limit 2000` (this run
 covered the highest-filing 1,978 of the ~8,100 "neither" employers).
+
+---
+
+## 2026-09-01 — Prove Gem job-board discovery (proof/discovery only — no spider, no DB writes)
+
+Investigated Gem (`jobs.gem.com/{slug}`) the same rigorous way iCIMS was:
+real browser network inspection first, not assumed from docs.
+
+### (a) What actually renders a Gem board — REAL observed traffic
+
+Chrome network tab on `jobs.gem.com/modular`, `/fetch`, `/felix`
+(client-side React SPA that hydrates): the ONLY job-data call is
+
+    POST https://jobs.gem.com/api/public/graphql/batch        (JSON ARRAY body)
+
+— a **genuine public GraphQL endpoint** (path literally `/api/public/`),
+**no auth, no cookies, no token** (confirmed by replaying every call from
+plain `curl` with an honest UA). Two queries, both public:
+
+  * **list** — `JobBoardList($boardId)` where **`boardId` == the vanity
+    URL slug**:
+      `oatsExternalJobPostings(boardId:) { jobPostings { id extId title
+        locations{name city isoCountry isRemote} job{ department{name}
+        locationType employmentType } } }`
+      — every posting in ONE response, **NO pagination**, **NO
+        description**; plus
+      `jobBoardExternal(vanityUrlPath:) { id teamDisplayName pageTitle
+        descriptionHtml }` — the board's own org name, for the
+        confidence cross-check.
+  * **detail** — `ExternalJobPosting($boardId, $extId)`:
+      `oatsExternalJobPosting(boardId:, extId:) { descriptionHtml
+        firstPublishedTsSec startDateTs compensationHtml locations{...}
+        job{...} jobPostSectionHtml{introHtml outroHtml} }`
+      — one call per posting for the HTML description + absolute posted
+        date. Also public/unauthenticated.
+
+Query text lifted from the public bundle
+`static.gem.com/scripts/ExternalJobBoardList.*.min.js` /
+`jobBoards.*.min.js`. `extId` comes in 3 forms across boards
+(Greenhouse-numeric `4606150005`, base64 `am9icG9zdD…`, UUID) — the
+spider would just use whatever the list returns; detail URL is
+`jobs.gem.com/{slug}/{extId}`.
+
+Real response shapes:
+  * unknown slug        -> HTTP 200, `jobBoardExternal: null`, `jobPostings: []`
+  * real board, jobs    -> HTTP 200, `jobBoardExternal` non-null, `jobPostings` non-empty
+  * real board, 0 jobs  -> HTTP 200, `jobBoardExternal` non-null, `jobPostings: []`
+So "resolved" = `jobBoardExternal != null`; "resolved + live" = also >= 1 job.
+
+### (b)/(d) Pagination / completeness — 3 companies, live cross-check
+
+`oatsExternalJobPostings` returns everything in one call. Verified
+against the live rendered "Open positions (N)" counter:
+  * Modular  — API 12  == live 12
+  * Fetch    — API 70  == live 70  (rendered 70 job links)
+  * Felix    — API 114 == live 114 (rendered 114 job links)
+No pagination param anywhere; no lazy-load beyond the single fetch.
+
+### (b) Discovery script + test set
+
+`scripts/discover_gem_job_board.py` (given a company name -> ordered
+name-derived slug candidates — **hyphenated forms first** since Gem slugs
+are very often hyphenated (`the-boring-company`, `black-ore`,
+`myriad-technology`) — live-checks each via the list query, ranks, and
+scores confidence by `rapidfuzz` of the queried name vs.
+`jobBoardExternal.teamDisplayName`, same as the Ashby/SR/iCIMS scripts;
+`--slug` verifies a web-search-found slug). Discovery only, never touches
+the DB.
+
+Test set = 25 companies: 18 web-search-confirmed Gem users (tested by
+NAME, no forced slug) + 5 existing `companies` rows (GH/Lever — must NOT
+resolve) + 2 random LCA employers. NOTE: **0 rows in the `companies`
+table are currently unmatched to an ATS**, so "companies from the table
+not yet matched" is an empty set — the GH/Lever rows served as the
+false-positive check instead.
+
+| outcome | count | which |
+|---|---|---|
+| resolved by **slug-guess alone**, high confidence | **15** | modular, the-boring-company, superblocks, nominal, black-ore, inception, function-health (`function-health`), biorender, retool, imagen-technologies, myriad-technology, felix, fetch, sequencing, firestorm |
+| resolved only via **web-search `--slug` fallback** | 1 | Luma AI -> `lumalabs-ai` (not `luma`/`lumalabs`) |
+| **genuinely not on jobs.gem.com** (Gem ATS customer, board hosted elsewhere) | 1 | Tractian -> `careers.tractian.com` (own domain) |
+| unresolved (no findable slug) | 1 | Bohler |
+| correctly did NOT resolve (true negatives) | 6 | Palantir, Checkr, Duolingo, Figma, + 2 LCA employers -> `jobBoardExternal: null` |
+| real board but **0 jobs** (found-unverifiable) | 1 | Databricks (`databricks` board exists, org "Databricks", empty — stale, like SR/Ashby empty boards) |
+
+Of the 19 companies with a live jobs.gem.com board in the set: **15
+resolved by slug-guess alone (~79%)**, 1 needed the web-search fallback,
+0 outright failed once the real slug was known. `teamDisplayName` gave a
+100.0 name-similarity on every real match (`felix` -> "Felix
+Technologies, Inc.", `biorender` -> "BioRender Inc." — full legal names,
+strong cross-check).
+
+### (c) Slug-guess vs fallback vs failed — actual counts
+
+Web-search-known Gem users (19 with a live board): **slug-guess 15,
+web-search fallback 1, still-failed 1 (Bohler)**, + Tractian which is a
+true "not on jobs.gem.com". Non-Gem controls (7): all 7 correctly
+returned `jobBoardExternal: null` — 0 false positives.
+
+### (e) Blocking / anti-automation — NONE
+
+- `jobs.gem.com/robots.txt` -> **HTTP 404** (no robots.txt published).
+- Every GraphQL call (honest UA `HuntLoop/1.0 (sponsorship-aware job
+  aggregator; ...)`, no cookies, ~0.6s spacing) -> clean HTTP 200. No
+  CAPTCHA, no 403, no rate-limit, no bot-challenge across ~40 requests.
+- Browser traffic includes an `identification.gem.com/…?q=…` fingerprint
+  call — **browser-only; the public API works fine without it** (all
+  curl replays succeeded). Not worked around; simply not needed.
+
+### (f) Go / no-go — **GO. Cleanest integration since Ashby.**
+
+This sits firmly at the **Greenhouse / Lever / Ashby / SmartRecruiters
+end** of the risk spectrum, NOT the iCIMS end: a real public JSON(GraphQL)
+API (`/api/public/graphql/`), structured data, one call returns every
+posting, no auth. Like Ashby's `posting-api` and Workday's CXS it's
+*undocumented* (Gem's *documented* "Job Board API" is the gated
+customer one for embedding on your own site) but discovered exactly the
+same way — network inspection — and is structurally a public read feed.
+Only real caveats, both identical to Ashby: (1) a per-job detail fetch is
+needed for the description; (2) it's **startup-skewed** — 0 current
+`companies` rows are Gem users (the DOL-sponsor set underrepresents the
+seed/Series-A companies Gem serves), so a Gem spider pays off alongside a
+separate startup-sourcing path, not against today's company set. When
+built, onboarding must gate on the `teamDisplayName` name cross-check
+(or a human confirm) + hold `found-unverifiable` 0-job boards, mirroring
+the Ashby/SR/iCIMS gates.
+
+### (g) Verification
+
+- Full suite: **203 passed** (unchanged — only a standalone discovery
+  script added).
+- Row counts **unchanged**: `companies` 688, `job_postings` 83,225.
+- No spider / existing-script / DB changes. `scratch_gem_discovery.json`
+  (gitignored) holds the full results.
