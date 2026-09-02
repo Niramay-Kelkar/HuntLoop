@@ -1278,6 +1278,63 @@ conventions" and SESSIONS.md for the real current state).
   script/output verified byte-for-byte untouched (same MD5).
   `scratch_gem_startup_sponsor_candidates.json` (gitignored) holds the
   full results.
+  **Gem spider BUILT + onboarded + first scrape 2026-09-02 (see
+  SESSIONS.md "Build the Gem spider + gated onboarding + first
+  scrape").** `GemScraper` (`src/huntloop/spiders/gem_spider.py`, name
+  `gem_api`) confirmed during implementation that
+  `POST https://jobs.gem.com/api/public/graphql/batch` is a real GraphQL
+  *batch* endpoint — multiple operations posted together in one JSON
+  array all execute and return in one HTTP round trip, in request order
+  (proven live: a real 109-op array — 1 list + 108 details for a
+  108-job board — one 200, all 108 resolved). So each company needs only
+  TWO real requests regardless of job count: one `JobBoardList` call (the
+  list response already carries title/locations/department/
+  employmentType) then one batched `ExternalJobPosting` detail call
+  covering every job at once (chunked at `MAX_DETAIL_BATCH=100` as a
+  safety valve only). An unknown slug, empty board, malformed response,
+  or per-job missing detail is logged + counted via `scrape_errors_total`
+  and skipped, never a crash. `tests/test_gem_spider.py` (12 tests).
+  Yields plain `JobPostingItem`s through the shared `JobDataPipeline`;
+  `is_relevant` + `embedding` computed at insert like every other source,
+  zero manual backfill. `companies.name` == `ats_token` == the
+  lower-cased jobs.gem.com slug. Added to `main.py`'s
+  `SPIDERS_BY_PLATFORM` (plain `companies=tokens` branch);
+  `scripts/scrape_gem.py` is the scoped entrypoint.
+  **Onboarding gate: `scripts/discover_and_store_gem.py`** reuses
+  `discover_gem_job_board.py` unchanged over the 14 Gem-specific
+  LCA-verified candidates (a separate list from Ashby's, sourced
+  2026-09-02 — see above). Auto-store requires Gem confidence `high`;
+  a real-but-empty board or a weaker match is held for a
+  `--confirmations` file. **Real run: 9/14 resolved automatically by
+  slug-guess; 3 more (Bohler, Instrumental, Luma AI) needed a
+  human-supplied slug via `confirmed_gem_slugs.txt`** (a genuine trailing
+  hyphen for the first two, a distinct marketing-brand slug for the
+  third — each verified live before confirming, same
+  `Name<TAB>slug`-forced-candidate mechanism Ashby used for
+  Anysphere/`cursor`). **2 stayed correctly unresolved**: Jetty has a
+  real `jobs.gem.com/jetty-careers` board, but it belongs to a different
+  company ("Jetty Health", not the LCA-verified renters-insurance Jetty)
+  — flagged `low-suspect` and deliberately not force-confirmed, since
+  onboarding the wrong same-named company would be a real data-integrity
+  error, not a discovery gap; Scale AI has no live `jobs.gem.com` board
+  under any plausible slug (its real Gem relationship is the internal
+  CRM/sourcing product, not necessarily the public job-board product).
+  12 companies stored, then scraped via `docker compose run ... app
+  python scripts/scrape_gem.py`: **495 new `job_postings` rows, 0 NULL
+  `is_relevant`, 0 NULL `embedding`, no backfill** (bohler- 210, felix
+  108, lumalabs-ai 50, retool 24, linktree 24, apartment-list 18, paces
+  16, instrumental-inc- 12, modular 11, nuvo 11, ntop 6, letter-ai 5).
+  One gracefully-handled duplicate-key event (Bohler's own list response
+  genuinely lists one posting id twice — a Gem-side data quirk, caught
+  by the pipeline's existing `job_url` unique-constraint dedup, not a
+  spider bug). Live cross-checked (fresh calls, not reused from
+  discovery): Modular 11/11, Retool 24/24, Nuvo 11/11 against the real
+  API. **Noticed, not introduced, while verifying: `job_postings.
+  department` is NULL for every row from every source project-wide**
+  (`JobDataPipeline.process_item()` never assigns `item["department"]`
+  to the row for any spider, and `employment_type` isn't even a column)
+  — confirmed across all 7 sources before concluding this is pre-existing
+  and out of this task's scope, not a Gem-specific defect.
 - **iCIMS spider BUILT + onboarded + first scrape 2026-09-01 (see
   SESSIONS.md "Build the iCIMS spider + gated onboarding + first
   scrape"). Recommendation was GO — but a step grayer on ToS/risk than

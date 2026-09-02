@@ -16,6 +16,7 @@ from huntloop.spiders.workday_spider import WorkdayScraper
 from huntloop.spiders.smartrecruiters_spider import SmartRecruitersScraper
 from huntloop.spiders.ashby_spider import AshbyScraper
 from huntloop.spiders.icims_spider import IcimsScraper
+from huntloop.spiders.gem_spider import GemScraper
 from huntloop.settings import DATABASE_URL
 from huntloop.db_models import Company
 from huntloop import metrics
@@ -34,6 +35,7 @@ SPIDERS_BY_PLATFORM = {
     "smartrecruiters": SmartRecruitersScraper,
     "ashby": AshbyScraper,
     "icims": IcimsScraper,
+    "gem": GemScraper,
 }
 
 

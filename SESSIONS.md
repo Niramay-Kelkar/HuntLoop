@@ -7778,3 +7778,142 @@ CareTria.
   separate script and never touched that one.
 - No Gem discovery run, no scraping, no `companies` writes. Full results
   in gitignored `scratch_gem_startup_sponsor_candidates.json`.
+
+---
+
+## 2026-09-02 — Build the Gem spider + gated onboarding + first scrape
+
+Built the production Gem integration on top of the 2026-09-02 discovery
+(confirmed API mechanism) and the separately-sourced, LCA-verified
+14-company Gem startup candidate list (reused as-is, not re-derived).
+
+### Spider (`GemScraper`, `src/huntloop/spiders/gem_spider.py`, name `gem_api`)
+
+Confirmed during implementation - not assumed - that the confirmed
+`POST https://jobs.gem.com/api/public/graphql/batch` endpoint is a real
+GraphQL *batch* endpoint: multiple operations posted together in one
+JSON array are all executed and answered in one HTTP round trip, in
+request order (proven live with a real 109-operation array - 1 list op +
+108 detail ops for Felix's 108-job board - one 200 response, all 108
+resolved, ~2.5s). So each company needs only TWO real HTTP requests
+regardless of job count: one `JobBoardList` call to learn every posting's
+`extId` (list response already carries title/locations/department/
+employmentType - no separate call needed for those), then one batched
+`ExternalJobPosting` call carrying every job's detail query at once
+(chunked at `MAX_DETAIL_BATCH=100` per request as a safety valve, not
+because a bigger single batch was seen to fail). An unknown slug
+(`jobBoardExternal: null`), an empty `jobPostings` array, a malformed/
+non-JSON response, a shape-mismatched detail-batch response, or a
+per-job missing detail entry are all logged + counted via
+`scrape_errors_total` and skipped, never a spider crash.
+`tests/test_gem_spider.py` (12 tests, real-shaped fixtures) covers all of
+this including the chunking boundary.
+
+### Onboarding gate (`scripts/discover_and_store_gem.py`)
+
+Mirrors the SmartRecruiters/Ashby/iCIMS pattern exactly: reuses
+`scripts/discover_gem_job_board.py` UNCHANGED against the 14
+LCA-verified candidates from `scratch_gem_startup_sponsor_candidates.json`
+(`verdict == "verified"` only - this population has no Sierra/Basis-AI-
+style `needs_review` case, so the gate is purely the Gem-resolution
+confidence). `gem_confidence == "high"` -> auto-store; anything else that
+resolved (medium/low-suspect/found-unverifiable, i.e. a real board
+listing 0 jobs) -> held, stored only via a `--confirmations` file.
+
+**Real per-company results (all 14):**
+
+| company | resolved slug | confidence | gate | jobs (at resolution) |
+|---|---|---|---|---|
+| Apartment List | apartment-list | high | auto | 18 |
+| Felix Technologies | felix | high | auto | 108 |
+| Letter AI | letter-ai | high | auto | 5 |
+| Linktree | linktree | high | auto | 24 |
+| Modular | modular | high | auto | 11 |
+| Nuvo | nuvo | high | auto | 11 |
+| Paces | paces | high | auto | 16 |
+| Retool | retool | high | auto | 24 |
+| ntop | ntop | high | auto | 6 |
+| Bohler | bohler- | high (via confirmed forced slug) | auto | 210 |
+| Instrumental | instrumental-inc- | high (via confirmed forced slug) | auto | 12 |
+| Luma AI | lumalabs-ai | high (via confirmed forced slug) | auto | 50 |
+| Jetty | — | unresolved | skip | — |
+| Scale AI | — | unresolved | skip | — |
+
+9 of 14 resolved automatically from a name-derived slug guess. 3 more
+(Bohler, Instrumental, Luma AI) needed a human-supplied slug - all three
+have a real slug that isn't derivable by the resolver's standard
+candidate patterns (a genuine trailing hyphen for Bohler/Instrumental, a
+distinct marketing brand `lumalabs-ai` for Luma AI) - added via
+`confirmed_gem_slugs.txt` (`Name<TAB>slug` format, the same mechanism
+Ashby's onboarding used for Anysphere/`cursor`). Each was verified live
+before being added: org name and job content genuinely match the queried
+company (e.g. Bohler's real board lists 210 civil-engineering/
+land-development postings).
+
+**2 stayed unresolved, correctly not stored:**
+- **Jetty**: a real board exists at `jobs.gem.com/jetty-careers`, but its
+  org name is `myjettyhealth.com` - a DIFFERENT company ("Jetty Health")
+  from the LCA-verified Jetty (the renters-insurance/security-deposit
+  company, matched to "Jetty National, Inc." in `lca_disclosures`). The
+  resolver correctly flagged this `low-suspect` (org name mismatch) and
+  it was deliberately NOT force-confirmed - onboarding the wrong Jetty
+  under real sponsorship evidence for a different company would be a
+  genuine data-integrity error, not a discovery gap.
+- **Scale AI**: no live `jobs.gem.com` board found under any plausible
+  slug (`scaleai`, `scale-ai`, `scale`, `getscale` all checked live -
+  none real). Scale AI's real Gem relationship (per its published case
+  study) is Gem's internal sourcing/CRM tool, not necessarily the public
+  `jobs.gem.com` job-board product - a large enterprise customer isn't
+  guaranteed to use every Gem product. Correctly stays unresolved, not
+  guessed at.
+
+12 companies stored (`ats_platform='gem'`).
+
+### Real scrape (via the `app` Docker image, same as every embedding-
+dependent path)
+
+`docker compose run --rm --build ... app python scripts/scrape_gem.py`
+against the real local Postgres. Ran to completion, exit code 0, ~58s.
+**495 new `job_postings` rows across the 12 companies, 0 NULL
+`is_relevant`, 0 NULL `embedding` - no backfill needed**, same as every
+prior source (`_classify_and_embed` populates both at insert time).
+
+Per-company real counts (verified via direct `psql`, not the scraper's
+own log): bohler- 210, felix 108, lumalabs-ai 50, retool 24, linktree 24,
+apartment-list 18, paces 16, instrumental-inc- 12, modular 11, nuvo 11,
+ntop 6, letter-ai 5. **Sum = 495**, matching Scrapy's own
+`item_scraped_count`.
+
+One real, gracefully-handled error hit mid-scrape: Bohler's own list
+response genuinely lists the same posting id twice (a Gem-side data
+quirk, not a spider bug - confirmed by checking the raw list response) -
+the pipeline's existing `job_url` unique-constraint dedup caught it
+(`IntegrityError` logged, session continues), so Bohler still landed
+with the correct 210 distinct rows, not 211.
+
+**Live cross-check (fresh GraphQL calls this session, not reused from
+discovery)**: Modular 11/11, Retool 24/24, Nuvo 11/11 - DB counts match
+the live board exactly. A spot-checked stored row
+(`jobs.gem.com/modular/4632989005`, "Cloud Inference Engineer") matches
+its live counterpart exactly on title and URL.
+
+**One pre-existing, cross-spider gap noticed while verifying, not
+introduced by this task**: `job_postings.department` is NULL for every
+row from every source (`ashby_api`, `greenhouse_api`, `lever_api`,
+`icims_portal`, `workday_api`, `smartrecruiters_api`, now `gem_api` too)
+- `JobDataPipeline.process_item()` never assigns `item["department"]` to
+the `JobPosting` row for any spider, and `employment_type` isn't even a
+column on `job_postings` at all. Confirmed via a direct query across all
+7 sources before concluding this - it's a genuine, project-wide,
+pre-existing gap, not something this task's spider does differently from
+any other. Left untouched, per this task's scope (only the Gem spider +
+onboarding, not the shared pipeline).
+
+### Verification
+
+- Full suite: **215 passed** (203 existing + 12 new `test_gem_spider.py`
+  tests).
+- Real row counts: `companies` 688 -> **700** (+12), `job_postings`
+  83,225 -> **83,720** (+495).
+- No other spider, discovery script, or existing `companies` row was
+  touched.
