@@ -187,6 +187,7 @@ class JobDataPipeline:
                 job_title=item.get("job_title"),
                 job_url=item.get("job_url"),
                 gh_job_id=item.get("job_id"),
+                department=item.get("department"),
                 job_description=item.get("job_description"),
                 date_posted=item.get("date_posted"),
                 company_id=company.id,

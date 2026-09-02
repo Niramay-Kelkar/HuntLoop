@@ -98,12 +98,22 @@ class GreenhouseScraper(scrapy.Spider):
             metadata = job.get('metadata', [])
             item['metadata_json'] = json.dumps(metadata)
 
+            # Real department field: Greenhouse jobs carry a structured
+            # `departments` list (verified live - e.g. qualtrics/riotgames/
+            # checkr/duolingo/figma all populate it, while `metadata`
+            # entries in practice are per-company custom fields like
+            # "Career Site Category" that rarely if ever contain the word
+            # "department"). Use the first department's name.
+            departments = job.get('departments') or []
+            if departments and isinstance(departments[0], dict):
+                item['department'] = departments[0].get('name')
+
             # Extract known fields for direct DB columns
             if metadata:
                 for entry in metadata:
                     name = entry.get('name', '').lower()
                     value = entry.get('value')
-                    if 'department' in name:
+                    if 'department' in name and not item.get('department'):
                         item['department'] = value
                     elif 'employment type' in name:
                         item['employment_type'] = value

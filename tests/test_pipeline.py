@@ -45,6 +45,16 @@ def test_process_item_inserts_job_posting(pipeline, db_session):
     assert row.embedding is None
 
 
+def test_process_item_stores_department(pipeline, db_session):
+    item = make_item(job_id="dept-1", job_url="https://boards.greenhouse.io/testco/jobs/dept-1")
+    item["department"] = "Engineering"
+
+    pipeline.process_item(item, spider=None)
+
+    row = db_session.query(JobPosting).filter_by(job_url=item["job_url"]).one()
+    assert row.department == "Engineering"
+
+
 def test_duplicate_job_url_hits_integrity_error_handler(pipeline, db_session, caplog):
     dup_url = "https://boards.greenhouse.io/testco/jobs/dup"
     item1 = make_item(job_id="1", job_url=dup_url)

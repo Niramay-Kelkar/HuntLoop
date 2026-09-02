@@ -7917,3 +7917,93 @@ onboarding, not the shared pipeline).
   83,225 -> **83,720** (+495).
 - No other spider, discovery script, or existing `companies` row was
   touched.
+
+## 2026-09-02 - Investigate and fix job_postings.department NULL across all 7 sources
+
+Investigation, not a guess: for each of the 7 ATS sources, fetched a real
+live raw response (Greenhouse: qualtrics/riotgames/checkr/duolingo/figma;
+Lever: veeva/wealthfront; Workday: adobe list + detail; SmartRecruiters:
+ubisoft2/citibankna; Ashby: ramp/notion; Gem: modular; iCIMS: a real
+persistentsystems job detail page's JSON-LD) and traced each spider's
+code against it.
+
+**Root cause (all 6 sources where department is genuinely present):**
+`JobDataPipeline.process_item()`'s `JobPosting(...)` insert simply never
+included `department=item.get("department")` - even though
+`LeverScraper`, `SmartRecruitersScraper`, `AshbyScraper`, `IcimsScraper`,
+and `GemScraper` were already correctly extracting a real department
+value into the item from real raw fields
+(`categories.department` / `department.label` / `department` or `team` /
+JSON-LD `occupationalCategory` / `job.department.name` respectively).
+The value was computed and then silently dropped one line later, for
+every source, every row, since whichever spider first shipped.
+
+**Greenhouse had a second, independent bug on top of that.** Its raw API
+does carry a real department field - `job["departments"][0]["name"]`
+(confirmed live on 5 real companies) - but the existing code never read
+it; instead it scanned the unrelated free-form `metadata` array for an
+entry whose `name` contains the substring "department", which in
+practice never fires (real per-company metadata entries are things like
+"Career Site Category", "Job Family Group", "Division" - none contain
+that substring on any of the 5 companies checked).
+
+**Workday is the one genuine data-source limitation, not a bug.** Its
+per-job CXS detail response (`jobPostingInfo`) has no department/job-
+family field at all - confirmed against a real live detail call. The
+list endpoint has an aggregate `jobFamilyGroup` *facet* (categories with
+counts, for board filtering), but that's not attached to individual
+postings. `WorkdayScraper` already set `item["department"] = None` with
+an explicit comment to this effect - left unchanged, correctly NULL.
+
+**Fixes applied:**
+- `src/huntloop/pipelines.py`: `JobPosting(...)` now passes
+  `department=item.get("department")`. This alone fixes Lever,
+  SmartRecruiters, Ashby, iCIMS, and Gem going forward - their spiders
+  needed no changes.
+- `src/huntloop/spiders/greenhouse_spider.py`: now reads the real
+  `job["departments"][0]["name"]` field first; the old metadata-name-scan
+  is kept only as a fallback for the rare case a `departments` entry is
+  empty but a metadata field is literally named "department".
+- Workday: no code change - `department` stays `None` by design.
+
+**Backfill feasibility (checked, not assumed), per source:**
+- **Lever - feasible without re-scraping.** `LeverScraper` already
+  stores the job's full `categories` dict (which contains `department`
+  when present) inside `job_metadata.metadata_json`. Wrote and ran
+  `scripts/backfill_department_lever.py` (same batch/keyset-pagination
+  pattern as `scripts/backfill_relevance.py`) against the real local
+  Postgres: **3,715 lever_api rows scanned, 3,299 filled from their
+  already-stored raw categories, 416 genuinely had no department in
+  their original raw data (left NULL, not guessed).**
+- **Greenhouse, SmartRecruiters, Ashby, iCIMS, Gem - NOT feasible without
+  re-scraping.** Checked each source's actual stored `metadata_json`
+  directly: Greenhouse never stored the `departments` field at all
+  (only the unrelated free-form `metadata` array, itself often `null`);
+  SmartRecruiters/Ashby/iCIMS/Gem's stored metadata blobs carry adjacent
+  fields (e.g. Ashby stored `team` but not the separate `department`
+  value used for the item) but not the actual raw department value
+  itself. Backfilling these needs a fresh re-scrape of each source - not
+  performed in this task, per its explicit scope.
+- Workday: not applicable (field doesn't exist to backfill).
+
+**Verification:**
+- `tests/test_pipeline.py` gained `test_process_item_stores_department`
+  (a real insert into the isolated test-schema Postgres, asserting
+  `row.department` is stored) and `tests/test_greenhouse_spider.py` (new
+  file, 3 tests against real live-shaped Greenhouse JSON) confirm the
+  fix end-to-end at the code level, not just by inspection.
+- Real production `psql` query, before -> after this session:
+  `job_postings.department` populated count by source:
+  ashby_api 0->0, gem_api 0->0, greenhouse_api 0->0, icims_portal 0->0,
+  **lever_api 0->3,299**, smartrecruiters_api 0->0, workday_api 0->0
+  (unchanged 0s are exactly the sources this task deliberately did not
+  re-scrape, not a fix that silently failed).
+- `job_postings` total row count: **83,720 -> 83,720** (unchanged -
+  backfill only updates existing rows, no re-scrape ran).
+- `is_relevant` populated count: 83,720 -> 83,720 (unchanged).
+  `embedding` populated count: 83,720 -> 83,720 (unchanged). Confirms
+  this task touched only `department`.
+- Full test suite: **219 passed** (215 existing + 4 new).
+- Nothing in `companies`, fuzzy-matching, discovery scripts, or
+  onboarding gates was touched.
+

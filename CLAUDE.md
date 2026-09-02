@@ -1335,6 +1335,43 @@ conventions" and SESSIONS.md for the real current state).
   to the row for any spider, and `employment_type` isn't even a column)
   — confirmed across all 7 sources before concluding this is pre-existing
   and out of this task's scope, not a Gem-specific defect.
+  **Investigated and fixed 2026-09-02 (see SESSIONS.md "Investigate and
+  fix job_postings.department NULL across all 7 sources") — the
+  `employment_type` gap noted above is untouched/still open, department
+  only.** Root cause confirmed against real live raw responses from every
+  source: `JobDataPipeline.process_item()`'s `JobPosting(...)` insert
+  simply never passed `department=item.get("department")` through, even
+  though `LeverScraper`/`SmartRecruitersScraper`/`AshbyScraper`/
+  `IcimsScraper`/`GemScraper` were already extracting a real value from
+  real raw fields (Lever `categories.department`, SmartRecruiters
+  `department.label`, Ashby `department`/`team`, iCIMS JSON-LD
+  `occupationalCategory`, Gem `job.department.name`) — fixed by adding
+  that one field to the insert; none of those 5 spiders needed changes.
+  **Greenhouse had a second, independent bug**: its real department field
+  is the structured `job["departments"][0]["name"]` (confirmed live on 5
+  companies), not anything in the free-form `metadata` array the old code
+  scanned for a "department"-named entry — that scan never matched real
+  data (real metadata entries are things like "Career Site Category",
+  "Job Family Group"). `greenhouse_spider.py` now reads `departments`
+  first, keeping the metadata scan only as a fallback.
+  **Workday is a genuine data-source limitation, not a bug** — its per-job
+  CXS detail response has no department/job-family field (confirmed live;
+  the list endpoint's `jobFamilyGroup` is an aggregate board-filter facet,
+  not a per-posting value) — `department` stays `None` there by design,
+  unchanged.
+  **Backfill**: only Lever was feasible without a re-scrape — its stored
+  `job_metadata.metadata_json` already contains the raw `categories` dict
+  (double-JSON-encoded — decode twice). `scripts/backfill_department_lever.py`
+  filled **3,299 of 3,715** `lever_api` rows from that stored data (the
+  other 416 genuinely had no department in their original raw categories,
+  left NULL). Greenhouse/SmartRecruiters/Ashby/iCIMS/Gem's stored
+  `metadata_json` does not carry the raw department value (checked
+  directly, not assumed) — backfilling those needs a fresh re-scrape,
+  not performed in this task. Verified: `job_postings` total row count
+  and `is_relevant`/`embedding` populated-counts unchanged before/after
+  (83,720 each); only `department` counts changed, and only for
+  `lever_api`. `tests/test_pipeline.py`/`tests/test_greenhouse_spider.py`
+  (new) cover the fix; full suite 219/219 passing.
 - **iCIMS spider BUILT + onboarded + first scrape 2026-09-01 (see
   SESSIONS.md "Build the iCIMS spider + gated onboarding + first
   scrape"). Recommendation was GO — but a step grayer on ToS/risk than
