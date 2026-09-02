@@ -7159,3 +7159,60 @@ sierra rows: 209   NULL is_relevant: 0   NULL embedding: 0
 **All 33 candidates are now resolved: 32 confirmed genuine sponsors (31 +
 Sierra) — all onboarded except Retool (no live Ashby board) — and 1
 confirmed false positive (Basis AI), permanently excluded.**
+
+---
+
+## 2026-09-01 — Retry the two outage-blocked Workday tenants (daiichisankyo, wholefoods)
+
+Both had `{tenant, dc, site}` resolved + verified in the 2026-08-31
+`needs_review` pass but were left unstored because the Workday tenants
+were in a platform-side maintenance outage. Retried live now.
+
+### (a) Real current request results — BOTH STILL DOWN
+
+**`daiichisankyo` / `wd1` / `DSI`:**
+- Identifier still valid: `POST .../wday/cxs/daiichisankyo/__nosuchsite__/jobs`
+  → **HTTP 404** (tenant+dc exist; 422 would mean not). DC sweep
+  `wd1/wd2/wd3/wd5/wd10/wd12/wd103` → only `wd1` is 404, the rest 422 →
+  the tenant has NOT moved data centre.
+- `POST .../wday/cxs/daiichisankyo/DSI/jobs` →
+  **`403 {"errorCode":"S22","errorCaseId":"36B666MTJE6K2H","message":"permission denied"}`**
+  — identical to the 2026-08-31 finding.
+- `GET .../en-US/DSI` → **302 → `https://www.myworkday.com/wday/drs/outage?t=daiichisankyo&s=dsi`**
+  (Workday's own outage page, literally naming tenant=`daiichisankyo`,
+  site=`dsi` — so the identifiers are right, the tenant is just offline).
+- `GET .../DSI/siteMap.xml` → 500.
+- **Verdict: identifiers still valid, tenant still in a Workday-side
+  outage/lockdown. NOT stored.**
+
+**`wholefoods` / `wd5` / `wholefoods`:**
+- Identifier still valid: `POST .../wday/cxs/wholefoods/__nosuchsite__/jobs`
+  → **HTTP 404**. `robots.txt` still authoritatively lists
+  `Allow: /wholefoods/` + `Sitemap: .../wholefoods/siteMap.xml` (alongside
+  `/365/ /wholefoodscanada/ /wholefoodsUK/ /wfmprivateposting/`) → site
+  segment unchanged.
+- `POST .../wday/cxs/wholefoods/wholefoods/jobs` → **persistent
+  `502 {"errorCode":"HTTP_502","errorCaseId":"846006MTJE6MVO"}`** across
+  4+ spaced retries.
+- `GET .../en-US/wholefoods` now returns HTTP 200 (was a redirect before)
+  but the body is a maintenance page — empty `<title></title>`, contains
+  "maintenance"/"outage", no board.
+- `GET .../wholefoods/siteMap.xml` → 500.
+- **Verdict: identifiers still valid, tenant still in a Workday-side
+  outage. NOT stored.**
+
+### (b)/(c) No tenant verified → nothing stored, nothing scraped, no new rows.
+
+### (d) Verification
+
+- **Full suite: 182 passed** (unchanged).
+- **Row counts unchanged** — before & after: `companies` 668,
+  `job_postings` 79,145. No `daiichi*` / `wholefoods*` row exists.
+- No spider / discovery-logic / other-company changes. Only CLAUDE.md +
+  SESSIONS.md updated with the current status.
+
+### (e) Status carried forward
+
+Both tenants stay on the "retry when Workday brings them back online"
+list. The site names are confirmed (`DSI`, `wholefoods`) — a future retry
+only needs to re-hit the CXS `/jobs` endpoint, not re-run discovery.

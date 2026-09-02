@@ -1303,13 +1303,19 @@ conventions" and SESSIONS.md for the real current state).
     `western.wd1` = Western Colorado University (not "WESTERN WASHINGTON
     UNIVERSITY"); `tera.wd3` = Teranet Inc, Canada (not "TERA CLOUDX").
     Confirmed by live `hiringOrganization` + posting text.
-  - **`daiichisankyo`, `wholefoods` — site known, currently
-    UNVERIFIABLE, not stored.** Site segments identified
-    (`daiichisankyo`/wd1 -> `DSI` via web search; `wholefoods`/wd5 ->
-    `wholefoods` via authoritative robots.txt) but both tenants are in a
-    Workday-side maintenance outage (CXS returns 403 `S22`/502; sitemaps
-    redirect to `community.workday.com/maintenance-page`). Re-run
-    discovery for these two when Workday brings the tenants back online.
+  - **`daiichisankyo`, `wholefoods` — site known, STILL in a Workday-side
+    outage, not stored (retried 2026-09-01, see SESSIONS.md "Retry the two
+    outage-blocked Workday tenants").** Identifiers re-confirmed still
+    valid (the `__nosuchsite__` probe returns 404 on `daiichisankyo.wd1`
+    and `wholefoods.wd5`; a DC sweep shows daiichisankyo has not moved;
+    robots.txt still authoritatively lists `/wholefoods/`), but the live
+    retry reproduced the exact same failure: `daiichisankyo` CXS `/jobs`
+    → `403 S22 "permission denied"` and `/en-US/DSI` → 302 to
+    `www.myworkday.com/wday/drs/outage?t=daiichisankyo&s=dsi`;
+    `wholefoods` CXS `/jobs` → persistent `502` and `/en-US/wholefoods`
+    serves a maintenance page. Site names (`DSI`, `wholefoods`) are still
+    the right values — retry again when Workday brings the tenants back
+    online.
 
 - **SmartRecruiters spider BUILT + onboarded 2026-09-01 (see SESSIONS.md
   "Build the SmartRecruiters spider").** `SmartRecruitersScraper`
