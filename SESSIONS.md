@@ -7667,3 +7667,114 @@ the Ashby/SR/iCIMS gates.
 - Row counts **unchanged**: `companies` 688, `job_postings` 83,225.
 - No spider / existing-script / DB changes. `scratch_gem_discovery.json`
   (gitignored) holds the full results.
+
+---
+
+## 2026-09-02 — Source LCA-verified Gem startup candidates (sourcing/verification only — no Gem discovery, no DB writes to `companies`)
+
+Same gap as Ashby, but a separate population: the `companies` table's
+>= 20-filing floor structurally excludes the smaller employers Gem skews
+toward, and 0 current `companies` rows resolve to a Gem board. Reused
+the exact Ashby sourcing/verification method
+(`scripts/discover_startup_sponsors.py`), applied to a fresh, entirely
+separate Gem-specific script: `scripts/discover_gem_startup_sponsors.py`.
+
+### Candidate sourcing (41 names, each with a real source)
+
+The 13 companies already confirmed live on jobs.gem.com in the prior
+Gem-discovery task, plus 28 new candidates found this session via real
+`site:jobs.gem.com` web searches (surfacing real board URLs directly —
+e.g. Retool, Quo, Rivia, Elloe AI, Luma AI, Bohler, Eliza, Agora, Protege
+AI, Jetty, Bolna AI, QuestDB, Kyth, Yeet, Tokaido Health, HASH, Nuvo,
+Letter AI, and more) and Gem's own published customer case studies
+(Scale AI, Veho Technologies). No guessing — every name traces to an
+actual search result or Gem-published page.
+
+### LCA verification against the full table (no >= 20 filter)
+
+Ran `find_matching_employers()` unchanged (rapidfuzz token_set_ratio,
+threshold 88, `sponsor_name_overrides` checked first) for all 41. Raw
+result: 21 fuzzy hits. Every one was individually spot-checked against
+real `job_title`/`worksite_city`/`worksite_state` rows before acceptance
+— exactly the Ashby precedent's method, not a name-similarity score
+alone.
+
+**7 confirmed false positives** (real LCA filings, but for a different,
+unrelated company sharing a short/generic name): Planned → FLORIDA
+PLANNED CABINETS (an Orlando cabinet company), Gem → BEAUTY GEM (an
+hourly-wage beauty-supply company), Rivia → RIVIAH (a home-health rehab
+company), Agora → AGORA ATLAS (a real, separately-funded Jersey City
+startup, confirmed via its own SEC Form D filings — a coincidental name
+collision), Constellation Institute → CONSTELLATION (an Edina MN
+engineering role with no identifiable tie), HASH → AQUILA HASH (reads
+like a crypto-mining hardware employer), Veho Technologies → X
+TECHNOLOGIES (a token_set_ratio artifact — the distinctive token "VEHO"
+isn't in the matched name at all). For each, a direct exact-name check
+(`employer_name_normalized = '<NAME>'`) confirmed no cleaner match exists
+either — these are genuine "no real evidence" cases, not just weaker
+picks.
+
+**1 flagged needs_review**: Function Health → FUNCTION (2 filings, both
+NYC-based, while public sources place Function Health's real HQ in
+SF/Austin — plausible but not confirmable either way from job-title/
+worksite data alone; no exact "FUNCTION HEALTH" filing exists to settle
+it).
+
+**2 real Sierra-pattern finds — a real sponsor hiding under a materially
+different legal/product name, missed by the standard fuzzy match**, each
+fixed the same way Sierra was (a new `sponsor_name_overrides` row, the
+project's designated manual-correction mechanism — table now has 4 rows:
+kraken, sierra, modular, ntop):
+  - **ntop → NTOPOLOGY** (15 filings: Geometry Software Engineer, Product
+    Manager (Simulation and Optimization), NYC — matches nTop's real
+    jobs.gem.com posting titles exactly). `token_set_ratio("NTOP",
+    "NTOPOLOGY")` = 61.5, well below the 88 threshold — the company's
+    real legal/product name (nTopology, since rebranded to nTop) diverges
+    too far from the short brand name for fuzzy matching alone. Found via
+    a broader `ILIKE '%NTOP%'` scan of the full table, exactly the
+    technique that found Sierra for Ashby.
+  - **modular → MODULAR** (18 filings: Machine Learning Compiler Engineer,
+    AI GPU Performance Engineer, AI Compiler Engineer — Mountain
+    View/Austin, an exact match to Modular's real jobs.gem.com postings).
+    A different failure mode from Sierra/ntop: the exact-name match
+    "MODULAR" *does* score 100 via `token_set_ratio` and was already in
+    `lca_disclosures`, but `find_matching_employers("Modular")` was
+    returning a wrong top pick, "ADVANCED MODULAR SYSTEMS" (1 filing, an
+    unrelated Goleta CA equipment-engineering firm) instead — a
+    tie-break/ranking artifact among several same-scoring candidates, not
+    a threshold miss. Caught by directly checking whether an exact-name
+    row existed before trusting the matcher's top pick.
+
+### Final verified list — 14/41 (34.1%) ready for a future Gem
+discovery/onboarding pass
+
+Scale AI (144 filings), Retool (30), Felix Technologies (19), Modular
+(18), ntop (15), Luma AI (15), Linktree (7), Apartment List (6),
+Instrumental (5), Jetty (5, matched to its real "Jetty National, Inc."
+legal name — confirmed via a Bloomberg company profile), Nuvo (3,
+matched to "Nuvo Technologies, Inc.", confirmed South San Francisco HQ),
+Paces (1, matched to "Paces AI" — confirmed Brooklyn NY energy-startup HQ
+against a Power Engineer role), Bohler (1, a civil-engineering firm — its
+Project Engineer LCA role matches its real business), Letter AI (1,
+exact legal-name match "Letter AI Inc (formerly Tractatus AI Inc)", a
+Founder/CTO role in SF).
+
+**19 candidates had no LCA match at all after the broader search** —
+reported honestly, not dropped: Nominal, Blue J, SkillsJump, Quo, Elloe
+AI, Deepline, Eliza, Emerge Career, Protege AI, GC AI, Bolna AI, Myriad
+Technology, QuestDB, Kyth, Yeet, Epoch Blue, Tokaido Health, Cactus Club,
+CareTria.
+
+### Verification
+
+- Full suite: **203 passed** (unchanged — a new script + 2
+  `sponsor_name_overrides` rows added, no other code touched).
+- `companies` row count and every `ats_platform` count **unchanged**
+  (688 total; greenhouse 318 / smartrecruiters 224 / lever 60 / workday
+  38 / ashby 28 / icims 20).
+- Ashby's own candidate script (`scripts/discover_startup_sponsors.py`)
+  and its output (`scratch_startup_sponsor_candidates.json`) **verified
+  byte-for-byte unchanged** (same MD5) — this task added a wholly
+  separate script and never touched that one.
+- No Gem discovery run, no scraping, no `companies` writes. Full results
+  in gitignored `scratch_gem_startup_sponsor_candidates.json`.

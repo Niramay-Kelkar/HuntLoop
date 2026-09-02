@@ -1247,6 +1247,37 @@ conventions" and SESSIONS.md for the real current state).
   built: one list call + one detail call per job (Ashby/Workday shape),
   onboarding gated on the `teamDisplayName` cross-check + hold 0-job
   boards. `scratch_gem_discovery.json` (gitignored) holds the results.
+  **Startup-sourcing groundwork for Gem done 2026-09-02
+  (sourcing/verification only — no Gem discovery, no DB writes; see
+  SESSIONS.md "Source LCA-verified Gem startup candidates") — a separate
+  script and candidate population from the Ashby startup-sourcing pass,
+  reusing the exact same method.** `scripts/discover_gem_startup_sponsors.py`
+  checked 41 real web-search-sourced Gem-candidate names (the 13 already
+  confirmed live plus 28 new ones, e.g. Retool, Jetty, Luma AI, Nuvo,
+  Bohler, Paces, Letter AI, Scale AI) against the full `lca_disclosures`
+  table; every fuzzy hit was individually spot-checked against real
+  `job_title`/`worksite` rows, not accepted on score alone — 7 of 21 raw
+  hits were confirmed false positives (short/generic-name collisions:
+  Planned/Gem/Rivia/Agora/Constellation Institute/HASH/Veho Technologies
+  all matched an unrelated real company). **2 real Sierra-pattern finds**,
+  each fixed with a new `sponsor_name_overrides` row (table now has 4:
+  kraken/sierra/modular/ntop) — `ntop` → `NTOPOLOGY` (real company,
+  since rebranded; `token_set_ratio` 61.5, below threshold, found via a
+  broader `ILIKE` scan) and `modular` → `MODULAR` (the exact-name match
+  existed but the matcher's top pick was a wrong same-scoring tie,
+  "ADVANCED MODULAR SYSTEMS" — a ranking artifact, not a threshold miss).
+  **Final: 14/41 candidates carry real, spot-checked LCA sponsorship
+  evidence** (Scale AI 144 filings, Retool 30, Felix Technologies 19,
+  Modular 18, ntop 15, Luma AI 15, Linktree 7, Apartment List 6,
+  Instrumental 5, Jetty 5, Nuvo 3, Paces 1, Bohler 1, Letter AI 1); 1
+  (Function Health) flagged `needs_review`; 19 had no LCA match at all
+  after the broader search, reported honestly rather than dropped.
+  Nothing stored in `companies` — this is the input to a future Gem
+  discovery-then-onboard pass, not yet run. `companies` row count and
+  every `ats_platform` count confirmed unchanged, and the Ashby sourcing
+  script/output verified byte-for-byte untouched (same MD5).
+  `scratch_gem_startup_sponsor_candidates.json` (gitignored) holds the
+  full results.
 - **iCIMS spider BUILT + onboarded + first scrape 2026-09-01 (see
   SESSIONS.md "Build the iCIMS spider + gated onboarding + first
   scrape"). Recommendation was GO — but a step grayer on ToS/risk than
