@@ -7367,3 +7367,169 @@ cross-check (the `aurora`-style generic-slug risk).
   before and after. No company or posting rows written.
 - No spider / discovery-script / model / DB changes. Only SESSIONS.md +
   CLAUDE.md updated.
+
+---
+
+## 2026-09-01 — Build the iCIMS spider + gated onboarding + first scrape
+
+Built the production iCIMS integration on the 2026-09-01 discovery-pass
+ground truth (not re-derived). iCIMS has no usable public/third-party API
+(its documented Job Portal API is HTTP-Basic-auth-gated), so the spider
+parses each tenant's OWN server-rendered career-portal HTML.
+
+### Code
+- `huntloop.icims_portal` — pure parsing (no network, no Scrapy): listing
+  anchors (`<a class="iCIMS_Anchor" title="{id} - {Title}">`), `<link
+  rel="next">` / "Page N of M" pagination, schema.org JSON-LD
+  `JobPosting` extraction (handles a bare node, an array, and `@graph`),
+  per-field visible-HTML fallback helpers, and `robots_allows_listing()`
+  built on stdlib `RobotFileParser`.
+- `huntloop.spiders.icims_spider.IcimsScraper` (name `icims_portal`):
+  honest non-browser UA (`HuntLoop/1.0 (sponsorship-aware job aggregator;
+  ...)`), `DOWNLOAD_DELAY=2`, one request/host, AutoThrottle on,
+  `ROBOTSTXT_OBEY` left ON. **Fetches each tenant's robots.txt FIRST**
+  (following redirects to the authoritative host) and skips the whole
+  tenant with a logged reason if it disallows `/jobs/search`; a disallow
+  is never bypassed. JSON-LD is the primary field source; visible-HTML is
+  a per-field fallback, every use logged + counted, with a run summary in
+  `closed()`. Zero openings / missing-or-broken JSON-LD / mid-scrape HTTP
+  error / robots-disallow-via-redirect are all logged-and-skipped, never
+  a crash. `MAX_PAGES=60` safety cap. Yields plain `JobPostingItem`s
+  through the shared `JobDataPipeline` — `is_relevant` + resume-match
+  `embedding` computed at insert like every other source, zero
+  iCIMS-specific wiring, zero manual backfill.
+- `main.py` `SPIDERS_BY_PLATFORM["icims"]` (plain `companies=tokens`
+  branch); `scripts/scrape_icims.py` scoped entrypoint.
+- `scripts/discover_icims_job_board.py` — proof/discovery resolver (name
+  → name-derived `careers-{slug}` candidates → live-check robots +
+  listing HTML + `<title>` org-name cross-check; ranks candidates so a
+  live board with jobs beats a robots-block beats a wildcard non-portal
+  subdomain).
+- `scripts/discover_and_store_icims.py` — confidence-gated onboarding,
+  mirroring the SmartRecruiters/Ashby gates. `auto` = high confidence via
+  a strong candidate + robots-permitted + >= 1 live job; `held` (→
+  `--confirmations` file) = live+permitted+>=1 job but medium/low-suspect
+  /generic or a weak first-word/acronym win; **`robots.txt` disallow is a
+  HARD exclude — never stored, not even via `--confirmations`** (task
+  requirement, and "never bypass a disallow"); live-but-0-jobs /
+  not-a-portal / unresolved excluded. Dedups by slug (two DOL employer
+  names can share one real board).
+- Tests: `tests/test_icims_portal.py` (8) + `tests/test_icims_spider.py`
+  (13), real-shaped markup captured from live tenants, no network.
+  `pytest`: **203 passed** (182 → 203).
+
+### (a) Onboarding run — `--limit 2000`
+
+Population: 1,978 DOL sponsors (>= 20 LCA filings) not in `companies` and
+not already GH/Lever-matched.
+
+| bucket | count |
+|---|---|
+| resolved to a live iCIMS portal | 94 |
+| **gate PASS (auto)** | 16 rows / 13 distinct slugs |
+| gate HELD (needs a human) | 48 |
+| — confirmed this run (live board cross-check) | 7 slugs |
+| — still blocked (not confirmed) | 39 |
+| **EXCLUDED — robots.txt `Disallow: /` (hard)** | 70 |
+| EXCLUDED — live but 0 jobs / not-a-portal | 6 |
+| already onboarded | 1 |
+| **stored** | **20 companies** |
+
+- **Auto (13 distinct):** persistentsystems, northwesternmutual, cotiviti,
+  analysisgroup, msci, reisystems, primehealthcare, libertymutual, yelp,
+  teleworldsolutions, blackhawknetwork, milbank, kleinfelder, ropesgray.
+  (16 rows collapse: "PERSISTENT SYSTEMS LIMITED"/"PERSISTENT SYSTEMS" and
+  two "LIBERTY MUTUAL *" both dedup to one slug.)
+- **Held-then-confirmed (7):** devereux, ohsu, geosyntec, usu, healthedge,
+  bronxcare, sas — each held only because the winning candidate was a
+  first-word/acronym guess, then confirmed by a fresh live check: the
+  portal `<title>` org name + real job titles unambiguously match the DOL
+  employer. `sas` = SAS Institute; Samsung Austin Semiconductor and SG
+  Americas Securities also resolve to `careers-sas` and correctly stay
+  held (wrong company for that slug). `confirmed_icims_slugs.txt`
+  (gitignored) records the 7 with their cross-check evidence.
+- **Correctly excluded — robots.txt `Disallow: /` (70):** e.g. Uber,
+  DocuSign, Emory, Harvard, Indeed, ASU (+ wrong-slug collisions like
+  Ford→`careers-fm`, AMD→`careers-amd`, ZS→`careers-zs` that hit a real
+  robots-blocked tenant — "blocked" is hard-excluded regardless of
+  whether it's the right company, the safe behaviour).
+- **Still held (39):** generic-slug collisions (`aa` ← American Airlines
+  / Amazon Advertising / Automation Anywhere / …; `boston` ← BCG / Boston
+  College / Boston Scientific / …; `nyu`, `mmc`, `quest`) and
+  medium-confidence `<title>`-gave-no-org boards. Left for a human.
+
+### (b) Scrape — `scripts/scrape_icims.py` via the `app` Docker image
+
+- **4,081 postings yielded → 4,080 inserted** (1 repost skipped), **0
+  pipeline errors**, `finish_reason: shutdown`.
+- **primehealthcare deliberately cut short at 1,960 rows** — a hospital
+  group (Prime Healthcare / its member hospitals) whose board is ~3,000
+  mostly-clinical roles; at the per-host 0.5 req/s + per-item CPU
+  embedding rate it would have taken another ~40 min for ~1,000 more
+  RN/tech rows (all `is_relevant=false`). Stopped with `docker stop`
+  (SIGTERM → Scrapy graceful shutdown, pending items committed). Not a
+  failure — every inserted row is fully processed; the other 19 boards
+  ran to completion.
+- Live cross-check (5 postings, honest-UA curl vs. DB): Geosyntec
+  "Senior Geotechnical Engineer" / Cotiviti "Senior Staff Generative AI
+  Scientist" / BronxCare "Stationary Engineer II" / HealthEdge "Software
+  Engineer" + "Senior Software Engineer" — title, datePosted, location,
+  org all match exactly.
+
+### (c) is_relevant / embedding — zero NULLs, no backfill
+
+Direct DB query over all 4,080 `icims_portal` rows: **`is_relevant` NULL
+= 0, `embedding` NULL = 0**, 609 flagged relevant. No
+`backfill_relevance.py` / `backfill_embeddings.py` run — the shared
+pipeline's `_classify_and_embed` populated both at insert (torch present
+in the `app` image). Relevant-ratio varies sensibly by employer:
+Geosyntec 128/164, Kleinfelder 145/202, HealthEdge 51/74 (eng/software
+firms) vs. Devereux 5/388, BronxCare 1/121 (behavioral-health / hospital).
+
+### (d) robots.txt respected for every tenant touched
+
+- Onboarding: **70 tenants hard-excluded for `Disallow: /`**, never
+  stored, never scraped (example above).
+- Spider: re-checks each of the 20 stored tenants' robots.txt as its
+  first request — all 20 permitted `/jobs/search` (they passed the same
+  check at onboarding). Scrapy's own `RobotsTxtMiddleware` (left ON) is a
+  second layer: `robotstxt/forbidden: 4` in the run stats (redirect-host
+  edge cases), `robotstxt/request_count: 24`.
+- The resolver/spider follow robots redirects to the authoritative host
+  (proven earlier: `careers-corgan` → 301 → `careers-old-corgan`
+  `Disallow: /` → correctly treated as blocked).
+
+### (e) JSON-LD primary vs. HTML fallback — honest frequency
+
+Run summary: **`JSON-LD primary for 4081, whole-job HTML fallback for
+0`**. Per-field HTML fallback fired **only for `locations`, 390 times
+(~9.6%)** — JSON-LD `jobLocation` genuinely absent on some remote /
+multi-site roles, filled from the `og:title` "…in {City}, {State}".
+`title` and `description` never needed a fallback. This validates the
+"parse JSON-LD, it's template-stable" decision.
+
+### (f) Tests + row counts
+
+- Full suite: **203 passed** (was 182; +21 iCIMS).
+- **`companies` 668 → 688** (+20, exactly the onboarded set).
+- **`job_postings` 79,145 → 83,225** (+4,080).
+
+### (g) Go / no-go — GO, but a step grayer than every prior platform
+
+The spider works cleanly and identifier resolution is as automatable as
+Workday's / SmartRecruiters' was (name-derived `careers-{slug}` +
+confidence gate + human-confirm for weak candidates). **But this is
+HTML-scraping a page built for human browsers, not consuming a
+vendor-published feed** — the ToS/risk profile is different in kind from
+Greenhouse/Lever/Ashby/SmartRecruiters/Workday-CXS, all of which hit
+JSON endpoints their platforms intend for programmatic/public use.
+iCIMS's only documented programmatic API is auth-gated. Mitigations baked
+in: robots-gated per tenant (hard-exclude on `Disallow: /`, ~30% of
+resolvable tenants), honest non-browser UA, 2s delay + one request/host +
+AutoThrottle, JSON-LD (template-stable) as the primary parse.
+`scripts/discover_and_store_icims.py` re-run cadence: after each
+quarterly DOL LCA ingest, same as `detect_ats_for_sponsors.py`.
+Follow-ups: the 39 still-held generic-slug boards need a human glance;
+primehealthcare can be re-scraped to completion if its clinical roles
+ever matter; a fuller onboarding sweep past `--limit 2000` (this run
+covered the highest-filing 1,978 of the ~8,100 "neither" employers).

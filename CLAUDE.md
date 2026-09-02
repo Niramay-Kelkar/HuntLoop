@@ -1210,6 +1210,60 @@ conventions" and SESSIONS.md for the real current state).
     `api.icims.com/customers/...` (auth-gated → unauthorized without
     credentials). Onboarding gate mirrors Workday/SR/Ashby: board-name
     cross-check before storing (generic-slug risk, e.g. `careers-aurora`).
+- **iCIMS spider BUILT + onboarded + first scrape 2026-09-01 (see
+  SESSIONS.md "Build the iCIMS spider + gated onboarding + first
+  scrape"). Recommendation was GO — but a step grayer on ToS/risk than
+  any other spider here, since it HTML-scrapes a human-facing page rather
+  than a vendor-published feed.** `IcimsScraper`
+  (`src/huntloop/spiders/icims_spider.py`, name `icims_portal`) parses
+  each tenant's server-rendered portal HTML at
+  `careers-{slug}.icims.com/jobs/search?pr={0-indexed page}&in_iframe=1`
+  then one detail page per job for the schema.org JSON-LD `JobPosting`.
+  Pure parsing lives in `huntloop.icims_portal` (unit-tested,
+  `tests/test_icims_portal.py` + `tests/test_icims_spider.py`, +21
+  tests). **Honest non-browser UA, `DOWNLOAD_DELAY=2`, one request/host,
+  AutoThrottle, `ROBOTSTXT_OBEY` left ON. The spider fetches each
+  tenant's robots.txt FIRST (following redirects to the authoritative
+  host) and skips the whole tenant if it disallows `/jobs/search` — a
+  disallow is NEVER bypassed.** JSON-LD is the primary field source;
+  visible-HTML is a per-field fallback, logged + counted, run summary in
+  `closed()`. `MAX_PAGES=60` cap. Yields plain `JobPostingItem`s through
+  the shared `JobDataPipeline` — `is_relevant` + `embedding` at insert,
+  zero iCIMS-specific wiring, zero manual backfill (run via the `app`
+  Docker image for torch, same as every embedding-dependent path).
+  Added to `main.py`'s `SPIDERS_BY_PLATFORM` (plain `companies=tokens`
+  branch); `scripts/scrape_icims.py` is the scoped entrypoint. **NEVER
+  use `api.icims.com/customers/...`** — auth-gated, unauthorized without
+  credentials.
+  **Onboarding gate: `scripts/discover_and_store_icims.py`** (reuses
+  `discover_icims_job_board.py` unchanged) over the >= 20-filing DOL
+  sponsors not already in `companies`/GH-Lever. `auto` = high confidence
+  via a strong candidate + robots-permitted + >= 1 live job; `held` (→
+  `--confirmations` file) = weak candidate / medium / low-suspect;
+  **`robots.txt Disallow: /` is a HARD exclude — never stored, not even
+  via `--confirmations`.** Re-run cadence: after each quarterly DOL LCA
+  ingest.
+  **Real run (`--limit 2000` → 1,978 sponsors): 94 resolved to a live
+  portal; 16 auto-passed (13 distinct slugs); 7 held-then-confirmed via a
+  live board `<title>`-org + sample-title cross-check (devereux, ohsu,
+  geosyntec, usu, healthedge, bronxcare, sas — `sas` = SAS Institute,
+  Samsung Austin / SG Americas correctly stay held for that slug); 70
+  hard-excluded for `Disallow: /` (Uber, DocuSign, Emory, Harvard,
+  Indeed, ASU, + wrong-slug collisions); 39 still held (generic-slug
+  collisions `aa`/`boston`/`nyu`/`quest` — left for a human).** 20
+  `companies` rows stored, then scraped: **4,080 `job_postings` rows, 0
+  NULL `is_relevant`, 0 NULL `embedding`, no backfill; `companies`
+  668→688, `job_postings` 79,145→83,225.** JSON-LD was the primary
+  source for 100% of jobs (whole-job HTML fallback: 0); per-field HTML
+  fallback fired only for `locations` (~9.6%, JSON-LD `jobLocation`
+  absent on some remote roles). **`primehealthcare` deliberately cut
+  short at 1,960 of ~3,000 rows** (a hospital group, mostly clinical
+  roles that all filter `is_relevant=false`; SIGTERM → graceful Scrapy
+  shutdown, pending items committed) — the other 19 boards ran to
+  completion. Live-verified 5 postings against their real pages.
+  Follow-ups: the 39 still-held generic-slug boards; a fuller onboarding
+  sweep past the top-1,978 employers; re-scrape primehealthcare to
+  completion only if its clinical roles ever matter.
   **Discovery mechanism proven end-to-end 2026-08-30 on 5 real
   unambiguous tenants (see SESSIONS.md "Prove Workday {tenant, dc, site}
   discovery"), then the spider was BUILT 2026-08-30 (see the Workday
