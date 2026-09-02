@@ -1141,6 +1141,39 @@ conventions" and SESSIONS.md for the real current state).
   NULL-or-unknown). `main.py` needs no changes - it already groups
   `companies` by `ats_platform`. No new spiders were built; `ashby`/
   `workday`/`neither` employers are still skipped.
+  **White-labeled Greenhouse/Lever on a company's own domain
+  investigated 2026-09-02 (see SESSIONS.md "Investigate white-labeled
+  Greenhouse/Lever on custom domains" - investigation only, no code
+  changed, no DB writes).** Real mechanism (confirmed on Ripple's live
+  page, a Next.js app): the company's own frontend calls/embeds the same
+  Greenhouse Boards API data server-side and republishes it under its own
+  URLs (`gh_jid` query param still present as a fingerprint) - not an
+  iframe, not a different backend. **The existing `boards-api.
+  greenhouse.io/v1/boards/{slug}/jobs` endpoint is reachable identically
+  regardless of the company's own domain once the slug is known** (proven
+  on Ripple + Airbnb/Pinterest/Coinbase/Peloton, all white-labeled on
+  custom domains, all found by literally guessing the slug) - **so
+  white-labeling is purely a discovery problem, `GreenhouseScraper` needs
+  no changes.** The real, separate cause Ripple specifically was missed:
+  `slug_candidates()` never emits a bare first-word candidate for a
+  2-word name whose second word isn't in `_TRAILING_NOISE` ("RIPPLE
+  LABS" - "LABS" isn't recognized noise) - a known, deliberate
+  conservatism (see the false-positive history in this bullet's own
+  paragraph above), not anything white-labeling-specific. Tested against
+  the real "neither" population (`scratch_neither_ats_probe.json`'s
+  existing 400-employer sample): a plain random 20-employer sample found
+  0 genuine hits (mostly staffing/hospitals/universities, as already
+  documented); a targeted sample of the 44 "2-word, non-noise-second-word"
+  employers in that same 400 found **2 confirmed genuine misses -
+  `FAIRE WHOLESALE` -> `faire` and `HIGHNOTE PLATFORM` -> `highnote`**
+  (both verified: real matching LCA job titles, not name-collision
+  noise) - plus 2 more real false-positive-shaped hits confirming this
+  approach isn't free of the same collision risk the existing stoplist/
+  similarity gates already guard against. **Recommendation: worth a
+  future carefully-gated follow-up (bare-first-word pass, run only for
+  names the current generator skips, with the same or stronger
+  corroboration gates already used elsewhere), not an urgent rebuild -
+  real but modest prevalence, not a rare Ripple-only edge case.**
   **Feasibility measured 2026-08-30 (see SESSIONS.md "Which ATS is most
   common among the 'neither' sponsors") to decide which spider to build
   next — measurement only, no spider, no DB writes.**

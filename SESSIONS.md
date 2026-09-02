@@ -8007,3 +8007,145 @@ an explicit comment to this effect - left unchanged, correctly NULL.
 - Nothing in `companies`, fuzzy-matching, discovery scripts, or
   onboarding gates was touched.
 
+## 2026-09-02 - Investigate white-labeled Greenhouse/Lever on custom domains (Ripple case)
+
+Investigation only - no spider/discovery code changed, no DB writes
+(confirmed: `companies` 700, `job_postings` 83,720 unchanged before and
+after).
+
+**(a) Real mechanism, confirmed via Ripple's actual page source.**
+Fetched `ripple.com/careers/` live: it's a Next.js app that
+server-renders the job list into the page as React Server Component
+payload (`self.__next_f.push([...])`), not a client-side XHR to
+Greenhouse and not an iframe. The embedded job objects are byte-for-byte
+the real Greenhouse Boards API job shape (`absolute_url`,
+`data_compliance`, `internal_job_id`, `requisition_id`, `departments`,
+`offices`, `metadata` - matches the shape independently confirmed against
+qualtrics/riotgames/checkr/duolingo/figma in the prior department-column
+session) - only `absolute_url` is rewritten to point at
+`ripple.com/careers/all-jobs/job/{id}?gh_jid={id}` instead of
+`boards.greenhouse.io/...`. So "white-labeling" here = Ripple's own
+backend calls Greenhouse's API (client- or server-side) and republishes
+the same data under Ripple's own URLs/branding - not an iframe, not a
+different backend. The `gh_jid` query param is Greenhouse's own
+convention, still present even after the URL rewrite - a useful
+fingerprint for "this custom-domain page is GH-powered" independent of
+knowing the slug.
+
+**(b) Confirmed: the real Greenhouse Boards API is reachable directly by
+slug regardless of the company's own domain.** Once the slug is known,
+hitting `boards-api.greenhouse.io/v1/boards/{slug}/jobs` directly works
+identically to any standard `boards.greenhouse.io` customer - proven by
+guessing the literal word "ripple": `boards-api.greenhouse.io/v1/boards/
+ripple/jobs` returns 200 with 133 real jobs, and the job ids
+(7462072/8042882/7572250) exactly match the ids embedded in Ripple's own
+live page. **This makes white-labeling purely a discovery problem, not a
+scraping problem** - the existing `GreenhouseScraper` needs zero changes
+to scrape a white-labeled company once its slug is known.
+
+**(c) Real, working slug-discovery method - tested against multiple
+examples, not just Ripple.** Two complementary checks, both real:
+- Live-tested 7 more well-known companies by literally guessing their
+  name as a Greenhouse slug (no web search needed, all confirmed by
+  direct API calls): `robinhood`/`airbnb`/`pinterest`/`coinbase`/
+  `affirm`/`carta`/`peloton` ALL resolve. Checking each one's real
+  `absolute_url` in the API response showed **Airbnb (careers.airbnb.com),
+  Pinterest (pinterestcareers.com), Coinbase (coinbase.com/careers), and
+  Peloton (careers.onepeloton.com) are white-labeled on custom domains
+  exactly like Ripple - Robinhood/Affirm/Carta are not (still
+  boards.greenhouse.io/job-boards.greenhouse.io).** Every one of these -
+  white-labeled or not - resolved from the plain company name with zero
+  extra effort, which is the key evidence for (e) below: white-labeling
+  itself adds no discovery difficulty once slug-guessing is tried: the
+  Greenhouse API doesn't care what frontend calls it.
+- **The real reason Ripple specifically was missed by
+  `scripts/detect_ats_for_sponsors.py`'s `slug_candidates()` has nothing
+  to do with white-labeling and everything to do with a known, deliberate
+  conservatism in that function**: for "RIPPLE LABS" (2 words), "LABS" is
+  not in `_TRAILING_NOISE`, so the trailing-noise-trim loop never fires,
+  and the "first two words" reduction only triggers for names with 3+
+  words - so a bare first-word candidate ("ripple") is never generated
+  for any 2-word company name whose second word isn't recognized generic
+  noise. This is the exact same trade-off already documented in that
+  file's own comments (bare first-word guessing was deliberately dropped
+  after the first probe run produced false positives like "GENERAL
+  MOTORS" -> "general"). Ripple is a real, concrete casualty of that
+  trade-off, not a white-labeling-specific gap.
+
+**(d) Real test against the DOL "neither" population**, reusing the
+existing 400-employer `scratch_neither_ats_probe.json` sample (>= 20
+LCA filings, not resolved to Greenhouse/Lever/Ashby/Workday/
+SmartRecruiters/iCIMS as of 2026-08-30) plus each script's own already-
+proven `slug_candidates()`/`all_candidates()` helpers, unmodified:
+- **A plain random sample of 20 "undetected" employers** (seed 777) -
+  mostly IT staffing firms, hospitals, and universities, matching this
+  project's existing documented characterization of the undetected mass
+  - produced 0 confirmed genuine Greenhouse/Lever matches. One
+  interesting near-miss: "ACCRUE SELECT" -> bare-word "accrue" resolves
+  to a real, different company ("Accrue", a NYC fintech) with a fuzzy
+  name-similarity score of 100 (a false-positive artifact of
+  `token_set_ratio` scoring a short name that's a strict subset of the
+  longer one) - confirmed a false positive by checking real LCA job
+  titles/worksite pattern (IT-staffing-shaped: Automation Engineer, Big
+  Data Engineer, scattered mid-size-city worksites) against Accrue's
+  real job ad (NYC fintech "Enterprise Account Executive, Loyalty and
+  Rewards"). "NATIONAL MARROW DONOR PROGRAM" -> "national" also hit
+  (100% name match, since a real Greenhouse board is literally named
+  "NATIONAL") - this is the exact known collision
+  `slug_candidates()`'s own comments already document as the reason bare
+  first words are withheld.
+- **A targeted "Ripple-Labs pattern" sample** (2-word employer names
+  whose second word is NOT in `_TRAILING_NOISE`, so the production
+  candidate generator never tries a bare first word for them) found
+  **44 such employers in the same 400-employer sample.** Live-tested the
+  top 25 by filing count against Greenhouse/Lever with the bare first
+  word: **2 confirmed genuine hits** - **"FAIRE WHOLESALE" -> `faire`**
+  (real board name "Faire", 100% match; LCA job titles - Chief of Staff,
+  Data Scientist, Group Product Director, Lead Product Designer -
+  unmistakably match a real tech company, not a coincidence) and
+  **"HIGHNOTE PLATFORM" -> `highnote`** (real board name "Highnote", 100%
+  match; LCA titles - Principal Software Engineer, Senior Data
+  Scientist, Security Engineer - match a real fintech-platform startup).
+  Testing the remaining 19 of the 44 found one more false-positive-shaped
+  hit ("ALLIED TEC" -> "allied" -> a real but wrong "Allied Mechanical"
+  board, sim 75 - a pre-existing general fuzzy-matching risk, not new to
+  this investigation) and no further genuine matches.
+  **Net: 2 genuine new companies found among 44 candidates in this
+  pattern class (from a 400-employer sample of the 8,113-employer
+  "neither" population)** - i.e. roughly 1 in 22 candidates in this
+  specific pattern shape is real, but this pattern class itself only
+  covers ~11% of the full "neither" sample (44/400).
+
+**(e) Honest recommendation.** White-labeling per se is a non-issue -
+confirmed across 5 real white-labeled examples (Ripple, Airbnb,
+Pinterest, Coinbase, Peloton), the underlying board is always reachable
+by slug through the exact same public API `GreenhouseScraper` already
+uses, with zero scraping changes needed. The real, separate, and
+genuinely worth-fixing gap is `slug_candidates()`'s deliberate omission
+of a bare first-word candidate for 2-word (and likely 3+-word) company
+names whose extra word(s) aren't recognized as generic legal/corporate
+noise. This investigation found 2 confirmed real companies (Faire,
+Highnote) missed by that gap in a targeted 44-candidate slice of just a
+400-employer sample of the ~8,113-employer "neither" population -
+extrapolating (with real uncertainty from the small sample) suggests
+roughly tens of real companies are likely findable this way across the
+full population, which is a modest but real and worthwhile improvement,
+not a rare edge case limited to Ripple alone. **It is NOT free, though**:
+the same bare-word looseness that finds Faire/Highnote also produced 2
+distinct real false-positive patterns in this same small test (a
+short-name-is-a-strict-subset `token_set_ratio` artifact, and a
+same-word-different-industry board collision) - a production rollout of
+this would need the same or stronger safeguards already used elsewhere
+in this project (the board's `hiringOrganization`/board-name
+cross-check, `_MIN_REDUCED_SLUG_LEN`/`_COMMON_WORDS` stoplist logic, and
+likely a higher similarity bar or a secondary corroborating signal
+before auto-storing a bare-word hit) rather than simply lowering the
+bar. **Recommendation: worth a future, carefully-gated follow-up (a
+bare-first-word pass with strict corroboration, run only for names the
+current candidate generator skips), not an immediate priority rebuild of
+the discovery script.**
+
+**Verification**: full suite 219/219 passing (unchanged from before this
+session); `companies` and `job_postings` row counts unchanged (700 /
+83,720); no spider or discovery script file was modified; nothing was
+written to the database in this investigation.
