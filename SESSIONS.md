@@ -7216,3 +7216,154 @@ were in a platform-side maintenance outage. Retried live now.
 Both tenants stay on the "retry when Workday brings them back online"
 list. The site names are confirmed (`DSI`, `wholefoods`) — a future retry
 only needs to re-hit the CXS `/jobs` endpoint, not re-run discovery.
+
+---
+
+## 2026-09-01 — iCIMS discovery pass (proof/discovery only — no spider, no DB writes)
+
+Conservative discovery pass to find out what's actually real for iCIMS
+before committing to a spider. No production spider built. No existing
+spider or discovery script touched. Honest identifying User-Agent
+(`HuntLoop-ATS-discovery/1.0 (sponsorship-matching research; contact
+<user email>)`), 3–4s delays between requests, robots.txt respected,
+stop-and-report on any block (none hit).
+
+### (a) The internal-endpoint premise — checked against real live traffic
+
+The task premise was that third-party iCIMS scrapers hit an internal
+JSON endpoint the career-portal widget calls client-side, shaped like
+`api.icims.com/customers/{customerId}/search/portals/{portalIdOrName}`.
+**Verified live — that is NOT what happens, on any tenant inspected:**
+
+- **The documented endpoint is genuinely auth-gated.** `GET
+  https://api.icims.com/customers/6273/search/portals/jobs?staleness=0`
+  (the example customer id from iCIMS' own developer docs), no
+  credentials → **HTTP 401** `{"errors":[{"errorMessage":"Invalid
+  Username or Password credentials provided.","errorCode":6}]}`. iCIMS'
+  Job Portal API docs confirm HTTP Basic auth is mandatory. Using it
+  without credentials is not an option and would be unauthorized.
+- **The career portals do not call it.** Full Chrome network-tab
+  inspection of `careers-insmed.icims.com` (188 requests) and
+  `careers-herbalife.icims.com`: **zero** requests to `api.icims.com`,
+  zero `/api/jobs`, zero `/jobs/intelliservices`, zero JSON XHR for job
+  data. The only job-data request is
+  `GET https://careers-{slug}.icims.com/jobs/search?ss=1&in_iframe=1` —
+  **server-rendered HTML**, GET, 200.
+- **`customerId` is not present in client-side page source** on any
+  tenant. The **portal id** IS observable (in the CSS request
+  `.../servlet/icims2?module=AppInert&action=renderDynamicPortalCss&...&portal=17&...`)
+  — real values seen: **17** (the common default), **69**, **96**,
+  **82281** — but it is not needed to scrape (the portal defaults
+  correctly on `/jobs/search`).
+
+**What third-party iCIMS scraping actually is, confirmed on real tenants:**
+parsing the tenant's own public career-portal HTML at
+`careers-{slug}.icims.com/jobs/search?ss=1&in_iframe=1`. Real observed
+shape (Insmed platform_183.5.0, Herbalife platform_183, Persistent
+Systems / Judge / Allegis platform_187.0.1 — versions already vary
+across a 17-company sample):
+
+- Job rows: `<a class="iCIMS_Anchor" title="{id} - {Title}"
+  href="https://careers-{slug}.icims.com/jobs/{id}/{title-slug}/job?in_iframe=1">`.
+- Pagination: `?pr={0-indexed page}&in_iframe=1` (`pr=0` first, `pr=1`
+  next …), ~20–27 jobs/page, `<link rel="next" href=".../jobs/search?pr=1&in_iframe=1">`
+  present, stop at "Page N of N". Verified by fetching Persistent
+  Systems page 2 (`?pr=1`) → "Page 2 of 2", 9 rows (20 + 9 = 29 total).
+- Job detail page (`/jobs/{id}/{slug}/job?in_iframe=1`) carries a full
+  **schema.org JSON-LD `JobPosting`** block — clean structured data per
+  job (title, location, description, datePosted).
+
+### (b) Real resolution results — 19 slugs / ~17 distinct companies
+
+Set (a) = LCA-sponsor employers absent from `companies` (from the
+2026-08-30 `probe_neither_ats_platforms.py` iCIMS hits). Set (b) =
+web-search "known iCIMS" names.
+
+**Subdomain resolved + robots-permitted + crawlable (10):**
+`careers-insmed` (portal 17, 0 open jobs right now), `careers-corgan`
+(17, 0 open), `careers-clarkson` (17, 17 jobs, 1 pg), `careers-persistentsystems`
+(17, 29 jobs, 2 pg), `careers-judge` (17, 11 jobs), `careers-herbalife`
+(17, ~27–31 jobs — browser cross-checked vs. curl), `careers-horizon`
+(96, has jobs), `careers-allegisgroup` (17, ~40 jobs, 2 pg),
+`careers-aurora` (82281, ~40 jobs, 2 pg — `aurora` is a generic slug,
+would need a board-name cross-check before trusting it's the DOL
+"AURORA MEDICAL GROUP"), `careers-ryder` (69, 0 open on default portal).
+
+**Resolved but robots.txt `User-agent: * / Disallow: /` → skipped (4):**
+`careers-uci`, `careers-cdmsmith`, `careers-mastec`, `careers-sita`.
+~30% of resolvable tenants. The other tenants publish the standard
+iCIMS robots (allows `/jobs/search` + `/jobs/{id}/.../job`, disallows
+only `/connect`, `/jobs/*login`, `/jobs/*referral`, `/jobs/*candidate`,
+`/jobs/reminder`).
+
+**Unresolved — guessed slug wrong (5):** `blacklinesystems` (also tried
+`blackline`), `prodapt` (blank redirect; `prodaptna` 404), `pnc`,
+`crestron`, `ttx`. Real slugs exist but aren't the naive name derivation.
+
+Tally: subdomain resolvable ~14/19 (~74%, same naive `careers-{firstword
+or slug}` derivation the other platform probes use); actually crawlable
+~10/19 (~53%) after the robots haircut; with live job data right now
+7/19.
+
+### (c) Blocking / rate-limiting / anti-automation — NONE
+
+No CAPTCHA, no 403, no bot-challenge, no rate-limit response across
+~60 requests with an honest UA + 3–4s spacing. The only "stop" signals
+were policy-level: robots.txt `Disallow: /` on 4 tenants (respected by
+skipping) and 404s for wrong slugs. Nothing was worked around.
+
+### (d) Pagination / completeness
+
+`?pr={0-indexed page}` HTML pagination, `<link rel="next">`,
+~20–27/page. Persistent Systems fully paged (2 pages, 29 jobs) with 0
+cross-page id overlap. Herbalife single page, curl parse (27 unique
+`/job` ids) vs. live browser render (31 `iCIMS_Anchor` nodes) agree
+within featured/related-link noise. The `staleness` param is part of
+the **auth API only** — the HTML portal showed no observable staleness
+beyond normal nginx/CDN; live browser and curl returned the same page-1
+sets.
+
+### (e) Go / no-go — QUALIFIED GO, lower priority than SR/Ashby were
+
+**Better than the premise in one way, still different in kind from every
+prior platform in another:**
+
+- Not as gray as feared — the working surface is the tenant's *own
+  public career-portal HTML page* (the exact URL a browser loads),
+  server-rendered, standard `<link rel="next">` pagination, schema.org
+  JSON-LD per job. It is NOT a hidden private JSON API.
+- But it is still **HTML scraping of a page meant for human browsers**,
+  not consumption of a vendor-published feed. Greenhouse / Lever /
+  Ashby / SmartRecruiters / Workday-CXS are all JSON endpoints their
+  platforms intend for programmatic / third-party / public consumption
+  (documented public posting feeds, or the same endpoint the vendor's
+  own JS calls). iCIMS' *only* documented programmatic API is
+  auth-gated (401, confirmed). Parsing `careers-*.icims.com` HTML is a
+  step grayer on the ToS/risk axis than any existing HuntLoop
+  integration.
+- ~30% of tenants explicitly `Disallow: /` (must skip). HTML structure
+  varies across iCIMS platform releases (183 vs 187 vs a newer portal-id
+  scheme already visible in a 17-company sample) — more brittle than a
+  JSON contract.
+- Prevalence in the "neither" set was ~4.5% (2026-08-30 probe). After
+  the ~30% robots haircut and ~25% unresolvable-slug haircut, realistic
+  reachable coverage is ~2–3% of the neither set.
+
+**Recommendation:** build it eventually, but *after* higher-yield work,
+and only as: an **HTML-parsing spider** (not an API client); gated on
+each tenant's robots.txt (`Disallow: /` → skip the company entirely,
+recorded, not guessed around); honest UA + conservative
+`DOWNLOAD_DELAY`; `<link rel="next">` pagination; per-job JSON-LD as the
+structured-data source; treated as best-effort/lossy. **Do not** use
+`api.icims.com/customers/...` — auth-gated, unauthorized without
+credentials. Onboarding gate mirrors the Workday/SR/Ashby pattern:
+store a company only after a board-name / not-a-different-company
+cross-check (the `aurora`-style generic-slug risk).
+
+### (f) Verification
+
+- **Full suite: 182 passed** (unchanged).
+- **Row counts unchanged** — `companies` 668, `job_postings` 79,145
+  before and after. No company or posting rows written.
+- No spider / discovery-script / model / DB changes. Only SESSIONS.md +
+  CLAUDE.md updated.

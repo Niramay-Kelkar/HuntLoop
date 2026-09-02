@@ -1163,6 +1163,53 @@ conventions" and SESSIONS.md for the real current state).
   public API but ids aren't name-derivable (`Ubisoft`->`Ubisoft2`) and
   only ~4%; Ashby is clean but too rare in this enterprise-skewed set;
   iCIMS has opaque subdomains and mostly no public JSON.
+- **iCIMS discovery pass done 2026-09-01 (proof/discovery only — NO
+  spider, NO DB writes; see SESSIONS.md "iCIMS discovery pass").
+  Recommendation: QUALIFIED GO, but lower priority than SmartRecruiters
+  / Ashby were, and a step grayer on ToS/risk than any existing HuntLoop
+  integration.** Verified against real live traffic (Chrome network tab
+  + honest-UA curl, 3–4s delays, robots respected, no blocking hit):
+  - The premise that iCIMS scrapers hit an internal client-side JSON
+    endpoint `api.icims.com/customers/{customerId}/search/portals/{portal}`
+    is **false in practice.** That documented endpoint is genuinely
+    auth-gated (`GET .../customers/6273/search/portals/jobs` no creds →
+    **HTTP 401**, `errorCode 6`) and **no career portal calls it** —
+    full network inspection of `careers-insmed`/`careers-herbalife`
+    shows zero `api.icims.com` / `/api/jobs` / `intelliservices` / JSON
+    XHR for job data. `customerId` is not in client-side source at all.
+  - **What actually works:** parse the tenant's own public career-portal
+    **server-rendered HTML** at
+    `careers-{slug}.icims.com/jobs/search?ss=1&in_iframe=1`. Job rows:
+    `<a class="iCIMS_Anchor" title="{id} - {Title}"
+    href=".../jobs/{id}/{title-slug}/job">`. Pagination:
+    `?pr={0-indexed page}&in_iframe=1` (~20–27/page, `<link rel="next">`,
+    stop at "Page N of N" — verified paging Persistent Systems to 2
+    pages / 29 jobs). Each job detail page carries a schema.org JSON-LD
+    `JobPosting` block (clean per-job structured data). The `portal` id
+    (17 default; also seen 69/96/82281) is visible in the
+    `renderDynamicPortalCss` CSS request but **not needed** to scrape.
+  - **Identifier resolution:** only the `careers-{slug}.icims.com`
+    subdomain is needed — no customerId, no portalId. Naive
+    `careers-{firstword/slug}` derivation resolved ~14/19 test companies
+    (~74%); after skipping the ~30% of tenants whose robots.txt is
+    `User-agent: * / Disallow: /` (uci, cdmsmith, mastec, sita in the
+    sample), ~10/19 are actually crawlable. Realistic reachable coverage
+    ≈ 2–3% of the "neither" set (4.5% prevalence − robots − bad-slug
+    haircuts).
+  - **Risk-profile difference from every prior ATS:** GH/Lever/Ashby/SR/
+    Workday-CXS are all JSON endpoints their vendors intend for
+    programmatic/public consumption. iCIMS' only documented programmatic
+    API is auth-gated; the working approach here is HTML-scraping a page
+    built for human browsers, and HTML shape varies across iCIMS
+    platform releases (183 vs 187 seen in one 17-company sample) — more
+    brittle, grayer. If built: an **HTML-parsing spider** (not an API
+    client), robots-gated per tenant (`Disallow: /` → skip the company,
+    recorded not guessed around), honest UA + conservative
+    `DOWNLOAD_DELAY`, `<link rel="next">` pagination, JSON-LD as the
+    per-job source, best-effort/lossy. **Never** use
+    `api.icims.com/customers/...` (auth-gated → unauthorized without
+    credentials). Onboarding gate mirrors Workday/SR/Ashby: board-name
+    cross-check before storing (generic-slug risk, e.g. `careers-aurora`).
   **Discovery mechanism proven end-to-end 2026-08-30 on 5 real
   unambiguous tenants (see SESSIONS.md "Prove Workday {tenant, dc, site}
   discovery"), then the spider was BUILT 2026-08-30 (see the Workday
