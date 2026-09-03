@@ -1223,6 +1223,36 @@ conventions" and SESSIONS.md for the real current state).
   `relativity`, `public`, ...). `scripts/scrape_lever.py` added for
   parity with `scripts/scrape_greenhouse.py`. Re-running the full
   discovery is idempotent (`0 inserted, 0 updated`).
+  **The 46 held bare-first-word candidates were manually reviewed
+  one-by-one 2026-09-03 (see SESSIONS.md "Resolve the 46 held
+  bare-first-word Greenhouse/Lever collisions") — no code/gate/discovery
+  changes; evidence from each live board (Greenhouse Boards API name +
+  jobs, Lever board page org name + postings) vs. the DOL sponsor, with
+  DOL worksite/title cross-check. Result: 2 confirmed correct, 0
+  still-ambiguous, 44 confirmed wrong (genuine collisions) — an even
+  higher collision rate than the iCIMS 39, as the bare-word slug is the
+  most collision-prone match kind.** The 2 correct (both Lever) were
+  added to `confirmed_bareword_ats_slugs.txt` and stored via the
+  UNCHANGED discovery `--commit --confirmations` path, then scraped:
+  `bioagilytix` → BioAgilytix Labs (bioanalytical CRO), `finix` → Finix
+  Payments (payments infra). The 44 wrong were slug collisions with
+  unrelated companies — `mercury`→Mercury the banking fintech (vs
+  Mercury Financial the card issuer), `relativity`→Relativity Space (vs
+  Relativity ODA the e-discovery co), `pivotal`→Pivotal the eVTOL
+  aircraft co (vs Pivotal Software), `clara`→Clara the LatAm cards
+  fintech (vs Clara Analytics), `matic`→Matic Insurance (vs Matic
+  Robots), `fetch`→Fetch Pet Insurance (vs Fetch Rewards),
+  `goodwin`→a "Goodwin" aviation/bookkeeping board (vs Goodwin Procter
+  LLP), `oliver`→OLIVER Agency (vs Oliver Wyman), `blue`→BlueCloud
+  Services (vs Blue Yonder), `neon`→Neon Pagamentos (vs Neon IT),
+  `pursuit`→the Pursuit nonprofit (vs Pursuit Software), `telligen`→the
+  Iowa Telligen healthcare org (vs "Telligen Tech Inc." the IT staffer),
+  plus many generic-word staffing-firm / preschool / physical-therapy
+  collisions (`cornerstone`, `elite`, `excel`, `sunrise`, `wise`,
+  `public`, `tia`, `sar`, `spencer`, `athena`, `techno`, `atek`, `lts`,
+  `grand`, `source`, `syntax`, `mantra`, `brilliant`, `galaxy`,
+  `benjamin`, `octagon`, `accrue`, `solutions`) — none stored. Full
+  per-company table in SESSIONS.md.
   **Feasibility measured 2026-08-30 (see SESSIONS.md "Which ATS is most
   common among the 'neither' sponsors") to decide which spider to build
   next — measurement only, no spider, no DB writes.**

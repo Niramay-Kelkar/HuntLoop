@@ -8548,3 +8548,134 @@ fallbacks none, 0 scrape errors, all 7 robots.txt fetched 200).
 
 Not touched: the iCIMS spider, `discover_icims_job_board.py`, the gate
 logic, and every other ATS platform / company.
+
+## 2026-09-03 — Resolve the 46 held bare-first-word Greenhouse/Lever collisions (manual review; no code/gate/discovery changes)
+
+The bare-first-word candidate in `scripts/detect_ats_for_sponsors.py`
+(for exactly-two-word company names whose second word isn't generic
+corporate noise) is never auto-stored — a bare first-word slug is the
+most collision-prone match kind, so every hit is held for human
+confirmation. The full-population run left 46 real DOL-sponsor
+companies in that state. This session reviewed all 46 individually.
+
+**Method** (same standard as the iCIMS-39 pass and every prior gate
+resolution): for each, fetch the live board — Greenhouse via the
+Boards API (`/v1/boards/{slug}` name + `/jobs` titles/locations),
+Lever via the public board page `jobs.lever.co/{slug}` (`<title>` /
+logo org name, per the earlier finding that Lever's JSON endpoint
+carries no org-name field) plus `api.lever.co/v0/postings/{slug}` for
+titles — and compare against the DOL sponsor; cross-check
+`lca_disclosures` worksite states + top job titles for every
+non-obvious call. The 46 held rows were read from the saved discovery
+report (`candidate_kind == "bare_first_word"`, `gate == "held"`), not
+a re-run.
+
+### 46 held bare-first-word Greenhouse/Lever collisions — per-company manual review (2026-09-03)
+
+Method: for each held candidate, fetch the live board — Greenhouse via
+the Boards API (`/v1/boards/{slug}` name + `/jobs` titles/locations),
+Lever via the public board page `jobs.lever.co/{slug}` (its `<title>` /
+logo org name) plus `api.lever.co/v0/postings/{slug}` for titles — and
+compare against the DOL sponsor; cross-check DOL `lca_disclosures`
+worksite states + top job titles for every non-obvious call. No guesses.
+
+**CONFIRMED CORRECT (2) — stored + scraped**
+
+| DOL sponsor | slug | ATS | filings | Live board is | Why it matches |
+|---|---|---|---|---|---|
+| BIOAGILYTIX LABS | `bioagilytix` | lever | 23 | Lever board "BioAgilytix" — Durham NC / San Diego CA / Melbourne; "Analyst I/II – LC-MS (Bioanalytical)", "Scientist (ADA)", "Data Engineer" (Durham) | DOL "BioAgilytix Labs, LLC", NC (15) / MA / CA, top titles "Scientist I/II/III", "Manager I" — same company, same locations, same role types. |
+| FINIX PAYMENTS | `finix` | lever | 21 | Lever board "Finix" — San Francisco; "Senior Software Engineer", "GTM Engineer", "Data Engineer", "Senior Product Designer" | DOL "Finix Payments Inc.", all-CA, top titles "Software Engineer II/IV", "Product Designer", "Data Engineer II" — same company, same location, same roles. |
+
+**STILL-AMBIGUOUS (0)**
+
+**CONFIRMED WRONG (44) — genuine collisions, never stored**
+
+| DOL sponsor | slug | ATS | filings | Board actually belongs to | Evidence |
+|---|---|---|---|---|---|
+| BLUE YONDER | `blue` | lever | 235 | BlueCloud Services, Inc. | Snowflake/data consultancy — "Bench hiring", "Snowflake Engagement Manager", Onshore/Nearshore/E.Europe. Not Blue Yonder (supply-chain software). |
+| BLUE SPIRE | `blue` | lever | 36 | BlueCloud Services, Inc. | same board; unrelated. |
+| CORNERSTONE RESEARCH | `cornerstone` | gh | 100 | Cornerstone Child Development Center | a Bossier City, LA preschool — "Lead Teacher", "Preschool Assistant Teacher". Not Cornerstone Research (litigation-economics consulting). |
+| CORNERSTONE ONDEMAND | `cornerstone` | gh | 84 | Cornerstone Child Development Center | same board; unrelated (HR/learning software). |
+| FETCH REWARDS | `fetch` | gh | 83 | Fetch (Pet Insurance) | "Pet Insurance Sales Associate" in dozens of US cities, "Business Development Associate – Breeders". DOL "Fetch Rewards, Inc.", IL, Data Analyst/Data Engineer/ML Engineer — the receipt-rewards app, a different company. |
+| PULSE NETWORK | `pulse` | gh | 78 | Pulse Healthcare | 2,651 jobs, UK NHS nursing/A&E/dietitian staffing. Not Pulse Network (US events/media). |
+| NEON IT | `neon` | lever | 76 | Neon Pagamentos | Brazilian neobank — Portuguese roles, "Analista de Growth", "Especialista de Crédito". Not a US IT-staffing firm. |
+| GOODWIN PROCTER | `goodwin` | gh | 73 | a "Goodwin" (aviation/bookkeeping, Columbus OH) | 3 jobs: "Aviation Operations Coordinator", "Bookkeeper", "Sr Manager, Accounts Receivable". DOL "Goodwin Procter LLP", NY/CA, "Associate" — the Am Law 50 law firm, not this board. |
+| ELITE EXCEED | `elite` | gh | 64 | Elite Physical Therapy, Inc. | all "Physical Therapist" jobs across Mississippi. Not an IT firm. |
+| ELITE EMANATE | `elite` | gh | 28 | Elite Physical Therapy, Inc. | same board; unrelated. |
+| SOURCE INFOTECH | `source` | lever | 62 | Source (a French product-design studio) | 3 jobs, "Designer Produit Senior", Paris, "Remote first & Paris". Not a US IT-staffing firm. |
+| SOURCE MANTRA | `source` | lever | 34 | Source (French design studio) | same board; unrelated. |
+| TIA INFOTEK | `tia` | gh | 58 | Tia (women's health clinics) | "Nurse Practitioner / Physician Assistant – Women's Health", "Medical Assistant" across LA/NYC/Scottsdale. DOL "TIA INFOTEK INC", TX/GA, "Software Developer"/"Computer Programmer" — unrelated IT staffing. |
+| OCTAGON IT | `octagon` | gh | 52 | Octagon (sports & entertainment marketing, IPG) | "Account Director", "Sponsorship & Kommunikation", Singapore/Munich/Sydney. Not an IT firm. |
+| OLIVER WYMAN | `oliver` | gh | 51 | OLIVER Agency (creative/advertising) | "Copywriter", "Content Creator", "Account Director" worldwide. DOL "Oliver Wyman, LLC", NY, "Associate/Principal/Analyst" — management consulting, a different company. |
+| RELATIVITY ODA | `relativity` | gh | 48 | Relativity Space (rocket company) | 337 jobs — "Additive Manufacturing Engineer", "Avionics", Long Beach CA / Cape Canaveral. DOL "Relativity ODA LLC", IL (Chicago), "Senior Software Engineer" — the e-discovery software company (formerly kCura). |
+| SAR TECH | `sar` | lever | 48 | SAR Academy & SAR High School | a Jewish day school in the Bronx — "Early Learning Center" teachers, "Hebrew Immersion Teacher", "Kitchen Staff". Not an IT firm. |
+| WISE GEN | `wise` | gh | 46 | "Wise Worksite Field Sales" | "Supplemental Sales Agent" across US cities (insurance sales). Not an IT firm (nor Wise the fintech). |
+| WISE IT | `wise` | gh | 23 | "Wise Worksite Field Sales" | same board; unrelated. |
+| PUBLIC PARTNERSHIPS | `public` | gh | 38 | Public (Public.com investing app) | 4 jobs: "Active Trader Sales: Options Lead", "Lifecycle Marketing Lead", "Senior PM – Growth" (NYC). DOL "Public Partnerships" — Medicaid/home-care financial-management services, unrelated. |
+| PUBLIC STORAGE | `public` | gh | 28 | Public (Public.com) | same board; unrelated (self-storage REIT). |
+| ATEK IT | `atek` | gh | 38 | A-TEK Inc. (federal IT/science contractor, McLean VA / Rockville MD) | "Associate Scientist", "Federal AI Solutions Engineer", "Cloud Architect". DOL "Atek IT Inc", TX (21)/AZ/MN/MI, "Software Developer"/"Data Engineer" — a separate, TX-based IT-staffing firm; different legal name, HQ state, and business. |
+| ATHENA TECH | `athena` | gh | 38 | Athena Group Advisors | 4 jobs: "House & Hospitality Manager", "Senior Personal Assistant", "VP, Events" (NYC) — a family-office/personal-services firm. Not an IT firm. |
+| TECHNO TASKS | `techno` | gh | 37 | "Techno" (NY/NJ civil/construction engineering inspection) | "Assistant Resident Engineer (Rail & Transit)", "Construction Inspector", NYCDEP/MTA/PANYNJ. DOL "Techno Tasks, Inc", TX/NC/VA, "Java Developer"/".NET Developer" — an unrelated IT dev shop. |
+| EXCEL IT | `excel` | gh | 37 | Excel Learning Center | NC childcare centers — "Assistant Childcare Teacher", "Childcare Center Director". Not an IT firm. |
+| SUNRISE INFOTEK | `sunrise` | gh | 36 | Sunrise Management (apartment property management) | "Community Manager", "Maintenance Supervisor/Technician" at named apartment complexes. Not an IT firm. |
+| SUNRISE FUTURES | `sunrise` | gh | 21 | Sunrise Management | same board; unrelated. |
+| PURSUIT SOFTWARE | `pursuit` | gh | 35 | Pursuit (the LIC nonprofit that trains software engineers) | "Career Coach", "Founding Account Executive, Job Placements", "Manager, Employer and Corporate Partnerships". DOL "PURSUIT SOFTWARE, INC.", FL, "Quality Engineering Lead" — the software-QA company, a different org. |
+| PIVOTAL SOFTWARE | `pivotal` | lever | 35 | Pivotal (personal-aircraft / eVTOL company, Palo Alto & Miami) | "Autonomy Engineer – Robotics", "Embedded Software Engineer", "Flight Test Operator", "GNC Engineering". DOL "Pivotal Software" — the Cloud Foundry enterprise-software company (VMware). |
+| BENJAMIN MOORE & | `benjamin` | gh | 34 | "Benjamin" (a small European tech company) | 3 jobs: "Senior Data Engineer", "Senior Data Scientist", "Senior Product Manager", "Europe, Finland or Spain preferred". Not Benjamin Moore & Co (paint). |
+| GRAND SUPERCENTER | `grand` | lever | 32 | Grand Games (Turkish mobile-game studio, Istanbul) | "Senior 3D Artist", "Playable Ads Developer", "Game Developer". Not a US retailer/IT firm. |
+| GRAND IT | `grand` | lever | 30 | Grand Games | same board; unrelated. |
+| GALAXY IT | `galaxy` | gh | 30 | Galaxy Integrated Technologies | 3 jobs — physical-security system design/technician, Boston MA / Lawrence MA / Plainview NY. Not an IT-staffing firm. |
+| BRILLIANT INFOTECH | `brilliant` | lever | 29 | Brilliant (brilliant.org, online STEM learning) | "CS Learning Designer", "Math Learning Designer", NYC/SF/Remote. Not a US IT-staffing firm. |
+| MERCURY FINANCIAL | `mercury` | gh | 24 | Mercury (mercury.com, business-banking fintech) | 58 jobs — "Counsel, Product & Regulatory – Payments & AML", "Deputy CISO – Bank", "Head of Product – Business Lending". DOL "Mercury Financial LLC", TX/DE, "Strategic Analytics" — a credit-card company (formerly CreditShop). |
+| SPENCER GIFTS | `spencer` | gh | 22 | Spencer Animal Hospital | veterinary (Pasadena TX) — "Veterinarian", "DVM Student Externship". Not the mall retailer. |
+| SOLUTIONS UIUX | `solutions` | gh | 22 | Cadence Solutions (healthcare tech) | "Advanced Primary Care Management", "Health Systems Partnerships", "AI Engineer". Not a UI/UX design-staffing firm. |
+| ACCRUE SELECT | `accrue` | gh | 21 | Accrue (Accrue Savings, NYC fintech) | "Enterprise Account Executive, Payments / Loyalty and Rewards" (NYC). DOL "ACCRUE SELECT INC", NJ/TX, "Software Developer"/"Data Engineer"/"Business Analyst" — an unrelated IT-staffing firm. |
+| TELLIGEN TECH | `telligen` | lever | 21 | Telligen (Iowa healthcare quality-improvement / population-health org, West Des Moines) | "Senior Review Coordinator (Oncology) – Utilization Management (RN)", "State/Federal Health Solutions" teams, all Iowa. DOL "Telligen Tech Inc.", NJ/NY/CA/NC/OH (no Iowa), generic "Software Engineer"/"Java Developer"/"BI Developer" — a separate dispersed IT-staffing filer. |
+| SYNTAX PRO | `syntax` | lever | 20 | Syntax ("Syntax Data" team, NYC) | 3 jobs: "Client Solutions Manager/Representative", "Mid/Senior Software Engineer" (NYC). DOL "SYNTAX PRO LLC", MD/VA/IA, "Software Developer" ×10, "Computer Systems Analyst", "Clinical Data Manager" — a MD-based IT-staffing firm. |
+| CLARA ANALYTICS | `clara` | gh | 20 | Clara (getclara.com, LatAm corporate cards / spend management) | 118 jobs, all Latin America — "Account Executive – Bill Pay", Mexico City / Bogotá / Brazil. DOL "Clara Analytics, Inc.", CA, "Senior Data Scientist" — a US insurance-claims-AI company. |
+| MATIC ROBOTS | `matic` | gh | 20 | Matic (matic.com, digital insurance agency) | "Licensed Insurance Agent (Sales/Retention)", "Partner Success Manager", Columbus OH / Remote. DOL "Matic Robots, Inc.", CA, "Research Engineer"/"Mechanical Design Engineer" — a home-robotics company. |
+| LTS ASSOCIATE | `lts` | gh | 20 | LTS (a federal digital-services contractor — VA health / VistA-MUMPS modernization, Public Trust clearance) | "Agentic AI Security Engineer", "Agile Developer" (VA health portfolio). DOL "LTS Associate, Inc.", NJ/CA, "Database Administrator"/"Supply Chain Logistic Analyst"/"Product Marketing Director" — an unrelated small IT/ops-staffing firm sharing the "LTS" acronym. |
+| MANTRA TELECOM | `mantra` | lever | 20 | Mantra Inc. (mantra.co.jp, Japanese manga-machine-translation AI, Tokyo) | Japanese/English roles — "Langaku", "Mantra Engine", "Machine Learning Researcher", all Tokyo. Not a US telecom/IT firm. |
+
+Final: **2 confirmed correct · 0 still-ambiguous · 44 confirmed wrong = 46.**
+
+### Onboarding + scrape (the 2 confirmed-correct)
+
+`bioagilytix` and `finix` were added to
+`confirmed_bareword_ats_slugs.txt` (gitignored, same as the original
+42 confirmed slugs) and stored through the UNCHANGED discovery logic —
+`detect_ats_for_sponsors.py`'s own `detect_one()` / `gate()` /
+`read_confirmations()` / `upsert_hits()` functions, called on just
+those two employer rows (the script has no `--from-report` mode; a
+full 8,491-employer re-probe was started but was contending with the
+still-running daily orchestrator for network, so the equivalent
+targeted call was used instead — no gate/discovery code modified).
+Both resolved `bare_first_word` -> `probe_lever` (live API) -> `gate`
+`auto` (slug in the confirmations file); "Committed: 2 inserted, 0
+updated". Then scraped via the `app` Docker image
+(`scripts/scrape_lever.py bioagilytix finix`).
+
+| slug | postings | NULL is_relevant | NULL embedding | is_relevant=true |
+|---|---|---|---|---|
+| bioagilytix | 7 | 0 | 0 | 3 |
+| finix | 15 | 0 | 0 | 4 |
+
+**22 postings, 0 NULL `is_relevant`, 0 NULL `embedding`, no backfill**
+(Scrapy `finish_reason: finished`, `item_scraped_count: 22`, 0 errors).
+
+### Verification
+
+- Verdict counts: **2 correct · 0 still-ambiguous · 44 wrong = 46.**
+- Live board cross-check (fresh `api.lever.co` + `jobs.lever.co` fetch):
+  `bioagilytix` board `<title>` "BioAgilytix", 7 live postings == 7 DB
+  rows, 7/7 titles match; `finix` board `<title>` "Finix", 15 live == 15
+  DB rows, 15/15 titles match.
+- Whole `job_postings` table: 0 NULL `is_relevant`, 0 NULL `embedding`.
+- Full test suite: **225 passed** (no code touched).
+- Row counts: `companies` 741 -> **743** (+2: `bioagilytix`, `finix`);
+  `job_postings` ~94,017 -> **94,060** (+22 new Lever rows plus the
+  concurrent daily-orchestrator re-scrape churn — the scheduled run was
+  still mid-crawl, so an exactly-attributable delta isn't isolable).
+
+Not touched: the Greenhouse/Lever spiders, the discovery script, the
+gate logic, and every other ATS platform / company.
