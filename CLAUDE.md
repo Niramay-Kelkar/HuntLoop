@@ -1543,9 +1543,42 @@ conventions" and SESSIONS.md for the real current state).
   roles that all filter `is_relevant=false`; SIGTERM → graceful Scrapy
   shutdown, pending items committed) — the other 19 boards ran to
   completion. Live-verified 5 postings against their real pages.
-  Follow-ups: the 39 still-held generic-slug boards; a fuller onboarding
+  Follow-ups: a fuller onboarding
   sweep past the top-1,978 employers; re-scrape primehealthcare to
   completion only if its clinical roles ever matter.
+  **The 39 still-held generic-slug boards were manually reviewed
+  one-by-one 2026-09-03 (see SESSIONS.md "Resolve the 39 held iCIMS
+  generic-slug collisions") — no code/gate/discovery changes, evidence
+  from each live `careers-{slug}.icims.com` board (its own `<title>` org
+  name, real posted job titles/locations, JSON-LD `hiringOrganization`)
+  vs. the DOL sponsor, with web search + DOL worksite/title cross-check
+  where the slug was genuinely ambiguous. Result: 4 confirmed correct,
+  1 still-ambiguous, 34 confirmed wrong (genuine collisions).** The 4
+  correct were added to `confirmed_icims_slugs.txt` and stored via the
+  UNCHANGED `discover_and_store_icims.py --from-report --commit
+  --confirmations` path, then scraped: `lw` → Latham & Watkins LLP,
+  `here` → HERE North America, `eastwestbank` → East West Bank, `nyu` →
+  New York University (639 postings, 0 NULL `is_relevant`/`embedding`,
+  no backfill; JSON-LD primary for all). Still-ambiguous: **NYU
+  GROSSMAN SCHOOL OF MEDICINE** — shares the `nyu` board but Grossman /
+  NYU Langone Health run their own sponsored-role hiring at
+  jobs.nyulangone.org, so the board can't be confirmed to carry this
+  filer's postings (same university family, not a clean collision). The
+  34 wrong were slug collisions with unrelated companies —
+  `aa`→Envoy Air, `boston`→City of Boston, `quest`→Quest Software,
+  `sas`→SAS Institute (for Samsung Austin / SG Americas), `mmc`→M.C.
+  Dean, `sri`→SRI International (for Scripps Research / SRI Tech),
+  `aurora`→Aurora Staffing, `adventisthealth`→a single AdventHealth
+  regional JV, `vanguard`→Deerfield Management, `ccf`→Community Choice
+  Financial, `citynational`→City National Bank of Florida (the DOL
+  filer is the RBC/Los Angeles bank), `up`→The Michaels Organization,
+  `reliable`→Sun Auto Tire, `ars`→American Residential Services,
+  `bbd`→New York Blood Center, `pst`→Planned Systems International,
+  `mdi`→Alex Lee, `usaa`→Affinius Capital, `express`→Express the
+  apparel retailer (not Express Scripts), `bridgewater`→a nursing
+  facility (not the hedge fund), `horizon`→Springs Window Fashions —
+  none stored. `companies` 737→741; full per-company table in
+  SESSIONS.md.
   **Discovery mechanism proven end-to-end 2026-08-30 on 5 real
   unambiguous tenants (see SESSIONS.md "Prove Workday {tenant, dc, site}
   discovery"), then the spider was BUILT 2026-08-30 (see the Workday

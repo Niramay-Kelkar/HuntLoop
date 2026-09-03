@@ -8424,3 +8424,127 @@ same as every other source. Whole-table NULL counts also 0/0.
 
 Not touched: the noise-list guard logic, Workday, SmartRecruiters, Ashby,
 iCIMS, Gem.
+
+## 2026-09-03 — Resolve the 39 held iCIMS generic-slug collisions (manual review; no code/gate/discovery changes)
+
+The original iCIMS onboarding run (2026-09-01) left 39 real DOL-sponsor
+companies "held" by the gate: a live `careers-{slug}.icims.com` portal
+resolved, robots permitted, >=1 job, but the slug was generic enough
+(`aa`, `boston`, `nyu`, `quest`, `sas`, `mmc`, ...) that the board could
+plausibly belong to a different company. This session reviewed all 39
+individually and reached an evidence-backed verdict for each.
+
+**Method** (same standard as the Sierra/Basis AI and SmartRecruiters-gate
+work): for each, fetch the live board — its own `<title>` org name, real
+posted job titles + locations, JSON-LD `hiringOrganization` — and compare
+against the DOL sponsor; web-search where the slug was genuinely
+ambiguous; cross-check DOL `lca_disclosures` worksite states / top job
+titles. No guesses — every verdict cites real page content or search
+results. The 39 held rows were read straight from the saved
+`scratch_icims_onboarding.json` (`gate == "held"`), not a re-run.
+
+### 39 held iCIMS generic-slug collisions — per-company manual review (2026-09-03)
+
+Method: fetch the live careers-{slug}.icims.com board (its own <title> org
+name, real posted job titles/locations, JSON-LD hiringOrganization), compare
+against the DOL sponsor employer, web-search where the slug was genuinely
+ambiguous, cross-check DOL worksite states / top job titles.
+
+**CONFIRMED CORRECT (4) — stored + scraped**
+
+| DOL sponsor | slug | filings | Live board is | Why it matches |
+|---|---|---|---|---|
+| NEW YORK UNIVERSITY | nyu | 426 | "NYU Jobs – Careers"; JSON-LD hiringOrganization "New York University" | Faculty/academic-affairs admin roles ("Manager for Academic Affairs – NYU London", "Assistant Director, MBA Admissions"); DOL filer is "New York University", all-NY, Postdoc/Assistant Professor. Board robots.txt permits /jobs/search. |
+| LATHAM & WATKINS | lw | 189 | "Job Opportunities at Latham & Watkins LLP" | Law-firm business-services roles ("OGC Manager – Conflicts, Business Intake & Compliance", "Billing Assistant", "Associate Recruiting Manager"); DOL filer "Latham & Watkins LLP", NY/CA/DC, Attorney/Associate. |
+| HERE NORTH AMERICA | here | 100 | "Working at HERE … Job Listings at HERE"; hiringOrganization "HERE Technologies" | "Lead ML & AI Engineer", "Java Software Engineer", "Sr Data Scientist", "Sr Account Executive – Automotive System Vendors"; DOL filer "HERE North America, LLC", Chicago IL, Sr Software Engineer. |
+| EAST WEST BANK | eastwestbank | 109 | "Careers | East West Bank | Job Listings at East West Bank" | "Senior Release Automation Engineer", "Data Science & Advanced Analytics", "Senior FX Risk Analyst" (Pasadena, CA); DOL filer "East West Bank", Pasadena CA, Sr Applications Developer. |
+
+**STILL-AMBIGUOUS (1) — left held**
+
+| DOL sponsor | slug | filings | Finding |
+|---|---|---|---|
+| NYU GROSSMAN SCHOOL OF MEDICINE | nyu | 559 | Shares the `nyu` board with New York University. Grossman / NYU Langone Health run their own sponsored-role hiring at jobs.nyulangone.org (verified via web search); careers-nyu.icims.com carries only university academic-administration roles, none of the Postdoctoral Fellow / Staff Physician / Research Scientist postings that dominate this filer's LCAs. Same university family, so not a clean unrelated-company collision, but the board cannot be confirmed to carry this specific filer's postings. The `nyu` board is still scraped once (for New York University). |
+
+**CONFIRMED WRONG (34) — genuine collisions, never stored**
+
+| DOL sponsor | slug | filings | Live board actually belongs to | Evidence |
+|---|---|---|---|---|
+| AMERICAN AIRLINES | aa | 866 | Envoy Air Inc. (redirects to us-envoyair.icims.com) | "Full Time Ramp Agent", "Airport Agent – Ramp", "Mechanic, Automotive"; Envoy is AA's regional subsidiary but a separate DOL filer with its own board; DOL "American Airlines" mainline hires at jobs.aa.com. |
+| AMAZON ADVERTISING | aa | 472 | Envoy Air Inc. | same board; unrelated. |
+| ADROIT ASSOCIATES | aa | 138 | Envoy Air Inc. | same board; unrelated IT staffing firm. |
+| APPS ASSOCIATES | aa | 135 | Envoy Air Inc. | same board; unrelated. |
+| AUTOMATION ANYWHERE | aa | 96 | Envoy Air Inc. | same board; unrelated (RPA software co). |
+| THE BOSTON CONSULTING GROUP | boston | 837 | City of Boston (redirects to city-boston.icims.com) | "Junior Building Custodian", "Assistant Corporation Counsel II (LAW)", "Animal Control Officer", "Commissioner of Assessing"; municipal government, not BCG. |
+| BOSTON CONSULTING GROUP | boston | 743 | City of Boston | same board; same company as above (duplicate DOL name). |
+| BOSTON SCIENTIFIC CORPORATION | boston | 292 | City of Boston | same board; unrelated. |
+| BOSTON COLLEGE | boston | 133 | City of Boston | same board; unrelated. |
+| BOSTON MEDICAL CENTER CORPORATION | boston | 113 | City of Boston | same board; unrelated. |
+| QUEST GLOBAL SERVICES-NA | quest | 279 | Quest Software (Quest.com) | "Customer Success Manager – Enterprise", "Sales Compensation Sr. Analyst (SLC600)", "Business Development Representative – Cork, Ireland"; software co, not Quest Global (engineering services). |
+| QUEST IT SOLUTIONS | quest | 208 | Quest Software | same board; unrelated IT staffing firm. |
+| QUEST DIAGNOSTICS INCORPORATED | quest | 135 | Quest Software | same board; unrelated (lab testing; hires at questdiagnostics.com). |
+| SAMSUNG AUSTIN SEMICONDUCTOR | sas | 433 | SAS Institute (analytics software) | "AI/Model Security Architect", "Senior Account Executive – Risk and Fraud Solutions"; not a semiconductor fab. (`sas` already stored for the real SAS INSTITUTE filer.) |
+| SG AMERICAS SECURITIES | sas | 198 | SAS Institute | same board; unrelated (Société Générale broker-dealer). |
+| MONTEFIORE MEDICAL CENTER | mmc | 379 | M.C. Dean, Inc | "Assembler 1", "Electrician", "Saw Operator – 2nd Shift", "Telecommunications Foreman"; electrical-construction/manufacturing, not a hospital. |
+| MAIMONIDES MEDICAL CENTER | mmc | 124 | M.C. Dean, Inc | same board; unrelated. |
+| THE SCRIPPS RESEARCH INSTITUTE | sri | 173 | SRI International (Stanford Research Institute) | board <title> "SRI International"; wafer-fab / robotics / bioscience research roles; Scripps Research is a separate La Jolla biomedical institute. |
+| SRI TECH SOLUTIONS | sri | 144 | SRI International | same board; unrelated IT staffing firm. |
+| AURORA OPERATIONS | aurora | 155 | Aurora Staffing (NJ) | "Residential Counselor – Allies", "Community Support Staff – … – Allies"; disability-support staffing, not Aurora Innovation (self-driving). |
+| AURORA INNOVATION | aurora | 101 | Aurora Staffing | same board; unrelated. |
+| ADVENTIST HEALTH SYSTEM/SUNBELT | adventisthealth | 317 | U Chicago Medicine AdventHealth (redirects to careers-adventhealthglr.icims.com) | 11 physician jobs, one regional JV board; AdventHealth (the parent = Adventist Health System Sunbelt) hires on its own large Workday portal. |
+| ADVENTIST HEALTH SYSTEM SUNBELT HEALTHCARE | adventisthealth | 172 | U Chicago Medicine AdventHealth | same board; same company as above (duplicate DOL name). |
+| THE VANGUARD GROUP | vanguard | 671 | Deerfield Management Companies | "Primary Care Physician", "Certified Medical Assistant"; healthcare-investment firm's medical practices, not the asset manager. |
+| CLEVELAND CLINIC FOUNDATION | ccf | 274 | Community Choice Financial Family of Brands | "Career Day in Lorain, OH!", "Assistant Store Manager (Bilingual)"; payday-lending / check-cashing stores, not the hospital. |
+| CITY NATIONAL BANK | citynational | 233 | City National Bank of Florida (Coral Gables / Miami; Bci-owned) | board <title> + all job locations FL/Coral Gables/Miami; the DOL filer is City National Bank (RBC, Los Angeles) — 152/233 filings in CA, tech titles (Full Stack Engineer, Salesforce Developer). |
+| UNICON PHARMA | up | 206 | The Michaels Organization | "Project Architect – Multifamily Renovation", "Architect"; affordable-housing developer, not a pharma co. |
+| RELIABLE SOFTWARE RESOURCES | reliable | 168 | Sun Auto Tire and Service | "Automotive Service Advisor", "Senior Automotive Technician"; auto-repair chain, not an IT firm. |
+| ADVANCED RESOURCE STAFFING | ars | 132 | ARS / American Residential Services | "HVAC Install Helper", "Licensed Electrician (Residential Service)"; home-services company, not a staffing firm. |
+| BARCLAYS BANK DELAWARE | bbd | 110 | New York Blood Center Enterprises | "Phlebotomist / Donor Collections Technician", "Donor Registration Specialist", "Bloodmobile Driver"; blood bank, not a bank. |
+| PI SQUARE TECHNOLOGIES | pst | 129 | Planned Systems International (PSI) | board <title> "Planned Systems International"; "Athletic Trainer", "Customer Service Technician"; a specific unrelated federal-IT/health-services company. |
+| MASTECH DIGITAL INFOTECH | mdi | 93 | Alex Lee, Inc (parent of Merchants Distributors "MDI") | "CDL Driver Class A", "Warehouse Selector *FREEZER*", "Bilingual Dispatch Clerk"; food distribution, not IT staffing. |
+| USAA FEDERAL SAVINGS BANK | usaa | 84 | Affinius Capital (redirects to careers-affiniuscapital.icims.com) | real-estate fund-operations / credit-investing roles (San Antonio/Dallas/NY); Affinius = the former USAA Real Estate Company, spun out; USAA Bank hires on its own portal. |
+| EXPRESS SCRIPTS SERVICES | express | 87 | EXPRESS, Inc. (apparel retailer) | board <title> "EXPRESS"; "Assistant Merchant", "Associate Planner", "Store Analyst"; the clothing brand, not Express Scripts the pharmacy-benefit manager. |
+| BRIDGEWATER ASSOCIATES | bridgewater | 132 | a "Bridgewater" senior-living / skilled-nursing facility | "Certified Nursing Assistant", "Dietary Aide", "Resident Aide", "LPN"; a care home, not the hedge fund. |
+| HORIZON INTERNATIONAL TRD | horizon | 159 | Springs Window Fashions ("Horizons Window Fashions" brand) | board <title> "Horizons Window Fashions • … Job Listings at Springs Window Fashions"; a specific unrelated window-treatments manufacturer. |
+
+Final: **4 confirmed correct · 1 still-ambiguous · 34 confirmed wrong = 39.**
+
+### Onboarding + scrape (the 4 confirmed-correct)
+
+`lw`, `here`, `eastwestbank`, `nyu` were added to
+`confirmed_icims_slugs.txt` (gitignored, same as the original 7) and
+stored via the UNCHANGED `scripts/discover_and_store_icims.py
+--from-report --commit --confirmations confirmed_icims_slugs.txt` —
+"Committed: 4 companies rows inserted, 0 updated". Then scraped via the
+`app` Docker image (`scripts/scrape_icims.py lw here eastwestbank nyu`):
+
+| slug | postings | NULL is_relevant | NULL embedding | is_relevant=true |
+|---|---|---|---|---|
+| here | 45 | 0 | 0 | 29 |
+| lw | 130 | 0 | 0 | 15 |
+| nyu | 229 | 0 | 0 | 40 |
+| eastwestbank | 235 | 0 | 0 | 11 |
+
+**639 postings, 0 NULL `is_relevant`, 0 NULL `embedding`, no backfill**
+(JSON-LD primary for 100% of jobs, whole-job HTML fallback 0, per-field
+fallbacks none, 0 scrape errors, all 7 robots.txt fetched 200).
+
+### Verification
+
+- Verdict counts: **4 correct · 1 still-ambiguous · 34 wrong = 39.**
+- Live board cross-check (fresh fetches during review): `lw` board
+  `<title>` "Latham & Watkins LLP" / "Page 1 of 3" ≈ 130 == 130 scraped;
+  `here` "Job Listings at HERE" / "Page 1 of 3" ≈ 45 == 45 scraped;
+  `eastwestbank` "East West Bank" / "Page 1 of 12" ≈ 240, 235 scraped;
+  `nyu` "NYU Jobs" / "Page 1 of 23" ≈ 230, 229 scraped. Scrape-log
+  JSON-LD `hiringOrganization` confirmed "New York University", "HERE
+  Technologies", "Latham & Watkins LLP" on the yielded items.
+- Whole-table `job_postings`: 0 NULL `is_relevant`, 0 NULL `embedding`.
+- Full test suite: **225 passed** (no code touched).
+- Row counts: `companies` 737 → **741** (+4 iCIMS); `job_postings`
+  ~93,080 → **93,735** (the +639 iCIMS rows plus concurrent daily-
+  orchestrator re-scrape churn across other sources — the daily run was
+  mid-crawl throughout, so an exactly-attributable delta isn't isolable).
+- `icims` `companies`: 20 → 24.
+
+Not touched: the iCIMS spider, `discover_icims_job_board.py`, the gate
+logic, and every other ATS platform / company.
