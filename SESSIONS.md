@@ -8268,3 +8268,74 @@ source API/HTML genuinely omits department for some listings).
 
 Nothing about company onboarding, discovery scripts, or the `companies`
 table was touched. Workday and Lever were not touched in this session.
+
+## 2026-09-02 - Add a department filter to job search
+
+Added a department filter to the job browse UI, on top of the department
+data backfilled in the prior two sessions.
+
+**Investigation first (task step 1):** the existing filters
+(`huntloop.api.routers.jobs.list_jobs`, `GET /jobs`) take `company`
+(case-insensitive exact match against `Company.name`) and `min_score` as
+query params, both applied as `.where()` clauses on a single SQLAlchemy
+`select()`, with `total` computed via a `count()` over the same filtered
+subquery before `limit`/`offset` are applied. On the frontend,
+`JobFilters.tsx` is a dumb/controlled component (`value`/`onChange`) owned
+by `frontend/src/app/jobs/page.tsx`'s local `useState`, no URL query-param
+sync - filter changes just reset `offset` and flow into a TanStack Query
+`queryKey`/`getJobs()` call. New filter options for the department select
+follow this exactly: same `.where()`-clause style on the backend, same
+controlled-value + `onChange` shape on the frontend.
+
+**Backend**: `department` query param on `GET /jobs`, filtering
+`JobPosting.department` by exact match (department values come from a
+real dropdown of real values, not free text, so unlike `company` no
+case-insensitivity was needed). A sentinel string,
+`UNSPECIFIED_DEPARTMENT = "__unspecified__"`, filters to
+`department IS NULL` when passed - this is what "Not specified" in the UI
+sends. New `GET /jobs/departments` endpoint returns the real distinct
+non-null `department` values, sorted - registered before the existing
+`GET /jobs/{job_id}` route in the file, since `/jobs/departments` would
+otherwise get intercepted by that route (matches its `{job_id}` path
+shape) and fail int coercion with a 422 before reaching the departments
+handler.
+
+**NULL-handling decision (task step 4)**: leaving the department filter
+unset returns postings regardless of department, same as before this
+change - additive/optional, never silently exclusionary. This falls out
+naturally: no filter clause is added when `department` is unset, so
+NULL-department rows (all of Workday's postings, plus real gaps in other
+sources - see the two prior sessions) are included exactly as they always
+were. Selecting a specific real department excludes everything else,
+including NULLs, which is the expected meaning of "filter by department."
+A third explicit option, "Not specified" (the `UNSPECIFIED_DEPARTMENT`
+sentinel), lets a user deliberately view only the NULL-department subset,
+rather than that subset being unreachable or silently mixed into "no
+filter" only.
+
+**Frontend**: `JobFilters.tsx` gained a department `<select>` (same
+`appearance-none` dropdown styling as the existing sort select), fetching
+its options via a `useQuery(["departments"], getDepartments)` inside the
+component itself - real values from `GET /jobs/departments`, not a
+hardcoded list. Wired into `jobs/page.tsx`'s existing filter-state/
+query-key/`getJobs()` plumbing the same way `company`/`min_score` already
+are.
+
+**Verified end-to-end for real** against the actual local Postgres (not
+mocked): direct `psql` counts for `department = 'Engineering'`,
+`department = 'Sales'`, and `department IS NULL` were compared against
+live `GET /jobs?department=...` calls against a running
+`uvicorn huntloop.api.main:app` - all three matched exactly, and the
+no-filter `GET /jobs` total matched the full `job_postings` row count
+(confirming NULL-department rows aren't dropped by default). `GET
+/jobs/departments` returned real distinct values from the live table.
+
+**Tests**: 4 new backend tests in `tests/test_api_jobs.py` (department
+exact-match filter, the `__unspecified__` sentinel, no-filter still
+including a NULL-department seeded job, and `GET /jobs/departments`
+sorting/distinctness) - full suite passing. No frontend test suite exists
+in this repo yet (unchanged by this session); verified via `tsc --noEmit`
++ `eslint` (both clean) plus the live end-to-end check above instead.
+
+Nothing else was touched - no other filter, no relevance/embedding
+pipeline code, no spider/discovery code.

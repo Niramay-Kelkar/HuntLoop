@@ -34,6 +34,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
+# Sentinel accepted by the `department` query param to mean "postings with
+# no department set" - department is real free text from each ATS source
+# (see CLAUDE.md), so an empty/unspecified value can't be confused with a
+# real one; this string is deliberately unlikely to collide with a real
+# department name.
+UNSPECIFIED_DEPARTMENT = "__unspecified__"
+
 
 def _active_resume_embedding(db: Session):
     """The active resume's embedding, or None if there's no active resume
@@ -77,9 +84,30 @@ def _row_to_summary(row) -> JobSummary:
     )
 
 
+@router.get("/departments", response_model=list[str])
+def list_departments(db: Session = Depends(get_db)) -> list[str]:
+    """The real, distinct department values currently in use across
+    job_postings (non-null only) - lets the frontend populate its
+    department filter from real data instead of a hardcoded list.
+    Department is free text from each ATS source (see CLAUDE.md) and is
+    deliberately not normalized/canonicalized here."""
+    rows = db.execute(
+        select(JobPosting.department).where(JobPosting.department.isnot(None)).distinct().order_by(JobPosting.department)
+    )
+    return [row[0] for row in rows]
+
+
 @router.get("", response_model=JobListResponse)
 def list_jobs(
     company: str | None = Query(None, description="Filter by company name (case-insensitive)."),
+    department: str | None = Query(
+        None,
+        description=(
+            "Filter by exact department value, or "
+            f"'{UNSPECIFIED_DEPARTMENT}' to return only postings with no department set. "
+            "Unset (default) returns postings regardless of department, including those with none."
+        ),
+    ),
     min_score: float | None = Query(
         None, ge=0, le=1, description="Minimum match score (0-1). Requires an active resume."
     ),
@@ -114,6 +142,11 @@ def list_jobs(
 
     if company:
         query = query.where(func.lower(Company.name) == company.lower())
+    if department is not None:
+        if department == UNSPECIFIED_DEPARTMENT:
+            query = query.where(JobPosting.department.is_(None))
+        else:
+            query = query.where(JobPosting.department == department)
     if min_score is not None:
         query = query.where(score_expr >= min_score)
 

@@ -36,8 +36,24 @@ conventions" and SESSIONS.md for the real current state).
 - Tests: pytest, config at repo root (`pytest.ini`), tests live in `tests/`.
 - **FastAPI backend service, `src/huntloop/api/`, added 2026-08-22 — has
   real endpoints now: `GET /health`, `GET /jobs`, `GET /jobs/{id}`,
-  `PATCH /jobs/{id}/application`, `GET /dashboard/stats`, `GET
-  /resumes`, `POST /resumes/upload`, `PATCH /resumes/{id}/activate`.**
+  `GET /jobs/departments`, `PATCH /jobs/{id}/application`, `GET
+  /dashboard/stats`, `GET /resumes`, `POST /resumes/upload`, `PATCH
+  /resumes/{id}/activate`.**
+  **`GET /jobs` gained a `department` query param, and `GET
+  /jobs/departments` (added 2026-09-02, see SESSIONS.md's "Add a
+  department filter to job search") was added alongside it — exact
+  match against `JobPosting.department`, or the sentinel
+  `UNSPECIFIED_DEPARTMENT = "__unspecified__"` to filter to
+  `department IS NULL`. Leaving `department` unset returns postings
+  regardless of department, including NULL ones, same as before this
+  change — the filter is additive/optional, never silently
+  exclusionary, since `department` is NULL for ~44% of postings
+  (100% of Workday's, by source-data design — see the department-NULL
+  entries above) and those must stay visible by default.
+  `/jobs/departments` is registered before `/jobs/{job_id}` in the
+  router file — registering it after would let `{job_id}`'s int-typed
+  path param intercept `/jobs/departments` and 422 before this handler
+  ever runs.**
   Runs as its own `api` service in
   `docker-compose.yml` (own container, port 8000 — deliberately not
   merged into `app`, a separate concern). **`api`'s `DATABASE_URL`
@@ -136,6 +152,17 @@ conventions" and SESSIONS.md for the real current state).
   `JobSummary`/`JobDetail` also carry `locations: list[str]` (populated
   via the existing `JobPosting.locations` relationship, no migration
   needed).
+  **`JobFilters.tsx` gained a department `<select>`, added 2026-09-02
+  (see SESSIONS.md) — populated via its own `useQuery` against the new
+  `GET /jobs/departments`, real distinct values only, never a hardcoded
+  list.** Options: "All departments" (unset — no filter, matches
+  `frontend/src/app/jobs/page.tsx`'s existing filter-state/query-key
+  wiring for `company`/`min_score`), each real department value, and
+  "Not specified" (sends `UNSPECIFIED_DEPARTMENT` from
+  `frontend/src/types/api.ts`, filters to NULL-department postings
+  only). No URL query-param sync for any filter, department included —
+  matches the existing `company`/`min_score` pattern, not a gap
+  introduced here.
 - Entrypoint: `python main.py` runs the multi-ATS orchestrator end-to-end
   — queries `companies.ats_platform`, groups by platform, and runs
   `GreenhouseScraper`/`LeverScraper` once each with all tokens for that
