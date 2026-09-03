@@ -1405,6 +1405,44 @@ conventions" and SESSIONS.md for the real current state).
   (83,720 each); only `department` counts changed, and only for
   `lever_api`. `tests/test_pipeline.py`/`tests/test_greenhouse_spider.py`
   (new) cover the fix; full suite 219/219 passing.
+  **The other 5 sources' existing rows were backfilled 2026-09-02 (see
+  SESSIONS.md "Backfill job_postings.department on existing rows via
+  re-scrape") via a fresh re-scrape of every onboarded company.** First
+  fixed a real gap this required: `JobDataPipeline.process_item()`'s
+  repost-match path (matched by `gh_job_id`) previously just logged
+  "Skipping reposted job" and touched nothing — now, on a repost, it
+  fills `department` if the existing row's is `NULL` and the new item has
+  a real value, and nothing else; every other column (`is_relevant`,
+  `embedding`, ...) is still left completely alone on a repost, by
+  design (narrow, additive fix only — see `tests/test_pipeline.py`'s
+  `test_repost_backfills_null_department_only` /
+  `test_repost_does_not_overwrite_existing_department`). Per-source
+  before → after `department` NULL counts (all 5 started 100% NULL):
+  Gem 495/495 → 2/496, Ashby 3336/3336 → 66/3401,
+  iCIMS 4080/4080 → 478/5303, Greenhouse 27419/27419 → 2141/28588,
+  SmartRecruiters 19165/19165 → 9926/20333. **SmartRecruiters needed a
+  different mechanism, not the real spider re-scrape**: its own list
+  endpoint already returns `department` inline per posting, so the
+  per-job detail fetch `SmartRecruitersScraper` normally makes (needed
+  only for a brand-new posting's description) was pure overhead for this
+  backfill — a partial real re-scrape was on pace to take many more hours
+  after 2 hours/27 companies, so it was stopped and replaced with
+  `scripts/backfill_department_smartrecruiters.py` (list-only pagination,
+  no detail requests, no torch dependency — runs in the local `.venv`),
+  which finished the remaining 224 companies in ~23 minutes. `scripts/
+  scrape_greenhouse.py` (new — the other 4 sources already had a scoped
+  entrypoint) was added for parity. Whole-table verification after all 5:
+  `job_postings` 83,720 → 87,346 (+3,626 genuinely new/reappeared
+  postings, not duplicates — `count(*) == count(distinct job_url) ==
+  count(distinct gh_job_id) == 87,346`); `is_relevant`/`embedding` both
+  still 0 NULL across every row. Final whole-table `department` NULL
+  rate: 38,539/87,346 (44.1%), almost entirely `workday_api`
+  (25,510/25,510, 100% by design, untouched — see above); the remaining
+  per-source NULLs above are real API/HTML gaps (some boards, e.g.
+  SmartRecruiters' `deltaelectronics`, simply don't provide `department`
+  for any of their postings) or closed/expired postings, not a fix
+  failure. Full suite 221/221 passing (219 + 2 new pipeline tests). Not
+  touched: Workday, Lever, `companies`/onboarding/discovery scripts.
 - **iCIMS spider BUILT + onboarded + first scrape 2026-09-01 (see
   SESSIONS.md "Build the iCIMS spider + gated onboarding + first
   scrape"). Recommendation was GO — but a step grayer on ToS/risk than

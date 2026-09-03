@@ -8149,3 +8149,122 @@ the discovery script.**
 session); `companies` and `job_postings` row counts unchanged (700 /
 83,720); no spider or discovery script file was modified; nothing was
 written to the database in this investigation.
+
+## 2026-09-02 - Backfill job_postings.department on existing rows via re-scrape (Greenhouse, SmartRecruiters, Ashby, iCIMS, Gem)
+
+The prior session (see "Investigate and fix job_postings.department NULL
+across all 7 sources") fixed `JobDataPipeline` to populate `department` at
+insert time going forward, and backfilled Lever's historical rows from
+already-stored raw metadata. This session backfills the other 5 sources'
+*existing* rows, which needed a fresh re-scrape since their stored
+`metadata_json` doesn't retain a raw department value.
+
+**(a) Repost-handling behavior confirmed before any fix.** Read
+`JobDataPipeline.process_item()` directly: on a `gh_job_id` match
+(`existing_job`), the pipeline logged "Skipping reposted job" and
+`return`ed immediately - it never touched any column on the existing row,
+including `department`. Confirmed with the actual code, not assumed.
+
+**(b) Fix applied - narrow and additive only.** `process_item()` now: if
+`existing_job.department is None` and the new item carries a real
+`department` value, set it and commit; otherwise behavior is unchanged
+(log + skip). No other column is touched on a repost match - `is_relevant`,
+`embedding`, `matched_skills`, etc. are never reprocessed here. Two new
+tests in `tests/test_pipeline.py`
+(`test_repost_backfills_null_department_only`,
+`test_repost_does_not_overwrite_existing_department`) cover both the fill
+case and the don't-overwrite-an-existing-value case, plus that no other
+column changes and no duplicate row is created.
+
+**(c) Sample-tested before the full run.** 2 companies per source
+(sambanovasystems/convera - Greenhouse; cityofphiladelphia/deltaelectronics
+- SmartRecruiters; supabase/modal - Ashby; ropesgray/sas - iCIMS;
+lumalabs-ai/linktree - Gem), all starting 100% NULL department. After a
+scoped re-scrape (`scripts/scrape_greenhouse.py` - new, added this session
+for parity with the other sources' existing scoped entrypoints; the other
+4 already had one), department filled on 8/10 companies; deltaelectronics
+(58/58) and ropesgray (48/48) stayed fully NULL - their real API/HTML
+responses genuinely don't carry a department value for those specific
+boards, not a fix failure (confirmed no other source's postings for those
+companies changed shape). Zero duplicate rows, zero new NULL
+`is_relevant`/`embedding` in the sample.
+
+**(d) Full re-scrape results, per source** (department NULL count, before
+the very first backfill run this session was 100% NULL for all 5 - see the
+prior session's audit):
+
+  - **Gem**: 495/495 -> 2/496 NULL. Full re-scrape via
+    `scripts/scrape_gem.py` (no company arg = all 12 companies), ~49s.
+  - **Ashby**: 3336/3336 -> 66/3401 NULL. Full re-scrape via
+    `scripts/scrape_ashby.py`, ~3.5 min (no per-job detail fetch needed -
+    Ashby's list response already carries everything).
+  - **iCIMS**: 4080/4080 -> 478/5303 NULL. Full re-scrape via
+    `scripts/scrape_icims.py`. Ran unusually long (~5 hours) because two
+    identical scrape processes ended up running concurrently against the
+    same 20 companies (a leftover background process from before this
+    session's context was compacted, not something started twice
+    deliberately) - both completed safely with zero data corruption, since
+    the pipeline's `gh_job_id`/`job_url` uniqueness + repost-skip handling
+    is idempotent under concurrent writers by construction. The
+    `primehealthcare` board (a hospital group, ~2,000-3,000 postings) was
+    the long pole.
+  - **SmartRecruiters**: 19165/19165 -> 9926/20333 NULL. **Switched
+    approach mid-run**: the real re-scrape via `scripts/
+    scrape_smartrecruiters.py` (which fetches one detail page per posting,
+    needed for description on brand-new postings) was on pace to take many
+    more hours after 2 hours only reached 27/224 companies - because
+    SmartRecruiters' own list endpoint already returns `department` inline
+    per posting (confirmed directly in `SmartRecruitersScraper`'s own
+    module docstring/code), so the per-job detail fetch this backfill was
+    paying for was unnecessary for this specific column. Stopped that run
+    and wrote `scripts/backfill_department_smartrecruiters.py` - list-only
+    pagination (no detail requests, no torch dependency, runs in the local
+    `.venv` directly), matching existing rows via the exact same
+    `gh_job_id` construction (`{company_id}_{posting_id}`, with the same
+    `sr_` fallback) `SmartRecruitersScraper` uses. Completed in ~23 minutes
+    (224 companies, 19,383 postings seen, 2,871 rows filled on this pass;
+    combined with what the earlier detail-based partial run had already
+    filled before being stopped, net NULL dropped from 19,165 to 9,926).
+    Deliberately does not insert new postings (no description available
+    list-only) - a normal scheduled scrape will pick those up. A large
+    remaining-NULL share here is real: several SmartRecruiters boards
+    (e.g. `deltaelectronics`, confirmed in the sample step) simply don't
+    populate `department` in their API response at all for those postings.
+  - **Greenhouse**: 27419/27419 -> 2141/28588 NULL. Full re-scrape via the
+    new `scripts/scrape_greenhouse.py` (all 318 companies), ~59 min - no
+    per-job detail fetch needed (Greenhouse's `?content=true` list call
+    already returns full description + `departments` in one request per
+    company; the previous session's insert-time fix already reads this
+    correctly). 3 unrelated pre-existing spider bugs surfaced on 2-3
+    boards (a `KeyError: JobPostingItem does not support field:
+    skills_list` and an `AttributeError: 'list' object has no attribute
+    'split'`) - real, but out of this task's scope (not department-related,
+    not introduced by this session; those specific boards' postings were
+    simply skipped for this run, no crash, no bad data written).
+
+**(e) Row count / duplicate check (whole table, after all 5 sources).**
+`job_postings` total: 83,720 -> 87,346 (+3,626, matching the sum of each
+source's real total growth above - genuinely new/reappeared postings, not
+duplicates). Direct proof of no duplication:
+`count(*) == count(distinct job_url) == count(distinct gh_job_id) ==
+87,346` for the whole table.
+
+**(f) is_relevant / embedding unaffected.** `count(*) filter (is_relevant
+is null)` and `count(*) filter (embedding is null)` are both 0 across all
+87,346 rows, both before and after this session's work (this repost fix
+never touches those columns, and every new row got them computed at insert
+time same as always, via Docker for torch).
+
+**(g) Full suite**: 221/221 passing (219 previously + 2 new pipeline
+tests from step (b)).
+
+**Final department-NULL picture, whole table**: 87,346 total, 38,539 NULL
+(44.1%) - almost entirely `workday_api` (25,510/25,510, 100%, by design -
+Workday's per-job CXS detail response has no department field at all, a
+genuine source limitation documented in the prior session, not touched
+here) plus the real SmartRecruiters/Greenhouse/iCIMS/Ashby/Gem residuals
+reported per-source above (closed/expired postings and boards whose
+source API/HTML genuinely omits department for some listings).
+
+Nothing about company onboarding, discovery scripts, or the `companies`
+table was touched. Workday and Lever were not touched in this session.

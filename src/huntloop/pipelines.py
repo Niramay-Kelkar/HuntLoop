@@ -174,7 +174,21 @@ class JobDataPipeline:
 
             existing_job = session.query(JobPosting).filter_by(gh_job_id=str(item["job_id"])).first()
             if existing_job:
-                logger.info(f"Skipping reposted job {item['job_id']}")
+                # Narrow, additive backfill only: if this repost carries a
+                # real department value and the existing row doesn't have
+                # one yet, fill it in. Every other already-populated column
+                # (is_relevant, embedding, matched_skills, ...) is left
+                # completely untouched on a repost match - this is not a
+                # general reprocess-on-repost path.
+                new_department = item.get("department")
+                if existing_job.department is None and new_department:
+                    existing_job.department = new_department
+                    session.commit()
+                    logger.info(
+                        f"Backfilled department for reposted job {item['job_id']}"
+                    )
+                else:
+                    logger.info(f"Skipping reposted job {item['job_id']}")
                 metrics.jobs_skipped_duplicate_total.labels(company=company_name, source=source_name).inc()
                 return item
 
