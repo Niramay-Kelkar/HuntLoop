@@ -88,6 +88,11 @@ export interface DashboardStats {
   new_jobs_last_7_days: number;
 }
 
+// Sentinel value for GET /jobs' `department` query param, meaning
+// "postings with no department set" - mirrors
+// huntloop.api.routers.jobs.UNSPECIFIED_DEPARTMENT.
+export const UNSPECIFIED_DEPARTMENT = "__unspecified__";
+
 export interface ResumeVersionSummary {
   id: number;
   version_number: number;

@@ -19,12 +19,12 @@ normalizes into `JobPostingItem` → the single, source-agnostic
 Platforms without an implemented spider (ashby, workday) or companies with no
 detected platform are skipped with a clear log message, not silently dropped.
 
-Broader vision (not yet built): aggregate job postings across many sources
-beyond Greenhouse/Lever, and add sponsorship-aware matching so candidates can
-filter for companies that actually sponsor visas (e.g. H1B). Ashby and
-Workday spiders are deliberately not built yet — `detect_ats()` already
-identifies companies on those platforms (see `companies.ats_platform`), but
-nothing scrapes them; treat that as planned, not present.
+Broader vision: aggregate job postings across many sources and add
+sponsorship-aware matching so candidates can filter for companies that
+actually sponsor visas (e.g. H1B). **Update: Greenhouse, Lever, Workday,
+SmartRecruiters, and Ashby spiders are all built now** (this overview
+paragraph predates them — see the spider bullets under "Tech stack and
+conventions" and SESSIONS.md for the real current state).
 
 ## Tech stack and conventions
 
@@ -36,8 +36,24 @@ nothing scrapes them; treat that as planned, not present.
 - Tests: pytest, config at repo root (`pytest.ini`), tests live in `tests/`.
 - **FastAPI backend service, `src/huntloop/api/`, added 2026-08-22 — has
   real endpoints now: `GET /health`, `GET /jobs`, `GET /jobs/{id}`,
-  `PATCH /jobs/{id}/application`, `GET /dashboard/stats`, `GET
-  /resumes`, `POST /resumes/upload`, `PATCH /resumes/{id}/activate`.**
+  `GET /jobs/departments`, `PATCH /jobs/{id}/application`, `GET
+  /dashboard/stats`, `GET /resumes`, `POST /resumes/upload`, `PATCH
+  /resumes/{id}/activate`.**
+  **`GET /jobs` gained a `department` query param, and `GET
+  /jobs/departments` (added 2026-09-02, see SESSIONS.md's "Add a
+  department filter to job search") was added alongside it — exact
+  match against `JobPosting.department`, or the sentinel
+  `UNSPECIFIED_DEPARTMENT = "__unspecified__"` to filter to
+  `department IS NULL`. Leaving `department` unset returns postings
+  regardless of department, including NULL ones, same as before this
+  change — the filter is additive/optional, never silently
+  exclusionary, since `department` is NULL for ~44% of postings
+  (100% of Workday's, by source-data design — see the department-NULL
+  entries above) and those must stay visible by default.
+  `/jobs/departments` is registered before `/jobs/{job_id}` in the
+  router file — registering it after would let `{job_id}`'s int-typed
+  path param intercept `/jobs/departments` and 422 before this handler
+  ever runs.**
   Runs as its own `api` service in
   `docker-compose.yml` (own container, port 8000 — deliberately not
   merged into `app`, a separate concern). **`api`'s `DATABASE_URL`
@@ -136,6 +152,17 @@ nothing scrapes them; treat that as planned, not present.
   `JobSummary`/`JobDetail` also carry `locations: list[str]` (populated
   via the existing `JobPosting.locations` relationship, no migration
   needed).
+  **`JobFilters.tsx` gained a department `<select>`, added 2026-09-02
+  (see SESSIONS.md) — populated via its own `useQuery` against the new
+  `GET /jobs/departments`, real distinct values only, never a hardcoded
+  list.** Options: "All departments" (unset — no filter, matches
+  `frontend/src/app/jobs/page.tsx`'s existing filter-state/query-key
+  wiring for `company`/`min_score`), each real department value, and
+  "Not specified" (sends `UNSPECIFIED_DEPARTMENT` from
+  `frontend/src/types/api.ts`, filters to NULL-department postings
+  only). No URL query-param sync for any filter, department included —
+  matches the existing `company`/`min_score` pattern, not a gap
+  introduced here.
 - Entrypoint: `python main.py` runs the multi-ATS orchestrator end-to-end
   — queries `companies.ats_platform`, groups by platform, and runs
   `GreenhouseScraper`/`LeverScraper` once each with all tokens for that
@@ -145,12 +172,20 @@ nothing scrapes them; treat that as planned, not present.
   via `main.py` or programmatically (`process.crawl(SpiderClass, ...)`).
 - Docker: `Dockerfile` + `docker-compose.yml` (app + postgres:18) for a
   dev-oriented containerized setup. CI (`.github/workflows/ci.yml`) runs
-  migrations + pytest against a real Postgres service container on every
-  push/PR to `master`. The app container runs as a dedicated non-root
-  `huntloop` user (not root) — see the security audit entry in
-  SESSIONS.md (2026-08-21). `.dockerignore` excludes `data/raw/` and
-  `logs/` (mirroring `.gitignore`) so real LCA data and log output never
-  get baked into an image layer.
+  migrations + pytest against a real Postgres service container
+  (`pgvector/pgvector:pg18`) on every push/PR to `master`. **Its `env:`
+  block carries `GROQ_API_KEY` / `GEMINI_API_KEY` as the placeholder
+  string `dummy-key-for-ci` (2026-09-03, see SESSIONS.md) — the
+  skills-matching modules `raise` at import if these are unset and the
+  branch's tests are the first to import them; every real API call in the
+  suite is mocked, so a non-empty value is enough. The same block sets
+  `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1` so the
+  `sentence-transformers` model fetch degrades deterministically instead
+  of depending on the runner's network.** The app container runs as a
+  dedicated non-root `huntloop` user (not root) — see the security audit
+  entry in SESSIONS.md (2026-08-21). `.dockerignore` excludes `data/raw/`
+  and `logs/` (mirroring `.gitignore`) so real LCA data and log output
+  never get baked into an image layer.
 - **`docker-compose.yml` has a Prometheus/Pushgateway/Grafana
   observability stack, added 2026-08-22 (see SESSIONS.md), gated behind
   `profiles: ["observability"]` so plain `docker-compose up` never starts
@@ -406,9 +441,18 @@ nothing scrapes them; treat that as planned, not present.
   it with the bare `pgvector.sqlalchemy.Vector` or add another
   `vector`-typed column using anything else — see the conftest.py
   incident bullet above for exactly why.**
+  **`job_postings.embedding` is computed at insert time by
+  `JobDataPipeline._classify_and_embed` (2026-08-31), in the same single
+  model call as `is_relevant` — so a new ATS source no longer needs a
+  manual embedding pass after its first scrape.** Same graceful
+  degradation as `is_relevant`: NULL when the pipeline runs torch-less
+  (local `.venv`) or an isolated per-row failure.
   `scripts/backfill_embeddings.py` embeds the active resume (recomputed
   every run) and backfills `job_postings` in batches of 100 (only
-  `embedding IS NULL` rows, safe to interrupt/resume). **This project's
+  `embedding IS NULL` rows, safe to interrupt/resume) — still the right
+  tool for bulk re-scrapes (batch-of-100 vs. the pipeline's one row at a
+  time) and for cleaning up NULLs from torch-less runs, so it stays.
+  **This project's
   local dev venv (macOS, Intel, Python 3.13) cannot run
   `sentence-transformers`/`torch` — confirmed by actually trying to
   install `torch` and finding no compatible wheel (PyPI's last
@@ -418,17 +462,52 @@ nothing scrapes them; treat that as planned, not present.
   Postgres via `docker compose run --rm -e
   DATABASE_URL="...@host.docker.internal:5432/<db>" app python
   scripts/backfill_embeddings.py` — not the docker-compose `db` on 5433.
-  Match scores are **computed at query time** via pgvector's `<=>`
+  Match *scores* are **computed at query time** via pgvector's `<=>`
   cosine-distance operator (`similarity = 1 - distance`), deliberately
-  **not stored** — with one active resume and ~600 jobs a live query is
-  trivial, and a stored score would need an invalidation mechanism (on
-  every scrape/resume update) that doesn't exist; revisit only if live
-  scoring ever becomes measurably slow. Verified end-to-end against the
+  **not stored** — a stored score would need an invalidation mechanism
+  (on every scrape/resume update) that doesn't exist; revisit only if
+  live scoring ever becomes measurably slow. (The per-job *embedding* IS
+  stored — it doesn't change unless the description does; only the
+  score, which depends on the active resume, is left to query time.) Verified end-to-end against the
   real resume + all 605 real job postings: healthy, non-degenerate score
   distribution (min 0.033, max 0.593, mean 0.372) and a by-eye-sane
   top/bottom-5 ranking (top 5 all Palantir "Software Engineer" roles;
   bottom 5 fraud-ops/creative/marketing roles) — see SESSIONS.md for the
   full numbers.
+  **Embedding coverage backfilled to the full dataset 2026-08-30 (see
+  SESSIONS.md) — was 605 / 30,373 rows (all the original ~9-company set),
+  now 30,373 / 30,373.** Ran `scripts/backfill_embeddings.py` unchanged
+  (batch 100, commit-per-batch, `embedding IS NULL` only) in the `app`
+  Docker image. The resume-vs-job similarity score is now computable for
+  every real job, not ~2%.
+  **Full coverage again 2026-08-31 after the Workday scrape (see
+  SESSIONS.md): 30,373 → 53,961 / 53,961.** Ran `backfill_embeddings.py`
+  unchanged in Docker for the 23,588 new `workday_api` rows (which
+  predated the insert-time wiring above). Spot-checked: Workday jobs now
+  score and rank in the live UI (`jadeglobal` "Java Backend + AI Agent
+  Developer" 0.665, `nxp` "Software DevOps Engineer – for Gen AI" 0.664,
+  `jabil` 0.661 — top of "Best match" alongside the ATS-expansion set).
+  Going forward the insert-time wiring keeps new rows covered; the
+  backfill is only needed for a bulk historical gap like this one.
+  **Audited the live match-score query/UI (`huntloop.api.routers.jobs`)
+  at the new 30,373-row scale 2026-08-30 (see SESSIONS.md) — no code
+  changed, still correct.** Scores now render for ATS-expansion companies
+  in both list and detail views (verified: `pubmatic` 0.68, `vianttechnology`
+  0.66, `sigmacomputing` ~0.63–0.65 — all now outranking the original
+  set; old global max Palantir 0.593 is now rank #42). **Before this
+  backfill, jobs with `embedding IS NULL` (98% of the table) were
+  silently degraded, not broken**: `match_score` came back JSON `null`
+  (frontend "not scored" pill), `nulls_last()` sorted them below every
+  real-scored job, and `min_score` filters excluded them from results
+  *and* the total count — no crash, no zero, no error. **No pgvector
+  index (ivfflat/hnsw) on `job_postings.embedding` and deliberately not
+  added**: the list query is a Seq Scan + top-N heapsort, ~66–122 ms SQL
+  / ~120–245 ms full `GET /jobs` request — acceptable for a single-user
+  local tool; an ANN index is approximate (would change which jobs rank
+  where — forbidden by the "don't change scoring" constraint) and only
+  helps a bare `ORDER BY <=> LIMIT`, not the `count()`/`min_score`/
+  `company`-filtered call patterns. Revisit only past ~100k rows or if
+  the API goes multi-user/remote.
 - **Matched/missing skills-list via Groq exists (`huntloop.skills_matching`),
   added 2026-08-22. Phase 3's matching engine (embeddings + scoring +
   skills matching) is complete and self-sustaining as of 2026-08-22 —
@@ -484,6 +563,114 @@ nothing scrapes them; treat that as planned, not present.
   re-checking the real data distribution first, and don't assume
   `matched_skills` values that predate 2026-08-22 in the DB are
   trustworthy without checking their length against it.
+  **A local-Ollama replacement was evaluated 2026-08-29 and rejected
+  (NO-GO) — see SESSIONS.md.** `huntloop.skills_matching` stays on Groq.
+  `src/huntloop/skills_matching_ollama.py` is a complete, contract-
+  identical Ollama-backend port kept **intentionally unwired** (nothing
+  imports it) so the experiment is reproducible on better hardware;
+  `scripts/validate_ollama_skills_match.py` is its validation harness
+  (9 Step 4/5 sample jobs + the Duolingo soft-match / Palantir
+  Deployment-Strategist known cases; writes gitignored
+  `scratch_ollama_validation.json`). On this dev machine (Intel
+  i5-8257U, 2 cores, 8 GB RAM, no GPU) every RAM-viable model
+  (`qwen2.5:3b-instruct`, `llama3.2:3b`) failed quality — full-resume
+  dumps, matched/missing inversion, prompt-echo, repetition spirals,
+  and did NOT reproduce the soft-match nuance — and `qwen2.5:7b-instruct`
+  timed out at 900s/job with <1 GB RAM free. Don't re-attempt an Ollama
+  cutover here without new hardware (Apple Silicon ≥16 GB or a GPU box);
+  the recommended path is staying on Groq and living with its 200K-TPD
+  cap (the daily incremental volume, ~1–2 relevant jobs/day, fits one
+  day's budget easily; the full backfill is a one-time multi-day cost
+  the existing self-pacing script already handles).
+  **Google Gemini's free tier is the WIRED fallback provider behind Groq
+  as of 2026-08-29 (Step K) — see SESSIONS.md + full writeup in
+  `huntloop-architecture-decisions.md`.** Why it became load-bearing:
+  the ATS expansion (9→380 companies) pushed daily relevant-postings
+  volume to ~120/day while Groq's real free-tier throughput at the wider
+  set's ~9.5k-char JDs is only **~58 jobs/day** (long JDs collapse Groq's
+  batch to ~1.7); Gemini's ~2,200/day (500 RPD × real batch 4.4) covers
+  the gap. **Real current Gemini free-tier limits (from AI Studio —
+  Google removed the static per-model table from the docs on 2026-08-18,
+  limits are per-account now): 2.5-gen models cut to 20 RPD (was 1,000),
+  `gemini-2.5-flash-lite` 404s; the only viable model is
+  `gemini-3.5-flash-lite` at 15 RPM / 250K TPM / 500 RPD.** Quality
+  (11-job side-by-side): equivalent to Groq on clear-cut jobs, better on
+  2 SWE roles Groq whiffed, but more conservative on the Duolingo
+  soft-match — hence Groq stays *primary*, Gemini is fallback-only.
+  **Wiring:**
+  - `huntloop.skills_matching_errors` — shared `DailyQuotaExhausted` /
+    `ProviderResponseInvalid` (both backends raise the same classes).
+  - `huntloop.skills_matching_router` — `match_skills_batch(resume, jds,
+    state)` dispatching Groq→Gemini. `SKILLS_MATCHING_PROVIDERS` env
+    (default `groq,gemini`; `groq` alone = pre-routing behaviour, no
+    GEMINI_API_KEY needed). Two failover triggers: `DailyQuotaExhausted`
+    marks a provider spent for the whole run; `ProviderResponseInvalid`
+    (Groq `json_validate_failed` 400, ~18% of calls) fails over **just
+    that batch**, provider stays primary. Run stops only on
+    `AllProvidersExhausted`.
+  - Per-provider batch sizing + pacing: each backend owns `MAX_BATCH_SIZE`
+    / `MAX_BATCH_ESTIMATED_TOKENS` / `TARGET_TPM` / `MAX_RPM` (Groq
+    5/7000/6000/30; Gemini 5/16000/200000/14 — 16000 computed from 250K
+    TPM ÷ 15 RPM; `MAX_RPM=14` because Gemini's small batches otherwise
+    run at ~30 req/min over its real 15 cap). `TokenPacer` enforces both
+    a tokens/min and a requests/min bound; `backfill_skills_matching.py`
+    chunks incrementally, re-reading `router.batch_limits(state)` (a
+    4-tuple) each batch so the caps flip when Groq exhausts mid-run.
+  - `backfill_skills_matching.py` query now filters `is_relevant IS TRUE`
+    (29,921 → 12,972 NULL rows; 57% were irrelevant) and logs the
+    relevant-backlog count each run as a capacity leading indicator.
+  Verified with a real `--limit 250` run: 242 stored / 8 NULL, split
+  groq 11 / gemini 231 (Groq's TPD was pre-spent → `DailyQuotaExhausted`
+  fired after 11; 19 `json_validate_failed` per-batch failovers). Full
+  12,972 backlog clears in ~5.6 days at steady state.
+  `scripts/validate_gemini_skills_match.py` (side-by-side harness, writes
+  gitignored `scratch_gemini_validation.json`) is unchanged.
+  `GEMINI_API_KEY` is in `.env`.
+  **First unbounded (`--limit`-less) production run, 2026-08-30 (see
+  SESSIONS.md) — measurement only, no code changed.** Backlog 12,682 →
+  **11,057**; `job_postings` with a stored result 736 → 2,363 (733 of
+  those `matched_skills = []`, a healthy 31%). Real observations that
+  differ from the projections above: (1) **Groq contributed only ~9 jobs
+  total** — its 200K TPD (still 200K, confirmed via a forced 429:
+  "Limit 200000, Used 196649") was ~98% pre-consumed by the prior day's
+  `--limit 250` run within the rolling-24h window. (2) **Gemini's
+  effective throughput is ~1,000–1,300 successful jobs/day, not the
+  ~2,200 projected** — sustained per-minute 429s ("You exceeded your
+  current quota", classified transient → row left NULL, retried next
+  run) shed 25–40% of calls; `MAX_RPM=14` vs Gemini's real 15 RPM hard
+  cap has no margin. It still stops cleanly on the per-day (RPD ≈ 500)
+  429 → `DailyQuotaExhausted` → `AllProvidersExhausted`, exit 0. (3)
+  **The launchd daily orchestrator's stage-2 backfill and any manual
+  `backfill_skills_matching.py` run once shared quota and raced the same
+  NULL rows** (2026-08-30: 07:40 cron catch-up + 07:57 manual ran
+  concurrently, ~700 rows processed twice). **FIXED 2026-08-30 — the
+  script now takes a Postgres session-level advisory lock
+  (`pg_try_advisory_lock`, key 1,751,937,901) in `main()`; a second
+  concurrent invocation logs one WARNING and returns 0 without touching
+  anything.** Run body moved to `_run_backfill()`; `_backfill_lock()`
+  contextmanager; `tests/test_backfill_lock.py` (3 tests). Verified with
+  a real deliberately-triggered overlap, not just code review (see
+  SESSIONS.md).
+  (4) **Gemini cold-start latency is server-side and sporadic, not a
+  first-call warm-up** — ~1% of calls take 30–70s in short
+  time-correlated bursts (seen simultaneously across two independent
+  processes); the rest are 1–2.5s. (5) **Gemini quality on
+  adjacent-but-not-a-fit roles**: ~1/8 of spot-checked Gemini rows put
+  skills *named in the JD* into `matched_skills` without résumé grounding
+  (e.g. "PCB layout" for an electronics role, "React"/"GraphQL" for a
+  frontend role when the résumé has neither) — the inverse of the
+  full-resume-dump failure, milder, and **not caught by
+  `MAX_PLAUSIBLE_MATCHED_SKILLS = 20`** (these are 2–7 items). Groq is
+  tighter but not immune. **PARTLY FIXED 2026-08-30 — both Gemini prompts
+  (`_SYSTEM_PROMPT`, `_BATCH_SYSTEM_PROMPT`) gained an explicit
+  résumé-grounding rule ("*the job posting mentions X*" ≠ "*the résumé
+  shows X*"; only the second earns a `matched_skills` slot). Groq's
+  prompt deliberately untouched.** A/B on 20 fresh jobs (same jobs, same
+  model, OLD vs NEW prompt): rows with ≥1 ungrounded matched-skill
+  45% → 25%, total ungrounded entries 19 → 9 (6 rows improved, 1
+  regressed). Residual misses are on roles far from the résumé (TPM →
+  "JIRA", HW verification → "SystemVerilog"). See SESSIONS.md 2026-08-30
+  "Two backfill fixes".
 - **A hybrid keyword + embedding-similarity relevance pre-filter exists,
   added 2026-08-24 (see SESSIONS.md) — `job_postings.is_relevant`
   (nullable `Boolean`, migration `0900f3514ad2`), meant to flag whether
@@ -520,7 +707,33 @@ nothing scrapes them; treat that as planned, not present.
   "Embedded Legal Engineer", "Marketing Engineer"), while include and
   embedding-similarity are OR'd since keywords alone would miss
   obliquely-worded technical titles and embedding similarity alone would
-  need an unnecessarily conservative threshold on its own. **Deliberately
+  need an unnecessarily conservative threshold on its own.
+  **Exclude split into HARD and SOFT as of 2026-08-30 (see SESSIONS.md).**
+  `HARD_EXCLUDE_KEYWORDS` (everything except the two below) is still the
+  unconditional override just described — `sales` stays hard (241/253
+  "Sales Engineer" rows correctly excluded; flagged as a future-look
+  candidate, not changed). `SOFT_EXCLUDE_KEYWORDS = ["customer success",
+  "solutions consultant"]` are excluded **only if the same category
+  embedding similarity is also `< SOFT_EXCLUDE_RESCUE_THRESHOLD = 0.335`**
+  — those two phrases straddle the technical/non-technical line in the
+  real data (Rubrik "Customer Success Engineer" = support, sim 0.3232,
+  stays excluded; Palantir "Forward Deployed Enablement Engineer –
+  Customer Success" = builds tooling, sim 0.44, and Figma "Enterprise
+  Solutions Consultant" = deep technical pre-sales, sim 0.3403, both
+  rescued). `classify_relevance` checks hard first, then `soft_exclude ->
+  (sim >= 0.335)`, then the normal `include OR sim >= 0.29`; the include
+  keyword is deliberately NOT consulted for a soft-exclude title
+  ("Customer Success Engineer" has "engineer" too and must stay excluded
+  on a weak signal). Threshold calibrated from all 318 real
+  soft-exclude-titled rows (`scripts/calibrate_soft_exclude_threshold.py`);
+  0.335 sits in the widest real gap in the (0.3232, 0.3403] window.
+  `scripts/reclassify_soft_excludes.py` (Docker, batched) re-ran those
+  318 rows: 27 flipped to relevant (23 distinct — ~19 genuinely
+  technical, ~4 residual "Manager"/"Program Manager"/"Ops Analyst" false
+  positives accepted as MVP noise; the other 282 real CS-Manager /
+  low-similarity SC roles correctly stay excluded). `EXCLUDE_KEYWORDS`
+  kept as a back-compat alias (= HARD + SOFT); `tests/test_relevance_filter.py`
+  added (26 pure-logic tests). **Deliberately
   does NOT reuse the existing `job_postings.embedding` column** — that
   one is computed from `job_description` alone for resume-match scoring
   (a separate, already-documented purpose); this filter computes its own
@@ -556,12 +769,26 @@ nothing scrapes them; treat that as planned, not present.
   (the `launchd` job from the prior step) runs `main.py` via this
   machine's local `.venv`, which — as established repeatedly elsewhere
   in this doc — cannot run torch at all here. `JobDataPipeline` therefore
-  **degrades gracefully**: if `sentence-transformers`/torch isn't
-  importable, it logs one warning per spider run (not per row) and
-  leaves `is_relevant` NULL for that run's inserts, rather than crashing
-  the scrape; the same applies to an isolated per-row embedding failure
-  (any other exception), which leaves just that row's `is_relevant`
-  NULL rather than rolling back its whole insert.
+  **degrades gracefully**: if the embedding model can't be used for this
+  run — `sentence-transformers`/torch not importable, **or** the model
+  itself failing to load (e.g. offline with no HuggingFace cache, as in
+  CI) — `_get_reference_embedding()` logs one warning per spider run (not
+  per row) and leaves `is_relevant`/`embedding` NULL for that run's
+  inserts, rather than crashing the scrape; the same applies to an
+  isolated per-row embedding failure, which leaves just that row's
+  columns NULL rather than rolling back its whole insert.
+  **`_get_reference_embedding()` catches any exception here, not only
+  `ImportError` (fixed 2026-09-03, see SESSIONS.md — an offline model
+  load raises `OSError`/`LocalEntryNotFoundError`, which the old
+  `ImportError`-only catch let through, aborting the insert; this had
+  also left `master`'s CI silently red for ~10 days).**
+  **As of 2026-08-31 the same method (`_classify_and_embed`, renamed from
+  `_classify_relevance`) also computes and stores
+  `job_postings.embedding` — the resume-match embedding of the
+  description — in the same batched model call, so the identical
+  graceful-degradation rules apply to both columns and a new ATS source
+  no longer needs a manual `backfill_embeddings.py` pass after its first
+  scrape (see SESSIONS.md).**
   **The "real scheduled scrapes leave is_relevant NULL" gap noted when
   this was first wired in is now closed, as of 2026-08-24 (see the next
   bullet and SESSIONS.md) — the daily scraper itself now runs via
@@ -920,11 +1147,516 @@ nothing scrapes them; treat that as planned, not present.
   get its own distinct row the same way Lever's did automatically — no
   further pipeline or smoke-test changes needed.
 - **`companies.ats_platform`/`ats_token`/`careers_url` (added 2026-08-21,
-  see SESSIONS.md) are nullable and populated only by manually running
-  `scripts/detect_and_store_ats.py`** against a hardcoded curated list -
-  not automatically kept fresh, and not every company row has values yet
-  (e.g. `OpenAI`, from `test_db_insert.py`'s smoke test, has all three
-  `NULL`). Company rows use the same lowercase-token naming convention as
+  see SESSIONS.md) are nullable and populated by running
+  `scripts/detect_and_store_ats.py`** (a hardcoded 9-company curated
+  list, `careers_url`-based) **and, since 2026-08-29,
+  `scripts/detect_ats_for_sponsors.py`** (see below) - not automatically
+  kept fresh, and not every company row has values (e.g. `OpenAI`, from
+  `test_db_insert.py`'s smoke test, has all three `NULL`).
+  **`scripts/detect_ats_for_sponsors.py` (2026-08-29, see SESSIONS.md)
+  expanded `companies` from 9 detected rows to ~380** by taking the real
+  universe of distinct `employer_name_normalized` values in
+  `lca_disclosures` with >= 20 filings (8,491 employers; the full set is
+  108,575 and infeasible to probe), deriving candidate board slugs from
+  each name, and probing the Greenhouse
+  (`boards-api.greenhouse.io/v1/boards/{slug}` + `/jobs`) and Lever
+  (`api.lever.co/v0/postings/{slug}`) public APIs directly - **neither
+  vendor publishes any reverse "list our customers" endpoint (confirmed
+  against their own API docs)**, so slug-probing is the only option at
+  scale. Result: **318 Greenhouse + 60 Lever** hits (4.5% match rate -
+  an explicit LOWER BOUND, since a real board slug rarely equals a
+  slugified legal name), committed as 371 new `companies` rows + 1
+  updated (`brex`: `unknown`->`greenhouse`). `upsert_hits()` fills only
+  NULL/`'unknown'` `ats_platform`, never overwrites a different
+  successful platform. The matcher went through 3 probe passes to strip
+  false positives (generic-fragment slugs like `general`/`us`/`charles`,
+  Greenhouse demo tenants `linkedin`/`microsoftcorporation`, dictionary-
+  word collisions `flex`/`aura`/`national`) - final gates: board-name
+  fuzzy-similarity check, a dictionary-word stoplist + acronym rule,
+  >= 3 postings, "test"/"demo" name rejection. Residual FP risk remains
+  on generic 3-letter slugs at the low-filing tail (`rpa`, `pmg`,
+  `grey`) - accepted as MVP noise. **Re-run
+  `scripts/detect_ats_for_sponsors.py` after each new quarterly DOL LCA
+  file is ingested** (`scripts/ingest_lca_disclosures.py`), NOT on a
+  fixed calendar - a new quarter adds employers and pushes others past
+  the 20-filing threshold; safe to re-run (only inserts new / fills
+  NULL-or-unknown). `main.py` needs no changes - it already groups
+  `companies` by `ats_platform`. No new spiders were built; `ashby`/
+  `workday`/`neither` employers are still skipped.
+  **White-labeled Greenhouse/Lever on a company's own domain
+  investigated 2026-09-02 (see SESSIONS.md "Investigate white-labeled
+  Greenhouse/Lever on custom domains" - investigation only, no code
+  changed, no DB writes).** Real mechanism (confirmed on Ripple's live
+  page, a Next.js app): the company's own frontend calls/embeds the same
+  Greenhouse Boards API data server-side and republishes it under its own
+  URLs (`gh_jid` query param still present as a fingerprint) - not an
+  iframe, not a different backend. **The existing `boards-api.
+  greenhouse.io/v1/boards/{slug}/jobs` endpoint is reachable identically
+  regardless of the company's own domain once the slug is known** (proven
+  on Ripple + Airbnb/Pinterest/Coinbase/Peloton, all white-labeled on
+  custom domains, all found by literally guessing the slug) - **so
+  white-labeling is purely a discovery problem, `GreenhouseScraper` needs
+  no changes.** The real, separate cause Ripple specifically was missed:
+  `slug_candidates()` never emits a bare first-word candidate for a
+  2-word name whose second word isn't in `_TRAILING_NOISE` ("RIPPLE
+  LABS" - "LABS" isn't recognized noise) - a known, deliberate
+  conservatism (see the false-positive history in this bullet's own
+  paragraph above), not anything white-labeling-specific. Tested against
+  the real "neither" population (`scratch_neither_ats_probe.json`'s
+  existing 400-employer sample): a plain random 20-employer sample found
+  0 genuine hits (mostly staffing/hospitals/universities, as already
+  documented); a targeted sample of the 44 "2-word, non-noise-second-word"
+  employers in that same 400 found **2 confirmed genuine misses -
+  `FAIRE WHOLESALE` -> `faire` and `HIGHNOTE PLATFORM` -> `highnote`**
+  (both verified: real matching LCA job titles, not name-collision
+  noise) - plus 2 more real false-positive-shaped hits confirming this
+  approach isn't free of the same collision risk the existing stoplist/
+  similarity gates already guard against. **Recommendation: worth a
+  future carefully-gated follow-up (bare-first-word pass, run only for
+  names the current generator skips, with the same or stronger
+  corroboration gates already used elsewhere), not an urgent rebuild -
+  real but modest prevalence, not a rare Ripple-only edge case.**
+  **That follow-up is now BUILT, 2026-09-03 (see SESSIONS.md "Add a
+  gated bare-first-word candidate for 2-word company names").**
+  `scripts/detect_ats_for_sponsors.py` gained `bare_first_word_candidate()`
+  - a new, separate function (`slug_candidates()` and the noise-list
+  guard are untouched) that emits one bare first-word slug, tried ONLY as
+  a fallback after every regular candidate misses, for an exactly-two-word
+  name whose second word isn't in `_TRAILING_NOISE`. A hit via this kind
+  is NEVER auto-stored (same collision-prone shape as the
+  `first-word-only`/`acronym` kinds) - it is held for explicit human
+  confirmation via `--confirmations FILE` (one slug per line, gitignored
+  `confirmed_bareword_ats_slugs.txt`), mirroring the Ashby/iCIMS/Gem
+  onboarding gates. Every `primary`-kind hit still auto-stores exactly as
+  before. Full-population run: 88 bare-first-word hits, 42 auto-passed
+  (human-confirmed), 46 held; 36 new `companies` rows onboarded via this
+  kind (incl. **`faire` -> "Faire" and `highnote` -> "Highnote"**, both
+  Greenhouse), scraped by the daily orchestrator with 0 NULL
+  `is_relevant`/`embedding`. The confirmations file was built by checking
+  each held board's real job titles against the DOL employer name,
+  rejecting ~18 short/generic-word collisions (`mercury`, `fetch`,
+  `relativity`, `public`, ...). `scripts/scrape_lever.py` added for
+  parity with `scripts/scrape_greenhouse.py`. Re-running the full
+  discovery is idempotent (`0 inserted, 0 updated`).
+  **The 46 held bare-first-word candidates were manually reviewed
+  one-by-one 2026-09-03 (see SESSIONS.md "Resolve the 46 held
+  bare-first-word Greenhouse/Lever collisions") — no code/gate/discovery
+  changes; evidence from each live board (Greenhouse Boards API name +
+  jobs, Lever board page org name + postings) vs. the DOL sponsor, with
+  DOL worksite/title cross-check. Result: 2 confirmed correct, 0
+  still-ambiguous, 44 confirmed wrong (genuine collisions) — an even
+  higher collision rate than the iCIMS 39, as the bare-word slug is the
+  most collision-prone match kind.** The 2 correct (both Lever) were
+  added to `confirmed_bareword_ats_slugs.txt` and stored via the
+  UNCHANGED discovery `--commit --confirmations` path, then scraped:
+  `bioagilytix` → BioAgilytix Labs (bioanalytical CRO), `finix` → Finix
+  Payments (payments infra). The 44 wrong were slug collisions with
+  unrelated companies — `mercury`→Mercury the banking fintech (vs
+  Mercury Financial the card issuer), `relativity`→Relativity Space (vs
+  Relativity ODA the e-discovery co), `pivotal`→Pivotal the eVTOL
+  aircraft co (vs Pivotal Software), `clara`→Clara the LatAm cards
+  fintech (vs Clara Analytics), `matic`→Matic Insurance (vs Matic
+  Robots), `fetch`→Fetch Pet Insurance (vs Fetch Rewards),
+  `goodwin`→a "Goodwin" aviation/bookkeeping board (vs Goodwin Procter
+  LLP), `oliver`→OLIVER Agency (vs Oliver Wyman), `blue`→BlueCloud
+  Services (vs Blue Yonder), `neon`→Neon Pagamentos (vs Neon IT),
+  `pursuit`→the Pursuit nonprofit (vs Pursuit Software), `telligen`→the
+  Iowa Telligen healthcare org (vs "Telligen Tech Inc." the IT staffer),
+  plus many generic-word staffing-firm / preschool / physical-therapy
+  collisions (`cornerstone`, `elite`, `excel`, `sunrise`, `wise`,
+  `public`, `tia`, `sar`, `spencer`, `athena`, `techno`, `atek`, `lts`,
+  `grand`, `source`, `syntax`, `mantra`, `brilliant`, `galaxy`,
+  `benjamin`, `octagon`, `accrue`, `solutions`) — none stored. Full
+  per-company table in SESSIONS.md.
+  **Feasibility measured 2026-08-30 (see SESSIONS.md "Which ATS is most
+  common among the 'neither' sponsors") to decide which spider to build
+  next — measurement only, no spider, no DB writes.**
+  `scripts/probe_neither_ats_platforms.py` probed a seeded random sample
+  of 400 of the 8,113 GH/Lever-"neither" >=20-filing employers against
+  Ashby/Workday/SmartRecruiters/iCIMS. Result (any-hit, lower bounds):
+  **Workday 10.8% · iCIMS 4.5% · SmartRecruiters 4.0% · Ashby 2.2% ·
+  undetected 79.8%** (the undetected mass is IT body-shops, hospitals,
+  universities, research institutes, gov/school-district employers).
+  **Workday is the clear next target.** Tenant detection IS feasible: POST
+  `{tenant}.{dc}.myworkdayjobs.com/wday/cxs/{tenant}/__nosuchsite__/jobs`
+  -> **404 = tenant+dc exist, 422 = not** (dc brute-forced over 8 `wd{N}`
+  subdomains; site name not needed to confirm). BUT a Workday *spider*
+  additionally needs the per-tenant **site segment**, which is NOT
+  guessable (`adobe`=`external_experienced`, `salesforce`=
+  `External_Career_Site`; a 10-name common list hit 1/6 real tenants) --
+  onboarding must resolve each company's real careers URL once to capture
+  `{tenant, dc, site}` and `companies.ats_token` must widen to a 3-tuple.
+  Once known, the CXS `/jobs` POST paginates cleanly. SR is the cleanest
+  public API but ids aren't name-derivable (`Ubisoft`->`Ubisoft2`) and
+  only ~4%; Ashby is clean but too rare in this enterprise-skewed set;
+  iCIMS has opaque subdomains and mostly no public JSON.
+- **iCIMS discovery pass done 2026-09-01 (proof/discovery only — NO
+  spider, NO DB writes; see SESSIONS.md "iCIMS discovery pass").
+  Recommendation: QUALIFIED GO, but lower priority than SmartRecruiters
+  / Ashby were, and a step grayer on ToS/risk than any existing HuntLoop
+  integration.** Verified against real live traffic (Chrome network tab
+  + honest-UA curl, 3–4s delays, robots respected, no blocking hit):
+  - The premise that iCIMS scrapers hit an internal client-side JSON
+    endpoint `api.icims.com/customers/{customerId}/search/portals/{portal}`
+    is **false in practice.** That documented endpoint is genuinely
+    auth-gated (`GET .../customers/6273/search/portals/jobs` no creds →
+    **HTTP 401**, `errorCode 6`) and **no career portal calls it** —
+    full network inspection of `careers-insmed`/`careers-herbalife`
+    shows zero `api.icims.com` / `/api/jobs` / `intelliservices` / JSON
+    XHR for job data. `customerId` is not in client-side source at all.
+  - **What actually works:** parse the tenant's own public career-portal
+    **server-rendered HTML** at
+    `careers-{slug}.icims.com/jobs/search?ss=1&in_iframe=1`. Job rows:
+    `<a class="iCIMS_Anchor" title="{id} - {Title}"
+    href=".../jobs/{id}/{title-slug}/job">`. Pagination:
+    `?pr={0-indexed page}&in_iframe=1` (~20–27/page, `<link rel="next">`,
+    stop at "Page N of N" — verified paging Persistent Systems to 2
+    pages / 29 jobs). Each job detail page carries a schema.org JSON-LD
+    `JobPosting` block (clean per-job structured data). The `portal` id
+    (17 default; also seen 69/96/82281) is visible in the
+    `renderDynamicPortalCss` CSS request but **not needed** to scrape.
+  - **Identifier resolution:** only the `careers-{slug}.icims.com`
+    subdomain is needed — no customerId, no portalId. Naive
+    `careers-{firstword/slug}` derivation resolved ~14/19 test companies
+    (~74%); after skipping the ~30% of tenants whose robots.txt is
+    `User-agent: * / Disallow: /` (uci, cdmsmith, mastec, sita in the
+    sample), ~10/19 are actually crawlable. Realistic reachable coverage
+    ≈ 2–3% of the "neither" set (4.5% prevalence − robots − bad-slug
+    haircuts).
+  - **Risk-profile difference from every prior ATS:** GH/Lever/Ashby/SR/
+    Workday-CXS are all JSON endpoints their vendors intend for
+    programmatic/public consumption. iCIMS' only documented programmatic
+    API is auth-gated; the working approach here is HTML-scraping a page
+    built for human browsers, and HTML shape varies across iCIMS
+    platform releases (183 vs 187 seen in one 17-company sample) — more
+    brittle, grayer. If built: an **HTML-parsing spider** (not an API
+    client), robots-gated per tenant (`Disallow: /` → skip the company,
+    recorded not guessed around), honest UA + conservative
+    `DOWNLOAD_DELAY`, `<link rel="next">` pagination, JSON-LD as the
+    per-job source, best-effort/lossy. **Never** use
+    `api.icims.com/customers/...` (auth-gated → unauthorized without
+    credentials). Onboarding gate mirrors Workday/SR/Ashby: board-name
+    cross-check before storing (generic-slug risk, e.g. `careers-aurora`).
+- **Gem job-board discovery PROVEN 2026-09-01 (proof/discovery only — no
+  spider, no DB writes; see SESSIONS.md "Prove Gem job-board discovery").
+  Recommendation: GO — the cleanest integration since Ashby, firmly at
+  the Greenhouse/Lever/Ashby end of the risk spectrum, NOT the iCIMS
+  end.** Confirmed by real browser network inspection (jobs.gem.com is a
+  React SPA): job boards render from a **genuine public GraphQL API**,
+  `POST https://jobs.gem.com/api/public/graphql/batch` (JSON array body,
+  **no auth / no cookies** — verified by curl replay), where **`boardId`
+  == the `jobs.gem.com/{slug}` vanity slug**:
+  - list: `oatsExternalJobPostings(boardId:) { jobPostings { id extId
+    title locations job{department employmentType} } }` — **every posting
+    in one call, NO pagination** (verified fetch=70 / felix=114 exactly
+    match the live "Open positions (N)"), **NO description**; plus
+    `jobBoardExternal(vanityUrlPath:) { teamDisplayName pageTitle }` for
+    the name cross-check.
+  - detail (per job): `oatsExternalJobPosting(boardId:, extId:) {
+    descriptionHtml firstPublishedTsSec compensationHtml jobPostSectionHtml{...} }`.
+  - unknown slug -> HTTP 200 `jobBoardExternal: null`, `jobPostings: []`.
+    "resolved" = `jobBoardExternal != null`; empty-but-real boards exist
+    (Databricks) same as Ashby/SR.
+  `scripts/discover_gem_job_board.py` (name -> ordered name-derived slug
+  candidates, **hyphenated forms first** — Gem slugs are often hyphenated
+  `the-boring-company`/`black-ore`/`myriad-technology`; `--slug` verifies
+  a web-search-found slug; confidence via rapidfuzz name vs.
+  `teamDisplayName`). Test set (25): of 19 companies with a live
+  jobs.gem.com board, **15 resolved by slug-guess alone, 1 via the
+  web-search `--slug` fallback** (Luma AI -> `lumalabs-ai`), 1 unresolved
+  (Bohler); Tractian is a Gem-ATS customer but hosts its board at its own
+  domain (genuine not-on-jobs.gem.com, not a miss); 7 non-Gem controls
+  (Palantir/Checkr/Duolingo/Figma + LCA employers) all correctly
+  returned `jobBoardExternal: null` — 0 false positives. No robots.txt
+  published (404); no blocking/CAPTCHA/rate-limit hit. **Startup-skewed
+  like Ashby — 0 current `companies` rows are Gem users**, so a Gem
+  spider pays off only alongside a separate startup-sourcing path. When
+  built: one list call + one detail call per job (Ashby/Workday shape),
+  onboarding gated on the `teamDisplayName` cross-check + hold 0-job
+  boards. `scratch_gem_discovery.json` (gitignored) holds the results.
+  **Startup-sourcing groundwork for Gem done 2026-09-02
+  (sourcing/verification only — no Gem discovery, no DB writes; see
+  SESSIONS.md "Source LCA-verified Gem startup candidates") — a separate
+  script and candidate population from the Ashby startup-sourcing pass,
+  reusing the exact same method.** `scripts/discover_gem_startup_sponsors.py`
+  checked 41 real web-search-sourced Gem-candidate names (the 13 already
+  confirmed live plus 28 new ones, e.g. Retool, Jetty, Luma AI, Nuvo,
+  Bohler, Paces, Letter AI, Scale AI) against the full `lca_disclosures`
+  table; every fuzzy hit was individually spot-checked against real
+  `job_title`/`worksite` rows, not accepted on score alone — 7 of 21 raw
+  hits were confirmed false positives (short/generic-name collisions:
+  Planned/Gem/Rivia/Agora/Constellation Institute/HASH/Veho Technologies
+  all matched an unrelated real company). **2 real Sierra-pattern finds**,
+  each fixed with a new `sponsor_name_overrides` row (table now has 4:
+  kraken/sierra/modular/ntop) — `ntop` → `NTOPOLOGY` (real company,
+  since rebranded; `token_set_ratio` 61.5, below threshold, found via a
+  broader `ILIKE` scan) and `modular` → `MODULAR` (the exact-name match
+  existed but the matcher's top pick was a wrong same-scoring tie,
+  "ADVANCED MODULAR SYSTEMS" — a ranking artifact, not a threshold miss).
+  **Final: 14/41 candidates carry real, spot-checked LCA sponsorship
+  evidence** (Scale AI 144 filings, Retool 30, Felix Technologies 19,
+  Modular 18, ntop 15, Luma AI 15, Linktree 7, Apartment List 6,
+  Instrumental 5, Jetty 5, Nuvo 3, Paces 1, Bohler 1, Letter AI 1); 1
+  (Function Health) flagged `needs_review`; 19 had no LCA match at all
+  after the broader search, reported honestly rather than dropped.
+  Nothing stored in `companies` — this is the input to a future Gem
+  discovery-then-onboard pass, not yet run. `companies` row count and
+  every `ats_platform` count confirmed unchanged, and the Ashby sourcing
+  script/output verified byte-for-byte untouched (same MD5).
+  `scratch_gem_startup_sponsor_candidates.json` (gitignored) holds the
+  full results.
+  **Gem spider BUILT + onboarded + first scrape 2026-09-02 (see
+  SESSIONS.md "Build the Gem spider + gated onboarding + first
+  scrape").** `GemScraper` (`src/huntloop/spiders/gem_spider.py`, name
+  `gem_api`) confirmed during implementation that
+  `POST https://jobs.gem.com/api/public/graphql/batch` is a real GraphQL
+  *batch* endpoint — multiple operations posted together in one JSON
+  array all execute and return in one HTTP round trip, in request order
+  (proven live: a real 109-op array — 1 list + 108 details for a
+  108-job board — one 200, all 108 resolved). So each company needs only
+  TWO real requests regardless of job count: one `JobBoardList` call (the
+  list response already carries title/locations/department/
+  employmentType) then one batched `ExternalJobPosting` detail call
+  covering every job at once (chunked at `MAX_DETAIL_BATCH=100` as a
+  safety valve only). An unknown slug, empty board, malformed response,
+  or per-job missing detail is logged + counted via `scrape_errors_total`
+  and skipped, never a crash. `tests/test_gem_spider.py` (12 tests).
+  Yields plain `JobPostingItem`s through the shared `JobDataPipeline`;
+  `is_relevant` + `embedding` computed at insert like every other source,
+  zero manual backfill. `companies.name` == `ats_token` == the
+  lower-cased jobs.gem.com slug. Added to `main.py`'s
+  `SPIDERS_BY_PLATFORM` (plain `companies=tokens` branch);
+  `scripts/scrape_gem.py` is the scoped entrypoint.
+  **Onboarding gate: `scripts/discover_and_store_gem.py`** reuses
+  `discover_gem_job_board.py` unchanged over the 14 Gem-specific
+  LCA-verified candidates (a separate list from Ashby's, sourced
+  2026-09-02 — see above). Auto-store requires Gem confidence `high`;
+  a real-but-empty board or a weaker match is held for a
+  `--confirmations` file. **Real run: 9/14 resolved automatically by
+  slug-guess; 3 more (Bohler, Instrumental, Luma AI) needed a
+  human-supplied slug via `confirmed_gem_slugs.txt`** (a genuine trailing
+  hyphen for the first two, a distinct marketing-brand slug for the
+  third — each verified live before confirming, same
+  `Name<TAB>slug`-forced-candidate mechanism Ashby used for
+  Anysphere/`cursor`). **2 stayed correctly unresolved**: Jetty has a
+  real `jobs.gem.com/jetty-careers` board, but it belongs to a different
+  company ("Jetty Health", not the LCA-verified renters-insurance Jetty)
+  — flagged `low-suspect` and deliberately not force-confirmed, since
+  onboarding the wrong same-named company would be a real data-integrity
+  error, not a discovery gap; Scale AI has no live `jobs.gem.com` board
+  under any plausible slug (its real Gem relationship is the internal
+  CRM/sourcing product, not necessarily the public job-board product).
+  12 companies stored, then scraped via `docker compose run ... app
+  python scripts/scrape_gem.py`: **495 new `job_postings` rows, 0 NULL
+  `is_relevant`, 0 NULL `embedding`, no backfill** (bohler- 210, felix
+  108, lumalabs-ai 50, retool 24, linktree 24, apartment-list 18, paces
+  16, instrumental-inc- 12, modular 11, nuvo 11, ntop 6, letter-ai 5).
+  One gracefully-handled duplicate-key event (Bohler's own list response
+  genuinely lists one posting id twice — a Gem-side data quirk, caught
+  by the pipeline's existing `job_url` unique-constraint dedup, not a
+  spider bug). Live cross-checked (fresh calls, not reused from
+  discovery): Modular 11/11, Retool 24/24, Nuvo 11/11 against the real
+  API. **Noticed, not introduced, while verifying: `job_postings.
+  department` is NULL for every row from every source project-wide**
+  (`JobDataPipeline.process_item()` never assigns `item["department"]`
+  to the row for any spider, and `employment_type` isn't even a column)
+  — confirmed across all 7 sources before concluding this is pre-existing
+  and out of this task's scope, not a Gem-specific defect.
+  **Investigated and fixed 2026-09-02 (see SESSIONS.md "Investigate and
+  fix job_postings.department NULL across all 7 sources") — the
+  `employment_type` gap noted above is untouched/still open, department
+  only.** Root cause confirmed against real live raw responses from every
+  source: `JobDataPipeline.process_item()`'s `JobPosting(...)` insert
+  simply never passed `department=item.get("department")` through, even
+  though `LeverScraper`/`SmartRecruitersScraper`/`AshbyScraper`/
+  `IcimsScraper`/`GemScraper` were already extracting a real value from
+  real raw fields (Lever `categories.department`, SmartRecruiters
+  `department.label`, Ashby `department`/`team`, iCIMS JSON-LD
+  `occupationalCategory`, Gem `job.department.name`) — fixed by adding
+  that one field to the insert; none of those 5 spiders needed changes.
+  **Greenhouse had a second, independent bug**: its real department field
+  is the structured `job["departments"][0]["name"]` (confirmed live on 5
+  companies), not anything in the free-form `metadata` array the old code
+  scanned for a "department"-named entry — that scan never matched real
+  data (real metadata entries are things like "Career Site Category",
+  "Job Family Group"). `greenhouse_spider.py` now reads `departments`
+  first, keeping the metadata scan only as a fallback.
+  **Workday is a genuine data-source limitation, not a bug** — its per-job
+  CXS detail response has no department/job-family field (confirmed live;
+  the list endpoint's `jobFamilyGroup` is an aggregate board-filter facet,
+  not a per-posting value) — `department` stays `None` there by design,
+  unchanged.
+  **Backfill**: only Lever was feasible without a re-scrape — its stored
+  `job_metadata.metadata_json` already contains the raw `categories` dict
+  (double-JSON-encoded — decode twice). `scripts/backfill_department_lever.py`
+  filled **3,299 of 3,715** `lever_api` rows from that stored data (the
+  other 416 genuinely had no department in their original raw categories,
+  left NULL). Greenhouse/SmartRecruiters/Ashby/iCIMS/Gem's stored
+  `metadata_json` does not carry the raw department value (checked
+  directly, not assumed) — backfilling those needs a fresh re-scrape,
+  not performed in this task. Verified: `job_postings` total row count
+  and `is_relevant`/`embedding` populated-counts unchanged before/after
+  (83,720 each); only `department` counts changed, and only for
+  `lever_api`. `tests/test_pipeline.py`/`tests/test_greenhouse_spider.py`
+  (new) cover the fix; full suite 219/219 passing.
+  **The other 5 sources' existing rows were backfilled 2026-09-02 (see
+  SESSIONS.md "Backfill job_postings.department on existing rows via
+  re-scrape") via a fresh re-scrape of every onboarded company.** First
+  fixed a real gap this required: `JobDataPipeline.process_item()`'s
+  repost-match path (matched by `gh_job_id`) previously just logged
+  "Skipping reposted job" and touched nothing — now, on a repost, it
+  fills `department` if the existing row's is `NULL` and the new item has
+  a real value, and nothing else; every other column (`is_relevant`,
+  `embedding`, ...) is still left completely alone on a repost, by
+  design (narrow, additive fix only — see `tests/test_pipeline.py`'s
+  `test_repost_backfills_null_department_only` /
+  `test_repost_does_not_overwrite_existing_department`). Per-source
+  before → after `department` NULL counts (all 5 started 100% NULL):
+  Gem 495/495 → 2/496, Ashby 3336/3336 → 66/3401,
+  iCIMS 4080/4080 → 478/5303, Greenhouse 27419/27419 → 2141/28588,
+  SmartRecruiters 19165/19165 → 9926/20333. **SmartRecruiters needed a
+  different mechanism, not the real spider re-scrape**: its own list
+  endpoint already returns `department` inline per posting, so the
+  per-job detail fetch `SmartRecruitersScraper` normally makes (needed
+  only for a brand-new posting's description) was pure overhead for this
+  backfill — a partial real re-scrape was on pace to take many more hours
+  after 2 hours/27 companies, so it was stopped and replaced with
+  `scripts/backfill_department_smartrecruiters.py` (list-only pagination,
+  no detail requests, no torch dependency — runs in the local `.venv`),
+  which finished the remaining 224 companies in ~23 minutes. `scripts/
+  scrape_greenhouse.py` (new — the other 4 sources already had a scoped
+  entrypoint) was added for parity. Whole-table verification after all 5:
+  `job_postings` 83,720 → 87,346 (+3,626 genuinely new/reappeared
+  postings, not duplicates — `count(*) == count(distinct job_url) ==
+  count(distinct gh_job_id) == 87,346`); `is_relevant`/`embedding` both
+  still 0 NULL across every row. Final whole-table `department` NULL
+  rate: 38,539/87,346 (44.1%), almost entirely `workday_api`
+  (25,510/25,510, 100% by design, untouched — see above); the remaining
+  per-source NULLs above are real API/HTML gaps (some boards, e.g.
+  SmartRecruiters' `deltaelectronics`, simply don't provide `department`
+  for any of their postings) or closed/expired postings, not a fix
+  failure. Full suite 221/221 passing (219 + 2 new pipeline tests). Not
+  touched: Workday, Lever, `companies`/onboarding/discovery scripts.
+- **iCIMS spider BUILT + onboarded + first scrape 2026-09-01 (see
+  SESSIONS.md "Build the iCIMS spider + gated onboarding + first
+  scrape"). Recommendation was GO — but a step grayer on ToS/risk than
+  any other spider here, since it HTML-scrapes a human-facing page rather
+  than a vendor-published feed.** `IcimsScraper`
+  (`src/huntloop/spiders/icims_spider.py`, name `icims_portal`) parses
+  each tenant's server-rendered portal HTML at
+  `careers-{slug}.icims.com/jobs/search?pr={0-indexed page}&in_iframe=1`
+  then one detail page per job for the schema.org JSON-LD `JobPosting`.
+  Pure parsing lives in `huntloop.icims_portal` (unit-tested,
+  `tests/test_icims_portal.py` + `tests/test_icims_spider.py`, +21
+  tests). **Honest non-browser UA, `DOWNLOAD_DELAY=2`, one request/host,
+  AutoThrottle, `ROBOTSTXT_OBEY` left ON. The spider fetches each
+  tenant's robots.txt FIRST (following redirects to the authoritative
+  host) and skips the whole tenant if it disallows `/jobs/search` — a
+  disallow is NEVER bypassed.** JSON-LD is the primary field source;
+  visible-HTML is a per-field fallback, logged + counted, run summary in
+  `closed()`. `MAX_PAGES=60` cap. Yields plain `JobPostingItem`s through
+  the shared `JobDataPipeline` — `is_relevant` + `embedding` at insert,
+  zero iCIMS-specific wiring, zero manual backfill (run via the `app`
+  Docker image for torch, same as every embedding-dependent path).
+  Added to `main.py`'s `SPIDERS_BY_PLATFORM` (plain `companies=tokens`
+  branch); `scripts/scrape_icims.py` is the scoped entrypoint. **NEVER
+  use `api.icims.com/customers/...`** — auth-gated, unauthorized without
+  credentials.
+  **Onboarding gate: `scripts/discover_and_store_icims.py`** (reuses
+  `discover_icims_job_board.py` unchanged) over the >= 20-filing DOL
+  sponsors not already in `companies`/GH-Lever. `auto` = high confidence
+  via a strong candidate + robots-permitted + >= 1 live job; `held` (→
+  `--confirmations` file) = weak candidate / medium / low-suspect;
+  **`robots.txt Disallow: /` is a HARD exclude — never stored, not even
+  via `--confirmations`.** Re-run cadence: after each quarterly DOL LCA
+  ingest.
+  **Real run (`--limit 2000` → 1,978 sponsors): 94 resolved to a live
+  portal; 16 auto-passed (13 distinct slugs); 7 held-then-confirmed via a
+  live board `<title>`-org + sample-title cross-check (devereux, ohsu,
+  geosyntec, usu, healthedge, bronxcare, sas — `sas` = SAS Institute,
+  Samsung Austin / SG Americas correctly stay held for that slug); 70
+  hard-excluded for `Disallow: /` (Uber, DocuSign, Emory, Harvard,
+  Indeed, ASU, + wrong-slug collisions); 39 still held (generic-slug
+  collisions `aa`/`boston`/`nyu`/`quest` — left for a human).** 20
+  `companies` rows stored, then scraped: **4,080 `job_postings` rows, 0
+  NULL `is_relevant`, 0 NULL `embedding`, no backfill; `companies`
+  668→688, `job_postings` 79,145→83,225.** JSON-LD was the primary
+  source for 100% of jobs (whole-job HTML fallback: 0); per-field HTML
+  fallback fired only for `locations` (~9.6%, JSON-LD `jobLocation`
+  absent on some remote roles). **`primehealthcare` deliberately cut
+  short at 1,960 of ~3,000 rows** (a hospital group, mostly clinical
+  roles that all filter `is_relevant=false`; SIGTERM → graceful Scrapy
+  shutdown, pending items committed) — the other 19 boards ran to
+  completion. Live-verified 5 postings against their real pages.
+  Follow-ups: a fuller onboarding
+  sweep past the top-1,978 employers; re-scrape primehealthcare to
+  completion only if its clinical roles ever matter.
+  **The 39 still-held generic-slug boards were manually reviewed
+  one-by-one 2026-09-03 (see SESSIONS.md "Resolve the 39 held iCIMS
+  generic-slug collisions") — no code/gate/discovery changes, evidence
+  from each live `careers-{slug}.icims.com` board (its own `<title>` org
+  name, real posted job titles/locations, JSON-LD `hiringOrganization`)
+  vs. the DOL sponsor, with web search + DOL worksite/title cross-check
+  where the slug was genuinely ambiguous. Result: 4 confirmed correct,
+  1 still-ambiguous, 34 confirmed wrong (genuine collisions).** The 4
+  correct were added to `confirmed_icims_slugs.txt` and stored via the
+  UNCHANGED `discover_and_store_icims.py --from-report --commit
+  --confirmations` path, then scraped: `lw` → Latham & Watkins LLP,
+  `here` → HERE North America, `eastwestbank` → East West Bank, `nyu` →
+  New York University (639 postings, 0 NULL `is_relevant`/`embedding`,
+  no backfill; JSON-LD primary for all). Still-ambiguous: **NYU
+  GROSSMAN SCHOOL OF MEDICINE** — shares the `nyu` board but Grossman /
+  NYU Langone Health run their own sponsored-role hiring at
+  jobs.nyulangone.org, so the board can't be confirmed to carry this
+  filer's postings (same university family, not a clean collision). The
+  34 wrong were slug collisions with unrelated companies —
+  `aa`→Envoy Air, `boston`→City of Boston, `quest`→Quest Software,
+  `sas`→SAS Institute (for Samsung Austin / SG Americas), `mmc`→M.C.
+  Dean, `sri`→SRI International (for Scripps Research / SRI Tech),
+  `aurora`→Aurora Staffing, `adventisthealth`→a single AdventHealth
+  regional JV, `vanguard`→Deerfield Management, `ccf`→Community Choice
+  Financial, `citynational`→City National Bank of Florida (the DOL
+  filer is the RBC/Los Angeles bank), `up`→The Michaels Organization,
+  `reliable`→Sun Auto Tire, `ars`→American Residential Services,
+  `bbd`→New York Blood Center, `pst`→Planned Systems International,
+  `mdi`→Alex Lee, `usaa`→Affinius Capital, `express`→Express the
+  apparel retailer (not Express Scripts), `bridgewater`→a nursing
+  facility (not the hedge fund), `horizon`→Springs Window Fashions —
+  none stored. `companies` 737→741; full per-company table in
+  SESSIONS.md.
+  **Discovery mechanism proven end-to-end 2026-08-30 on 5 real
+  unambiguous tenants (see SESSIONS.md "Prove Workday {tenant, dc, site}
+  discovery"), then the spider was BUILT 2026-08-30 (see the Workday
+  spider bullet below and SESSIONS.md "Build the Workday spider").**
+  `scripts/discover_workday_triple.py <tenant>` (one tenant per run, proof
+  tool, not a batch runner): name-slug -> dc via the 404/422 probe over 8
+  `wd{N}` -> site via robots.txt (authoritative) then an 18-name curated
+  `_SITE_CANDIDATES` fallback list (CXS
+  200/404, case/separator-insensitive for standard names). Resolved 5/5
+  fully automatically incl. Salesforce's custom `External_Career_Site`,
+  **no web-search fallback needed**. Real triples:
+  `nxp/wd3/careers`, `regeneron/wd1/careers`, `organon/wd5/searchjobs`,
+  `cdw/wd5/careers`, `salesforce/wd12/External_Career_Site` — each
+  returned real offset-paginated `jobPostings` (0 page overlap); NXP
+  cross-checked against the live rendered board (763 jobs, identical first
+  posting). **No existing careers-URL source for the neither-set** —
+  `companies.careers_url` is populated for only 9/380 rows and
+  `lca_disclosures` has no URL column — but the proof shows the triple is
+  discoverable from the tenant slug alone, so a careers URL isn't
+  required. Residual manual work (~10-20%): disambiguating generic-slug
+  tenants (the `red`/`western` problem) and the rare tenant whose site
+  name isn't in the list (needs a `site:myworkdayjobs.com` search).
+  Storage decision deferred to the spider step: `companies.ats_token` is
+  a bare string today and Workday needs `{tenant, dc, site}` (overload it,
+  add columns, or parse the full `careers_url` like `adobe`'s row).
+  **Verified with a
+  real `docker compose run app python main.py`: `job_postings` 649 ->
+  30,363 (+29,714), every new row's `is_relevant` populated at insert
+  time (0 NULL at 30k scale).** One pre-existing bug surfaced at this
+  scale (not fixed - 0.12% of rows, gracefully handled): a long
+  semicolon-joined multi-location string overflows
+  `job_locations.location_name` `varchar(255)`; the pipeline catches
+  the `DataError` and skips that item. Company rows use the same lowercase-token naming convention as
   spider-created rows (`"checkr"`, not `"Checkr"`) specifically to avoid
   repeating the `job_sources` naming-drift bug above for `companies`.
   **`upsert_company_ats()` will not overwrite an existing, previously-
@@ -954,13 +1686,343 @@ nothing scrapes them; treat that as planned, not present.
   `ats_platform` rows (grouped by platform) plus a separate NULL-platform
   query (logged, not silently excluded). `run_multi_ats_scrape()` routes
   each platform through `SPIDERS_BY_PLATFORM` (`{"greenhouse":
-  GreenhouseScraper, "lever": LeverScraper}`) - one `process.crawl()` call
-  per platform with its full token list, not one call per company. A
-  platform missing from that dict (`"ashby"`, `"workday"`, and the
-  literal string `"unknown"` all hit the same lookup-miss path - no
+  GreenhouseScraper, "lever": LeverScraper, "workday": WorkdayScraper}`) -
+  one `process.crawl()` call per platform with its full token list, not
+  one call per company. A platform missing from that dict (`"ashby"` and
+  the literal string `"unknown"` hit the same lookup-miss path - no
   special-casing needed) gets a `logger.warning()` and is skipped, never
   a crash or a silent drop. When adding a new spider, add its platform
-  string as a key here - that's the only wiring required.
+  string as a key here - that's the only wiring required (Workday needed
+  one extra branch, below, because it also passes `careers_urls`).
+- **Workday spider (`WorkdayScraper`, `src/huntloop/spiders/workday_spider.py`,
+  name `workday_api`, added 2026-08-30 - see SESSIONS.md "Build the
+  Workday spider").** Scrapes a company's Workday board via its public
+  CXS JSON API (the same endpoint the rendered board's own JS calls):
+  `POST {tenant}.{dc}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs`
+  (offset pagination, `{"limit":20,"offset":N,"appliedFacets":{}}`, stop
+  when `offset >= total`; `total` only reliable on the offset-0 response
+  so all pages are fanned out from there) then one
+  `GET {cxs}{externalPath}` **per job** for the description + absolute
+  date. **Storage: the 3-part `{tenant, dc, site}` identifier lives in
+  the existing `companies.careers_url`** as the full
+  `https://{tenant}.{dc}.myworkdayjobs.com/en-US/{site}` URL (exactly the
+  format `adobe`'s pre-existing row already used); `ats_token` stays the
+  bare tenant slug like every other platform. `huntloop.workday_url`
+  (`parse_workday_careers_url` / `build_cxs_base` / `normalize_workday_date`)
+  holds the pure, unit-tested parsing. No migration - `careers_url`
+  already existed and is semantically exactly right; a bare-string
+  `ats_token` or new sparse columns would both be worse. `main.py`
+  branches for `platform == "workday"` to also pass
+  `careers_urls={name: careers_url}` to the spider; a company routed
+  there with no `careers_url` (the ambiguous cases below) is skipped with
+  a warning, never guessed. **`date_posted`: the CXS list `postedOn` is
+  RELATIVE TEXT ("Posted 3 Days Ago" / "Posted Today" / "Posted 30+ Days
+  Ago" - verified against ~1,400 real postings, no hours/weeks/months
+  variants). The per-job detail endpoint's `jobPostingInfo.startDate` is
+  an absolute `YYYY-MM-DD` and is used as the source of truth (~100% of
+  real rows); `normalize_workday_date()` parses the relative text only as
+  a fallback, flooring "30+" to 30 days.** Relevance classification AND
+  the resume-match embedding are both automatic - the spider yields
+  plain `JobPostingItem`s through the same source-agnostic
+  `JobDataPipeline`, whose `_classify_and_embed` populates
+  `is_relevant` + `embedding` on every insert (needs torch -> run via
+  the `app` Docker image, same as the daily scraper). The initial
+  23,588-row Workday scrape predated the embedding wiring and needed a
+  one-off `backfill_embeddings.py` pass (2026-08-31, see SESSIONS.md);
+  future Workday scrapes don't.
+- **Workday discovery: `scripts/discover_and_store_workday.py`** turns
+  the confirmed-Workday hits from `scratch_neither_ats_probe.json` into
+  `companies` rows. Per hit: parse `{slug, dc}`, then resolve `site` via
+  **the tenant's `robots.txt`** (it lists every published board as
+  `Allow: /{Site}/` + `Sitemap: .../{Site}/siteMap.xml` - authoritative,
+  guess-free; `scripts/discover_workday_triple.py`'s `site_from_robots()`,
+  picking the non-secondary board with the most postings), falling back
+  to an 18-name candidate list only when robots is blocked/empty.
+  Ambiguity handling (task: "flag, don't guess"): a hit on a generic
+  one-word slug (`red`, `western`, `tera`, ...) is **not stored** - it
+  goes to the report's `needs_review` list, since a Workday tenant by
+  that name existing doesn't prove it's this employer's. The board's
+  `hiringOrganization` legal name is an informational cross-check only,
+  never a gate (too noisy: `"621 Salesforce.com India Private Limited"`
+  vs `SALESFORCE`). `scripts/scrape_workday.py [names...]` is a
+  Workday-only entrypoint (reads `companies`, same pipeline) for proving
+  / re-running without a full `main.py` crawl.
+  **The 6 `needs_review` companies from that pass were investigated
+  2026-08-31 (see SESSIONS.md "Resolve the 6 Workday `needs_review`
+  companies") — 1 resolved, 5 stay excluded:**
+  - **`harman` — RESOLVED, stored, scraped.** Site `HARMAN` (wd3), found
+    via an expanded site-candidate probe (robots.txt was empty). Verified
+    to the original-5 standard: CXS total 556 == live rendered board,
+    identical first posting, `hiringOrganization` "Harman Becker
+    Automotive Systems" is an exact match to the DOL employer (Samsung
+    subsidiary). 556 rows scraped, 0 NULL `is_relevant`/`date_posted`/
+    `embedding`. `careers_url` =
+    `https://harman.wd3.myworkdayjobs.com/en-US/HARMAN`.
+  - **`red`, `western`, `tera` — DISCONFIRMED, stay excluded.** The
+    generic-slug tenant belongs to a *different* company: `red.wd1` =
+    Virgin Voyages / "V Cruises US, LLC" (not "RED HIBBERT GROUP");
+    `western.wd1` = Western Colorado University (not "WESTERN WASHINGTON
+    UNIVERSITY"); `tera.wd3` = Teranet Inc, Canada (not "TERA CLOUDX").
+    Confirmed by live `hiringOrganization` + posting text.
+  - **`daiichisankyo`, `wholefoods` — site known, STILL in a Workday-side
+    outage, not stored (retried 2026-09-01, see SESSIONS.md "Retry the two
+    outage-blocked Workday tenants").** Identifiers re-confirmed still
+    valid (the `__nosuchsite__` probe returns 404 on `daiichisankyo.wd1`
+    and `wholefoods.wd5`; a DC sweep shows daiichisankyo has not moved;
+    robots.txt still authoritatively lists `/wholefoods/`), but the live
+    retry reproduced the exact same failure: `daiichisankyo` CXS `/jobs`
+    → `403 S22 "permission denied"` and `/en-US/DSI` → 302 to
+    `www.myworkday.com/wday/drs/outage?t=daiichisankyo&s=dsi`;
+    `wholefoods` CXS `/jobs` → persistent `502` and `/en-US/wholefoods`
+    serves a maintenance page. Site names (`DSI`, `wholefoods`) are still
+    the right values — retry again when Workday brings the tenants back
+    online.
+
+- **SmartRecruiters spider BUILT + onboarded 2026-09-01 (see SESSIONS.md
+  "Build the SmartRecruiters spider").** `SmartRecruitersScraper`
+  (`src/huntloop/spiders/smartrecruiters_spider.py`, name
+  `smartrecruiters_api`) pages `GET /v1/companies/{companyId}/postings`
+  (`limit=100` + `offset`, stop at `totalFound`) then one
+  `GET .../postings/{id}` per posting for the description (the list
+  response has none). Yields plain `JobPostingItem`s through the same
+  source-agnostic `JobDataPipeline` — `is_relevant` + `embedding` are
+  computed at insert like every other source, zero SmartRecruiters-
+  specific wiring, zero manual backfill. `companies.name` == `ats_token`
+  == the lower-cased companyId (SR lookup is case-insensitive, verified);
+  no `careers_url` / 3-tuple needed (unlike Workday). Added to
+  `main.py`'s `SPIDERS_BY_PLATFORM`, so the daily orchestrator picks it
+  up automatically; `scripts/scrape_smartrecruiters.py` is the scoped
+  entrypoint. **`custom_settings` sets `ROBOTSTXT_OBEY: False` for this
+  spider only** — `api.smartrecruiters.com/robots.txt` is `Disallow: /`
+  for `*`, but the Posting API is SR's documented public read feed (the
+  same one LinkedIn/Indeed/Google Jobs consume); the project-wide
+  `ROBOTSTXT_OBEY=True` is unchanged for everything else. An empty /
+  erroring board is skipped with a logged reason + a `scrape_errors`
+  metric, never a crash; a stale-but-real board is scraped as-is
+  (staleness is a downstream relevance concern).
+  **Onboarding gate: `scripts/discover_and_store_smartrecruiters.py`**
+  reuses `discover_smartrecruiters_id.py` unchanged and enforces a REAL
+  gate before writing a `companies` row: auto-store ONLY a resolver
+  `confidence == "high"` reached via a non-collision candidate
+  (`full-slug` / `core-slug`); a `name+2` / `name+Inc` collision-suffix
+  win, or `first-word-only` / `acronym`, or `medium`/`low` confidence,
+  is held and stored only if its id is listed in a `--confirmations`
+  file (explicit human approval). `--from-report` re-buckets/commits
+  from the saved scan JSON without re-running the ~3h network scan.
+  Re-run cadence: after each quarterly DOL LCA ingest, like
+  `detect_ats_for_sponsors.py`.
+  **The earlier proof step (2026-08-31, kept below for context):** the
+  postings API
+  (`GET api.smartrecruiters.com/v1/companies/{companyId}/postings`) 200s
+  with `totalFound: 0` for an unknown id, so a live call returning
+  `totalFound > 0` is the only "this id is real" signal.
+  `scripts/discover_smartrecruiters_id.py` (given a company name, tries
+  ordered name-derived candidates — full slug, core slug minus legal
+  suffixes, hyphenated, CamelCase, first-word, acronym, common
+  SR-collision suffixes like `2`/`1`, each in lower/Capitalised/CamelCase
+  since **companyIds are effectively case-varied** — `BoschGroup`,
+  `ubisoft2`; `--id` verifies a web-search-found id the same way) plus a
+  cross-check (`rapidfuzz` similarity of the queried name vs. the board's
+  own `company.name`, a `test job`/`dummy` sandbox-title check, and a
+  loose-guess flag for first-word/acronym wins) that flags
+  low/medium-confidence matches for a human glance.
+  `scripts/check_smartrecruiters_pagination.py` pages a resolved id end
+  to end (`limit=100` + `offset`) and asserts unique-ids == `totalFound`
+  with zero cross-page overlap. **Finding on a real DOL-sponsor test set:
+  automatic slug-guessing resolved a live companyId for nearly all of
+  them, but a couple pointed at a same-name different company or a
+  sandbox tenant (both caught by the cross-check), and a meaningful
+  share of "SmartRecruiters companies" — including several well-known
+  brands — now have empty or stale parent boards because their real
+  hiring moved to another ATS.** Recommendation recorded in SESSIONS.md:
+  **GO** — discovery is at least as automatable as Workday's was and the
+  API is the cleanest of any platform, provided the companyId is only
+  stored after the name-similarity / not-a-sandbox cross-check passes (or
+  a human confirms), mirroring the Workday `{tenant,dc,site}` onboarding
+  gate; SR's ~4% prevalence in the "neither" set means build it but don't
+  over-invest.
+  **Real onboarding run (2026-09-01, full 8,113-employer "neither"
+  population):** slug-guessing resolved a live board for 715; the gate
+  auto-passed 227 (high confidence via a real base slug), held 488 for
+  review (332 of them resolver-"high" but only matched via a `name+2`
+  collision suffix — overwhelmingly abandoned free-trial tenants like
+  `apple2` / `tesla1` / `infosys2`, all 2015-2017 data), and 5 were
+  explicitly human-confirmed. 224 `companies` rows stored. One residual
+  gate limitation: a squatter tenant whose board name matches the
+  employer (`citibankna`, 2015-era Indonesian spam postings) passed on a
+  full-slug high-confidence match — its junk postings are neutralised
+  downstream by the relevance filter (`is_relevant=False`); a future
+  onboarding-gate freshness signal would catch it.
+- **Ashby discovery PROVEN 2026-09-01 (proof/discovery step only — no
+  spider, no DB writes; see SESSIONS.md "Prove Ashby job-board
+  discovery"). Recommendation: GO.** `scripts/discover_ashby_job_board.py`
+  (given a company name, tries ordered name-derived slug candidates —
+  full slug, core slug minus legal suffixes, hyphenated, first-word,
+  acronym, `hq`/`careers`/`1`/`2` variants — and live-checks each against
+  `GET https://api.ashbyhq.com/posting-api/job-board/{slug}`;
+  `--slug` verifies a web-search-found slug the same way). Real response
+  shapes: **unknown slug → HTTP 404 plain "Not Found"; real board → 200
+  `{"jobs":[...],"apiVersion":...}`; real-but-nothing-listed board → 200
+  with `jobs: []`.** So "resolved" = 200 with a NON-EMPTY jobs array;
+  200-but-empty is reported separately as "found, unverifiable". **No
+  pagination** — one response returns every listed job (verified on
+  boards up to 768 jobs; only keys are `jobs`/`apiVersion`, no
+  cursor/offset/nextToken). Each job already carries `descriptionHtml` +
+  `descriptionPlain` + `jobUrl` (`jobs.ashbyhq.com/{slug}/{id}`), so —
+  unlike Workday/SmartRecruiters — a spider needs **no per-job detail
+  fetch**. Confidence signal (same spirit as the SR board-name
+  cross-check): the API response has no org-name field, so the script
+  fetches the public board page `jobs.ashbyhq.com/{slug}` and fuzzy-
+  compares its `<title>`/`og:title` ("<Org> Jobs") to the queried name;
+  a generic/loose-guess slug with a weak name match, an empty board, or a
+  page that yields no org name is flagged for a human glance. **Test set
+  (27): 22 web-search-sourced likely-Ashby employers (startup-weighted —
+  the DOL-sponsor `companies` table has just 1 `ashby` row, and 0 rows
+  currently have no ATS platform, so set (a) was a false-positive check
+  against 5 known non-Ashby DB companies instead — all 5 correctly
+  UNRESOLVED).** Of 19 confirmed-live Ashby boards in the set, **18
+  resolved by slug-guess alone, 1 (Anysphere → `cursor`) needed the
+  web-search/`--slug` fallback, 0 failed**; 3 more resolved to real but
+  currently-empty boards (Airtable/Mercury/Fractile — the same
+  empty/stale-board ambiguity SR has). 3 aggregator-listed "Ashby"
+  companies (GetYourGuide, Opendoor, Clay) did not resolve —
+  GetYourGuide confirmed migrated to Greenhouse, i.e. genuine
+  not-on-Ashby, not a discovery miss; **third-party "companies using
+  Ashby" lists are stale and must be live-verified.** Completeness
+  cross-check: Linear's live board shows "Open Positions (28)", exactly
+  matching the API's 28 unique job ids and titles. **Hypothesis "Ashby
+  is more common among real target employers than the DOL sample
+  suggested" — holds in general (Ashby is clearly ubiquitous among the
+  smaller/startup tech employers DOL sponsor data underrepresents), but
+  NOT for the current `companies` table**: none of the resolved Ashby
+  users are in it, and the mid/large DOL companies tested are not on
+  Ashby — so an Ashby spider pays off only alongside a separate
+  startup-company sourcing path, not against today's company set.
+  Onboarding, when built, must gate on the name-similarity /
+  not-an-empty-board cross-check (or a human confirm), mirroring the
+  Workday/SR gates. `scratch_ashby_discovery.json` (gitignored) holds the
+  full test-set results.
+- **Startup-sponsor sourcing groundwork for Ashby done 2026-09-01
+  (sourcing/verification only — no Ashby discovery, no DB writes; see
+  SESSIONS.md "Source LCA-verified startup candidates for a future Ashby
+  pass").** The `companies` table's >= 20-filing floor structurally
+  excludes the smaller employers Ashby skews toward, so
+  `scripts/discover_startup_sponsors.py` assembles 53 web-search-sourced
+  likely-Ashby startups (each with a real `source` recorded inline) and
+  checks every one against the **full** `lca_disclosures` table (no
+  >= 20 filter) via `find_matching_employers()` unchanged (token_set_ratio,
+  threshold 88, overrides first). **The "real sponsorship evidence
+  required" principle is NOT relaxed — a startup with 0 LCA filings is
+  never eligible.** Raw fuzzy hit rate (44/53) is misleading: a
+  spot-check of every questionable match against real
+  `job_title`/`worksite` rows found **11 confirmed false positives** —
+  short common-word company names (Linear, Mercury, Clerk, Lemonade,
+  Lime, Clay, Harvey, Watershed, Immunic Therapeutics, Clera, Homebase)
+  each colliding with an unrelated wrong-sector real employer at score
+  >= 88 (the residual ambiguity `fuzzy_match.py`'s own threshold comment
+  describes). Those verdicts are encoded in the script
+  (`_CONFIRMED_FALSE_POSITIVE` / `_NEEDS_MANUAL_REVIEW`) — none were
+  added to `sponsor_name_overrides` (that table is for confirmed
+  *correct* mappings, not exclusions). **Final: 31/53 carry real,
+  spot-checked LCA evidence — 22 of them with 1-15 filings, i.e. genuine
+  sponsors the current cutoff excludes, confirming the gap.** 9 had no
+  LCA match at all (reported, not dropped: PostHog, Payabli, Deliveroo,
+  Zapier, Rentman, Jiga, Superbolt, Firecrawl, AgentMail — mix of non-US
+  HQ, very young, or a genuine matcher miss worth manual review); 2
+  (Sierra, Basis AI) flagged needs-review. **Nothing stored — the 31
+  verified names are the input to a future Ashby-discovery-then-onboard
+  pass, not yet run.** `scratch_startup_sponsor_candidates.json`
+  (gitignored) holds the full results.
+  **Follow-up 2026-09-01 — all 31 matches now individually spot-checked
+  (verification only, no DB writes).** The 14 accepted on distinctive-name
+  grounds in the sourcing pass (PLAID, UIPATH, RETOOL, AIRWALLEX US,
+  REPLIT, SUBSTACK, VERCEL, DEEL, OPENAI, DOCKER, ELEVEN LABS, AGAVE TECH,
+  SUPABASE, ESSENTIAL AI LABS) were each checked against real
+  `job_title`/`worksite` rows — **all 14 confirmed, zero new false
+  positives**, so the verified count stays **31** (unchanged). **Zapier
+  and PostHog ("no LCA match") were investigated directly:** a full-table
+  scan of `employer_name`/`employer_name_normalized`/`trade_name_dba` for
+  any `ZAPIER`/`POSTHOG` variant returned nothing, and a low-threshold
+  fuzzy pass found only unrelated companies (nearest: `ZPAPER` 83,
+  `SHOP PO` 71) — a genuine true negative (both are fully-remote/
+  distributed employers that don't sponsor US visas), not a matcher miss.
+  Fuzzy-matching logic (token_set_ratio / threshold 88 /
+  `sponsor_name_overrides`) was not modified.
+- **Ashby spider BUILT + onboarded 2026-09-01 (see SESSIONS.md "Build the
+  Ashby spider + gated onboarding").** `AshbyScraper`
+  (`src/huntloop/spiders/ashby_spider.py`, name `ashby_api`) — one
+  `GET api.ashbyhq.com/posting-api/job-board/{jobBoardName}` per company,
+  **no pagination, no per-job detail fetch** (`descriptionHtml` +
+  `jobUrl` are inline — the simplest of any platform). Yields plain
+  `JobPostingItem`s through the shared `JobDataPipeline`; `is_relevant` +
+  `embedding` computed at insert like every other source, zero manual
+  backfill. `date_posted` = the inline `publishedAt` ISO timestamp.
+  404 / empty-`jobs` boards are skipped with a logged reason + a
+  `scrape_errors` metric, never a crash. `custom_settings` sets
+  `ROBOTSTXT_OBEY: False` for this spider only (API client, same
+  carve-out reasoning as the SmartRecruiters spider). `companies.name` ==
+  `ats_token` == the lower-cased jobBoardName slug; `careers_url` =
+  `https://jobs.ashbyhq.com/{slug}` (parity with the pre-existing `ramp`
+  row — not needed to scrape). Added to `main.py`'s
+  `SPIDERS_BY_PLATFORM` (falls in the plain `companies=tokens` branch);
+  `scripts/scrape_ashby.py` is the scoped entrypoint.
+  **Onboarding gate: `scripts/discover_and_store_ashby.py`** reuses
+  `discover_ashby_job_board.py` unchanged over the 33-company
+  LCA-verified startup list. Auto-store requires Ashby confidence `high`
+  **AND** LCA verdict `verified` **AND** a strong slug candidate
+  (`_NON_AUTO_KINDS = {suffix-variant, first-word-only, acronym}` never
+  auto-passes — mirrors the SmartRecruiters gate). Held: 0-job
+  (`found-unverifiable`) boards, weak-candidate wins, and — critically —
+  **any `needs_review` LCA verdict (Sierra, Basis AI) is held regardless
+  of a strong Ashby match; an ATS hit is not sponsorship evidence.**
+  Held rows store only via a `--confirmations` file (gitignored
+  `confirmed_*.txt`). **Real run: 31/33 resolved; 23 auto-passed, 3
+  held-then-human-confirmed after a live board cross-check (`hex`,
+  `ironcladhq`, `distyl` — all reached via a weak candidate kind), 8
+  held total (incl. Sierra/Basis AI and 3 empty boards: deel / vercel /
+  essentialai), 2 unresolved (Retool — no live Ashby board; Anysphere —
+  real board is `cursor`, not name-derivable).** 25 `companies` rows
+  stored (+ pre-existing `ramp`), then scraped: **3,008 `job_postings`
+  rows across 26 companies, 0 NULL `is_relevant`, 0 NULL `embedding`, no
+  backfill.** Live cross-checks (real browser): Semgrep board "Open
+  Positions (10)" == 10 rows, Hex "(29)" == 29, Notion "(132)" == 132.
+  **Follow-up 2026-09-01 — Anysphere onboarded, closing the
+  confirmations-file gap (see SESSIONS.md "Onboard Anysphere").**
+  Anysphere's board is `cursor` (not name-derivable), so
+  `confirmed_ashby_slugs.txt` now also accepts a `Name<TAB>slug` line that
+  `read_confirmations()` turns into a forced candidate for the UNCHANGED
+  resolver (`evaluate()` passes it to the resolver's existing
+  `forced_slug` arg) — the gate's confidence rules are untouched, `cursor`
+  still resolves `low-suspect` and is admitted only via the confirmations
+  file. Stored (`name`/`ats_token` = `cursor`) + scraped: **119 rows, 0
+  NULL is_relevant/embedding**. Live cross-check: `jobs.ashbyhq.com/cursor`
+  404s (Cursor keeps the hosted board unlisted, embeds it on
+  cursor.com/careers) but cursor.com/careers renders the same `cursor`
+  jobBoardName data — 119 listings, exact title matches.
+  **Follow-up 2026-09-01 — the two `needs_review` LCA matches resolved
+  (see SESSIONS.md "Resolve the two needs_review LCA matches").**
+  - **Sierra:** the fuzzy hit "Blue Sierra, Inc." (2 filings, generic SWE
+    role) is a FALSE POSITIVE, but the real Sierra AI is a genuine sponsor
+    filing as **"Sierra Technologies, Inc." — 14 certified filings**
+    ("Agent Engineer" ×3, "Research Engineer", etc.; SF+NYC; $150K–310K).
+    The matcher missed it (`token_set_ratio("SIERRA","SIERRA
+    TECHNOLOGIES")` < 88). Fixed with a `sponsor_name_overrides` row
+    (`sierra` → `SIERRA TECHNOLOGIES`) — the designated manual-correction
+    mechanism, same as the pre-existing `kraken` entry; no logic changed.
+    Sierra → `verified`, auto-passed the gate, **stored + scraped: 209
+    rows, 0 NULL is_relevant/embedding**. Live cross-check:
+    `jobs.ashbyhq.com/sierra` "Open Positions (209)", board is
+    unmistakably Sierra AI ("Agent Engineering" dept, "Software Engineer,
+    Agent", "Executive Assistant, Office of the Co-Founders").
+  - **Basis AI:** the fuzzy hit "Basis LLC" (2 filings, "Strategic
+    Business Design Manager", NYC, $122k) is a CONFIRMED FALSE POSITIVE —
+    an "LLC" (Basis raised $100M and is a C-corp), not a role Basis hires,
+    and **no "Basis AI/Technologies/Platform/Inc" exists anywhere in
+    `lca_disclosures`**. No sponsorship evidence → **not stored, stays
+    excluded** (`discover_startup_sponsors.py` verdict `false_positive`).
+  `sponsor_name_overrides` now has 2 rows (`kraken`, `sierra`). 28 `ashby`
+  companies; only Retool (no live Ashby board) and Basis AI (false
+  positive) remain out of the 33.
 
 ## How to run things
 
@@ -1060,9 +2122,9 @@ full loop from detection to real scraped data works end-to-end:
   0 jobs (its real Lever board has 0 open postings right now, confirmed
   live — not a detection or spider bug).
 
-Not yet started / explicitly deferred: Ashby/Workday spiders (`ramp`,
-`adobe` will keep getting skipped until one exists — deliberately out of
-scope, future work once there's demand), broadening the curated company
+Not yet started / explicitly deferred (NOTE: this list predates the
+Workday, SmartRecruiters, and Ashby spiders — all now built; see their
+bullets above): broadening the curated company
 list beyond the current 9, automating the
 `detect_and_store_ats.py` -> `main.py` sequence (currently two separate
 manual steps), broader scraper coverage generally, any UI/API surface for

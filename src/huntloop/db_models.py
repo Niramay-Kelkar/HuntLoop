@@ -142,9 +142,12 @@ class JobPosting(Base):
     scraped_at = Column(DateTime(timezone=True), server_default=func.now())
     last_checked = Column(DateTime, nullable=True)
     # all-MiniLM-L6-v2 embedding of the cleaned job_description (see
-    # huntloop.text_cleaning, huntloop.embeddings). Nullable - backfilled
-    # separately (scripts/backfill_job_embeddings.py), not computed at
-    # insert time by JobDataPipeline yet.
+    # huntloop.text_cleaning, huntloop.embeddings). Computed at insert
+    # time by JobDataPipeline._classify_and_embed (2026-08-31), alongside
+    # is_relevant. Nullable: left NULL when the pipeline runs without
+    # torch (this project's local .venv) or an isolated per-row embedding
+    # failure - scripts/backfill_embeddings.py fills those, and is still
+    # the right tool for bulk re-scrapes (batches of 100).
     embedding = Column(Vector(EMBEDDING_DIM), nullable=True)
     # Precomputed matched/missing skills vs. the active resume (see
     # huntloop.skills_matching, scripts/backfill_skills_matching.py).

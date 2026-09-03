@@ -36,12 +36,66 @@ def test_process_item_inserts_job_posting(pipeline, db_session):
     assert row.gh_job_id == str(item["job_id"])
     assert row.company.name == "TestCo"
     assert [loc.location_name for loc in row.locations] == ["Remote - US"]
-    # is_relevant is classified at insert time (see JobDataPipeline.
-    # _classify_relevance) - this test env has no torch/sentence-
-    # transformers installed (see CLAUDE.md), so the pipeline degrades
-    # gracefully rather than raising: is_relevant stays NULL rather than
+    # is_relevant AND embedding are both computed at insert time (see
+    # JobDataPipeline._classify_and_embed) - this test env has no torch/
+    # sentence-transformers installed (see CLAUDE.md), so the pipeline
+    # degrades gracefully rather than raising: both stay NULL rather than
     # the insert failing outright.
     assert row.is_relevant is None
+    assert row.embedding is None
+
+
+def test_process_item_stores_department(pipeline, db_session):
+    item = make_item(job_id="dept-1", job_url="https://boards.greenhouse.io/testco/jobs/dept-1")
+    item["department"] = "Engineering"
+
+    pipeline.process_item(item, spider=None)
+
+    row = db_session.query(JobPosting).filter_by(job_url=item["job_url"]).one()
+    assert row.department == "Engineering"
+
+
+def test_repost_backfills_null_department_only(pipeline, db_session):
+    """A repost (same gh_job_id) that carries a real department value should
+    fill it in when the existing row's department is NULL - and touch
+    nothing else on that row."""
+    item1 = make_item(job_id="repost-1", job_url="https://boards.greenhouse.io/testco/jobs/repost-1")
+    pipeline.process_item(item1, spider=None)
+
+    row = db_session.query(JobPosting).filter_by(job_url=item1["job_url"]).one()
+    assert row.department is None
+    original_title = row.job_title
+    original_is_relevant = row.is_relevant
+    original_embedding = row.embedding
+
+    item2 = make_item(job_id="repost-1", job_url="https://boards.greenhouse.io/testco/jobs/repost-1")
+    item2["department"] = "Engineering"
+    item2["job_title"] = "Some Different Title"  # should NOT overwrite
+    pipeline.process_item(item2, spider=None)
+
+    db_session.expire_all()
+    row = db_session.query(JobPosting).filter_by(job_url=item1["job_url"]).one()
+    assert row.department == "Engineering"
+    assert row.job_title == original_title
+    assert row.is_relevant == original_is_relevant
+    assert row.embedding == original_embedding
+
+    count = db_session.query(JobPosting).filter_by(job_url=item1["job_url"]).count()
+    assert count == 1
+
+
+def test_repost_does_not_overwrite_existing_department(pipeline, db_session):
+    item1 = make_item(job_id="repost-2", job_url="https://boards.greenhouse.io/testco/jobs/repost-2")
+    item1["department"] = "Engineering"
+    pipeline.process_item(item1, spider=None)
+
+    item2 = make_item(job_id="repost-2", job_url="https://boards.greenhouse.io/testco/jobs/repost-2")
+    item2["department"] = "Sales"
+    pipeline.process_item(item2, spider=None)
+
+    db_session.expire_all()
+    row = db_session.query(JobPosting).filter_by(job_url=item1["job_url"]).one()
+    assert row.department == "Engineering"
 
 
 def test_duplicate_job_url_hits_integrity_error_handler(pipeline, db_session, caplog):

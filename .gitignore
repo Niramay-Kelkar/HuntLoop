@@ -14,3 +14,14 @@ dist/
 data/raw/
 data/resumes/
 logs/
+
+# Scratch / validation / one-off run artifacts (never committed)
+scratch_*
+.claude/
+
+# HuggingFace / model cache when running scripts in Docker with the repo mounted
+.cache/
+huntloop-claude-code-prompts.md
+
+# ATS onboarding operator confirmation files (see discover_and_store_*.py)
+confirmed_*.txt

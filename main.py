@@ -12,6 +12,11 @@ from scrapy.utils.project import get_project_settings
 
 from huntloop.spiders.greenhouse_spider import GreenhouseScraper
 from huntloop.spiders.lever_spider import LeverScraper
+from huntloop.spiders.workday_spider import WorkdayScraper
+from huntloop.spiders.smartrecruiters_spider import SmartRecruitersScraper
+from huntloop.spiders.ashby_spider import AshbyScraper
+from huntloop.spiders.icims_spider import IcimsScraper
+from huntloop.spiders.gem_spider import GemScraper
 from huntloop.settings import DATABASE_URL
 from huntloop.db_models import Company
 from huntloop import metrics
@@ -21,11 +26,16 @@ from sqlalchemy.orm import sessionmaker
 logger = logging.getLogger(__name__)
 
 # Only platforms with an implemented spider. Companies detected as some
-# other platform (e.g. ashby, workday) or with ats_platform "unknown"/NULL
+# other platform (e.g. an unimplemented one) or with ats_platform "unknown"/NULL
 # are skipped, not silently dropped - see run_multi_ats_scrape() below.
 SPIDERS_BY_PLATFORM = {
     "greenhouse": GreenhouseScraper,
     "lever": LeverScraper,
+    "workday": WorkdayScraper,
+    "smartrecruiters": SmartRecruitersScraper,
+    "ashby": AshbyScraper,
+    "icims": IcimsScraper,
+    "gem": GemScraper,
 }
 
 
@@ -43,14 +53,17 @@ def get_companies_by_platform():
     try:
         detected_rows = session.query(Company).filter(Company.ats_platform.isnot(None)).all()
         by_platform = {}
+        careers_urls = {}
         for company in detected_rows:
             by_platform.setdefault(company.ats_platform, []).append(company.name)
+            if company.careers_url:
+                careers_urls[company.name] = company.careers_url
 
         unset_platform_names = [
             company.name for company in session.query(Company).filter(Company.ats_platform.is_(None)).all()
         ]
 
-        return by_platform, unset_platform_names
+        return by_platform, unset_platform_names, careers_urls
     finally:
         session.close()
 
@@ -60,7 +73,7 @@ def run_multi_ats_scrape():
     its detected ATS platform (companies.ats_platform, populated by
     scripts/detect_and_store_ats.py), running each implemented spider once
     with the full list of company tokens for that platform. Platforms
-    without an implemented spider (e.g. ashby, workday) and companies with
+    without an implemented spider and companies with
     no detected platform (ats_platform "unknown" or NULL) are skipped with
     a clear log message, not silently dropped or crashed on. At the end
     of the run (success or failure), this run's metrics (jobs scraped/
@@ -68,7 +81,7 @@ def run_multi_ats_scrape():
     pushed to the Pushgateway as a single batch - see huntloop.metrics."""
     start_time = time.perf_counter()
     try:
-        by_platform, unset_platform_names = get_companies_by_platform()
+        by_platform, unset_platform_names, careers_urls = get_companies_by_platform()
 
         if unset_platform_names:
             logger.warning(
@@ -89,7 +102,25 @@ def run_multi_ats_scrape():
                 continue
 
             logger.info(f"Running {spider_class.name} for {len(tokens)} companies: {tokens}")
-            process.crawl(spider_class, companies=tokens)
+            if platform == "workday":
+                # Workday needs each company's {tenant, dc, site}, stored
+                # in companies.careers_url (see huntloop.workday_url).
+                # Companies routed here without one (e.g. ambiguous
+                # generic-slug tenants flagged for review by
+                # scripts/discover_and_store_workday.py) are skipped by
+                # the spider, not guessed at.
+                wd_urls = {name: careers_urls[name] for name in tokens if name in careers_urls}
+                missing = [name for name in tokens if name not in wd_urls]
+                if missing:
+                    logger.warning(
+                        f"Workday: {len(missing)} companies have ats_platform='workday' but no "
+                        f"careers_url - skipping: {missing}"
+                    )
+                if not wd_urls:
+                    continue
+                process.crawl(spider_class, companies=list(wd_urls), careers_urls=wd_urls)
+            else:
+                process.crawl(spider_class, companies=tokens)
             scheduled_any = True
 
         if scheduled_any:

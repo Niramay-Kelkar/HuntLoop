@@ -43,6 +43,7 @@ export function getHealth(): Promise<HealthResponse> {
 // job-list UI this is scaffolding toward.
 export interface ListJobsParams {
   company?: string;
+  department?: string;
   min_score?: number;
   sort?: "score" | "-score";
   limit?: number;
@@ -56,6 +57,13 @@ export function getJobs(params: ListJobsParams = {}): Promise<JobListResponse> {
   }
   const queryString = query.toString();
   return apiFetch<JobListResponse>(`/jobs${queryString ? `?${queryString}` : ""}`);
+}
+
+// The real, distinct department values currently in use (GET
+// /jobs/departments) - used to populate the department filter's options
+// from real data instead of a hardcoded list.
+export function getDepartments(): Promise<string[]> {
+  return apiFetch<string[]>("/jobs/departments");
 }
 
 export function getJob(id: number): Promise<JobDetail> {

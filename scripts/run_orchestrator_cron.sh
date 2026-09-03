@@ -62,12 +62,15 @@
 # stage's stdout/stderr into cron.log so wrapper-level failures (e.g.
 # Docker Desktop not running) are visible too, not just app-level ones.
 #
-# The skills-matching stage is expected to often stop early (not
-# complete every NULL row) once the day's 200K-token Groq budget is
-# exhausted (huntloop.skills_matching.DailyQuotaExhausted) - that's
-# normal, not a failure; it picks up automatically where it left off on
-# tomorrow's run, working through the backlog and keeping newly-scraped
-# jobs matched over time, with no separate manual re-triggering needed.
+# The skills-matching stage runs Groq primary -> Gemini fallback
+# (huntloop.skills_matching_router, Step K). It is expected to often stop
+# early (not complete every NULL row) once BOTH providers' daily quotas
+# are spent (router.AllProvidersExhausted: Groq's 200K TPD, then Gemini's
+# 500 RPD) - that's normal, not a failure; it picks up automatically
+# where it left off on tomorrow's run, working through the backlog and
+# keeping newly-scraped jobs matched over time, with no manual
+# re-triggering. Each run logs the relevant-backlog count (start + end)
+# as the leading indicator if capacity ever falls behind demand again.
 #
 # See README.md's "Scheduled runs" section for how to install/remove the
 # scheduling entry that calls this script, and where to check its output.

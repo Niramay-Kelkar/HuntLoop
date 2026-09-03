@@ -15,6 +15,7 @@ const PAGE_SIZE = 12;
 export default function JobsPage() {
   const [filters, setFilters] = useState<JobFiltersValue>({
     company: "",
+    department: "",
     minScore: "",
     sort: "-score",
   });
@@ -24,10 +25,14 @@ export default function JobsPage() {
   const parsedMinScore = filters.minScore === "" ? undefined : Number(filters.minScore);
 
   const jobs = useQuery({
-    queryKey: ["jobs", { company: filters.company, minScore: parsedMinScore, sort: filters.sort, offset }],
+    queryKey: [
+      "jobs",
+      { company: filters.company, department: filters.department, minScore: parsedMinScore, sort: filters.sort, offset },
+    ],
     queryFn: () =>
       getJobs({
         company: filters.company || undefined,
+        department: filters.department || undefined,
         min_score: parsedMinScore,
         sort: filters.sort,
         limit: PAGE_SIZE,

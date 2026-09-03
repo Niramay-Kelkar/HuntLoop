@@ -67,39 +67,75 @@ class JobDataPipeline:
             return None
         try:
             from .embeddings import embed_texts
-        except ImportError:
+
+            self._reference_embedding = embed_texts([REFERENCE_TEXT])[0]
+        except Exception:
+            # ImportError: sentence-transformers/torch not installed (this
+            # project's local .venv). Anything else: the model couldn't be
+            # loaded right now (e.g. offline with no HuggingFace cache, as
+            # in CI). Either way this is "can't classify this row now", not
+            # a fatal error - leave is_relevant/embedding NULL for this
+            # run's inserts and let scripts/backfill_relevance.py /
+            # scripts/backfill_embeddings.py fill them later.
             logger.warning(
-                "sentence-transformers/torch not installed in this environment - "
-                "job_postings.is_relevant will be left NULL for this run's inserts "
-                "and needs a later scripts/backfill_relevance.py run."
+                "embedding model unavailable in this environment - "
+                "job_postings.is_relevant/embedding will be left NULL for this "
+                "run's inserts and need a later backfill run.",
+                exc_info=True,
             )
             self._relevance_embedding_unavailable = True
             return None
-        self._reference_embedding = embed_texts([REFERENCE_TEXT])[0]
         return self._reference_embedding
 
-    def _classify_relevance(self, job_title, job_description):
-        """Returns True/False, or None if it can't be classified right
-        now (see _get_reference_embedding) - a None here leaves
-        is_relevant NULL on the row, same as before this row existed."""
-        if not job_title:
-            return None
+    def _classify_and_embed(self, job_title, job_description):
+        """Compute ``(is_relevant, match_embedding)`` for a newly-scraped
+        row in a single model call:
+          - ``is_relevant``  - the relevance-gate classification (needs a
+            title+description embedding vs. REFERENCE_TEXT)
+          - ``match_embedding`` - the all-MiniLM-L6-v2 embedding of the
+            cleaned ``job_description`` alone, stored on
+            ``job_postings.embedding`` for query-time resume-match scoring
+
+        Either element is ``None`` if it can't be computed right now
+        (sentence-transformers/torch not installed - this project's local
+        .venv - or a per-row embedding failure). A ``None`` leaves that
+        column NULL and it's picked up later by
+        ``scripts/backfill_relevance.py`` / ``scripts/backfill_embeddings.py``.
+
+        Wired here (not only in the backfills) as of 2026-08-31 - see
+        SESSIONS.md. Before, every new ATS source needed a manual
+        ``backfill_embeddings.py`` pass after its first scrape (Greenhouse/
+        Lever, then Workday); now the daily Docker scrape populates
+        ``embedding`` at insert exactly like ``is_relevant``. The
+        backfill script is still the right tool for bulk re-scrapes
+        (batches of 100 vs. the pipeline's one-row-at-a-time) and for
+        torch-less runs, so it stays."""
         reference_embedding = self._get_reference_embedding()
         if reference_embedding is None:
-            return None
+            return None, None
         from .embeddings import embed_texts
 
+        desc = job_description or ""
         try:
-            job_embedding = embed_texts([f"{job_title}\n{job_description or ''}"])[0]
+            # One batched call: [0] title+desc for the relevance gate,
+            # [1] desc alone for the stored resume-match embedding.
+            rel_vec, match_vec = embed_texts([f"{job_title or ''}\n{desc}", desc])
         except Exception:
             # An isolated embedding failure for this one row shouldn't
-            # roll back the whole insert - leave is_relevant NULL for it
-            # (same as the "unavailable" case above), same defensive
-            # principle as the surrounding process_item try/except.
-            logger.warning(f"Relevance embedding failed for {job_title!r} - leaving is_relevant NULL", exc_info=True)
-            return None
-        similarity = cosine_similarity(reference_embedding, job_embedding)
-        return classify_relevance(job_title, similarity)
+            # roll back the whole insert - leave both columns NULL for it,
+            # same defensive principle as the surrounding process_item
+            # try/except.
+            logger.warning(
+                f"Embedding failed for {job_title!r} - is_relevant/embedding left NULL", exc_info=True
+            )
+            return None, None
+
+        is_relevant = None
+        if job_title:
+            is_relevant = classify_relevance(
+                job_title, cosine_similarity(reference_embedding, rel_vec)
+            )
+        return is_relevant, match_vec
 
     def process_item(self, item, spider):
         logger.warning(f"[PIPELINE TRIGGERED] Processing item: {item.get('job_title')}")
@@ -147,22 +183,40 @@ class JobDataPipeline:
 
             existing_job = session.query(JobPosting).filter_by(gh_job_id=str(item["job_id"])).first()
             if existing_job:
-                logger.info(f"Skipping reposted job {item['job_id']}")
+                # Narrow, additive backfill only: if this repost carries a
+                # real department value and the existing row doesn't have
+                # one yet, fill it in. Every other already-populated column
+                # (is_relevant, embedding, matched_skills, ...) is left
+                # completely untouched on a repost match - this is not a
+                # general reprocess-on-repost path.
+                new_department = item.get("department")
+                if existing_job.department is None and new_department:
+                    existing_job.department = new_department
+                    session.commit()
+                    logger.info(
+                        f"Backfilled department for reposted job {item['job_id']}"
+                    )
+                else:
+                    logger.info(f"Skipping reposted job {item['job_id']}")
                 metrics.jobs_skipped_duplicate_total.labels(company=company_name, source=source_name).inc()
                 return item
 
             # 4️⃣ Create JobPosting entry
-            is_relevant = self._classify_relevance(item.get("job_title"), item.get("job_description"))
+            is_relevant, job_embedding = self._classify_and_embed(
+                item.get("job_title"), item.get("job_description")
+            )
 
             job_post = JobPosting(
                 job_title=item.get("job_title"),
                 job_url=item.get("job_url"),
                 gh_job_id=item.get("job_id"),
+                department=item.get("department"),
                 job_description=item.get("job_description"),
                 date_posted=item.get("date_posted"),
                 company_id=company.id,
                 source_id=source.id,
                 is_relevant=is_relevant,
+                embedding=job_embedding,
             )
 
             session.add(job_post)
