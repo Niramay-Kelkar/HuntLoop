@@ -1201,6 +1201,28 @@ conventions" and SESSIONS.md for the real current state).
   names the current generator skips, with the same or stronger
   corroboration gates already used elsewhere), not an urgent rebuild -
   real but modest prevalence, not a rare Ripple-only edge case.**
+  **That follow-up is now BUILT, 2026-09-03 (see SESSIONS.md "Add a
+  gated bare-first-word candidate for 2-word company names").**
+  `scripts/detect_ats_for_sponsors.py` gained `bare_first_word_candidate()`
+  - a new, separate function (`slug_candidates()` and the noise-list
+  guard are untouched) that emits one bare first-word slug, tried ONLY as
+  a fallback after every regular candidate misses, for an exactly-two-word
+  name whose second word isn't in `_TRAILING_NOISE`. A hit via this kind
+  is NEVER auto-stored (same collision-prone shape as the
+  `first-word-only`/`acronym` kinds) - it is held for explicit human
+  confirmation via `--confirmations FILE` (one slug per line, gitignored
+  `confirmed_bareword_ats_slugs.txt`), mirroring the Ashby/iCIMS/Gem
+  onboarding gates. Every `primary`-kind hit still auto-stores exactly as
+  before. Full-population run: 88 bare-first-word hits, 42 auto-passed
+  (human-confirmed), 46 held; 36 new `companies` rows onboarded via this
+  kind (incl. **`faire` -> "Faire" and `highnote` -> "Highnote"**, both
+  Greenhouse), scraped by the daily orchestrator with 0 NULL
+  `is_relevant`/`embedding`. The confirmations file was built by checking
+  each held board's real job titles against the DOL employer name,
+  rejecting ~18 short/generic-word collisions (`mercury`, `fetch`,
+  `relativity`, `public`, ...). `scripts/scrape_lever.py` added for
+  parity with `scripts/scrape_greenhouse.py`. Re-running the full
+  discovery is idempotent (`0 inserted, 0 updated`).
   **Feasibility measured 2026-08-30 (see SESSIONS.md "Which ATS is most
   common among the 'neither' sponsors") to decide which spider to build
   next — measurement only, no spider, no DB writes.**

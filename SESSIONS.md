@@ -8339,3 +8339,88 @@ in this repo yet (unchanged by this session); verified via `tsc --noEmit`
 
 Nothing else was touched - no other filter, no relevance/embedding
 pipeline code, no spider/discovery code.
+
+## 2026-09-03 - Add a gated bare-first-word candidate for 2-word company names
+
+Follow-up to 2026-09-02's "Investigate white-labeled Greenhouse/Lever on
+custom domains", which recommended a carefully-gated bare-first-word slug
+pass for the exact pattern `slug_candidates()` deliberately skips: a
+company name that is exactly two words whose second word is not
+recognized generic corporate noise (e.g. "RIPPLE LABS", "FAIRE
+WHOLESALE", "HIGHNOTE PLATFORM"). This session built that.
+
+### Code (`scripts/detect_ats_for_sponsors.py`, + new `scripts/scrape_lever.py`)
+
+- `bare_first_word_candidate()` - a NEW function, entirely separate from
+  `slug_candidates()`, which is untouched. Fires only for an exactly-two-
+  word name whose second word is not in `_TRAILING_NOISE`; reuses the
+  existing `_COMMON_WORDS` stoplist (so "GENERAL MOTORS" -> "general"
+  stays blocked) with a looser `_MIN_BARE_FIRST_WORD_LEN = 3` bar than
+  `slug_candidates()`'s own reductions (needed - "FAIRE" is 5 chars).
+  The noise-list guard logic itself was not modified.
+- `detect_one()` tries every regular `slug_candidates()` candidate FIRST
+  and only falls back to the bare candidate if all of them miss - so a
+  name that already resolves is completely unaffected. The bare
+  candidate goes through the exact same live verification as every other
+  (a real API call + `probe_greenhouse`'s board-name similarity check).
+- `gate()` / `read_confirmations()` / `--confirmations FILE`: a
+  bare-first-word hit is NEVER auto-stored (same collision-prone shape as
+  the `first-word-only`/`acronym` kinds Ashby/SmartRecruiters already
+  treat as never-auto). It is held for explicit human confirmation via a
+  one-slug-per-line file, mirroring the Ashby/iCIMS/Gem onboarding
+  scripts. Every `primary`-kind hit still auto-stores exactly as before -
+  `gate()` returns `auto` for them unconditionally.
+- Confirmed Lever limitation (documented in the module docstring): the
+  Lever postings endpoint returns a bare list with no org/display-name
+  field anywhere, so `probe_lever` has never had a name-similarity check
+  for any candidate kind - a Lever bare hit is verified by live posting
+  count alone, which is another reason this kind is always held.
+- `scripts/scrape_lever.py` added for parity with
+  `scripts/scrape_greenhouse.py` (scoped Lever-only entrypoint).
+
+### Discovery + onboarding (full 8,491-employer >= 20-filing population)
+
+Full `--commit --confirmations confirmed_bareword_ats_slugs.txt` run:
+Greenhouse 384 + Lever 76 hits. Of those, 372 via the unchanged primary
+candidates and 88 via the new bare-first-word candidate (42 auto-passed
+because their slug is in the human-verified confirmations file, 46 held).
+
+`confirmed_bareword_ats_slugs.txt` (gitignored, 40 slugs) was built by
+fetching each held board's real posted job titles and checking them for a
+plausible identity match against the DOL-filing employer name - the same
+due-diligence standard the original Faire/Highnote investigation used.
+That process rejected ~18 confirmed false positives (short/generic-word
+board collisions: `fetch` = Fetch Pet Insurance not Fetch Rewards,
+`mercury` = the fintech bank not Mercury Financial, `relativity` =
+Relativity Space not Relativity ODA, `public` = Public.com not Public
+Storage/Partnerships, plus staffing-firm generic-word collisions).
+
+36 new `companies` rows were onboarded via this kind (name = ats_token =
+slug), including **`faire` and `highnote`, both correctly resolved to
+Greenhouse boards "Faire" / "Highnote" and stored**. `keystone` /
+`commvault` / `vonage` / `pmg` were already present as primary-kind rows
+from the 2026-08-29 run and were left untouched (a re-run of the full
+discovery reported `0 inserted, 0 updated` - the onboarding is
+idempotent and already complete).
+
+### Scrape + verification
+
+The daily launchd orchestrator picked the new rows up automatically (they
+are ordinary `companies` rows with `ats_platform` set) and scraped them
+via the shared `JobDataPipeline`. ~2,750 job postings across the 36 new
+companies, **0 NULL `is_relevant`, 0 NULL `embedding`, no backfill** -
+same as every other source. Whole-table NULL counts also 0/0.
+
+- Live cross-checks (fresh Greenhouse API calls): `faire` board "Faire"
+  60 live jobs == 60 stored; `highnote` board "Highnote" 4 live == 4
+  stored; `ripple` board "Ripple" 129 live, 133 stored (includes a few
+  recently-closed postings).
+- Regression: the full re-run committed 0 new / 0 updated rows and the
+  four pre-existing primary-kind companies are unchanged; `primary`-kind
+  hit count 372 (vs 376 a day earlier - live board churn dropping a few
+  boards below the 3-posting bar, not a behavior change). `gate()` is
+  `auto` for every primary hit by construction.
+- Full test suite: 225 passing.
+
+Not touched: the noise-list guard logic, Workday, SmartRecruiters, Ashby,
+iCIMS, Gem.
