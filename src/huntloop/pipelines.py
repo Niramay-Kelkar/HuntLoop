@@ -67,15 +67,24 @@ class JobDataPipeline:
             return None
         try:
             from .embeddings import embed_texts
-        except ImportError:
+
+            self._reference_embedding = embed_texts([REFERENCE_TEXT])[0]
+        except Exception:
+            # ImportError: sentence-transformers/torch not installed (this
+            # project's local .venv). Anything else: the model couldn't be
+            # loaded right now (e.g. offline with no HuggingFace cache, as
+            # in CI). Either way this is "can't classify this row now", not
+            # a fatal error - leave is_relevant/embedding NULL for this
+            # run's inserts and let scripts/backfill_relevance.py /
+            # scripts/backfill_embeddings.py fill them later.
             logger.warning(
-                "sentence-transformers/torch not installed in this environment - "
-                "job_postings.is_relevant will be left NULL for this run's inserts "
-                "and needs a later scripts/backfill_relevance.py run."
+                "embedding model unavailable in this environment - "
+                "job_postings.is_relevant/embedding will be left NULL for this "
+                "run's inserts and need a later backfill run.",
+                exc_info=True,
             )
             self._relevance_embedding_unavailable = True
             return None
-        self._reference_embedding = embed_texts([REFERENCE_TEXT])[0]
         return self._reference_embedding
 
     def _classify_and_embed(self, job_title, job_description):
