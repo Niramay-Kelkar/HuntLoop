@@ -8679,3 +8679,106 @@ updated". Then scraped via the `app` Docker image
 
 Not touched: the Greenhouse/Lever spiders, the discovery script, the
 gate logic, and every other ATS platform / company.
+
+## 2026-09-03 - Make CI able to run the new skills-matching / offline model paths (CI + one pipeline fix)
+
+Follow-up to the CI state report from the prior step. The feature branch
+(`expand-ats-coverage-and-gemini-fallback`, 39 commits ahead of `master`)
+adds tests that import `huntloop.skills_matching` /
+`skills_matching_gemini` / `skills_matching_router` for the first time -
+modules that `raise RuntimeError` at import if `GROQ_API_KEY` /
+`GEMINI_API_KEY` are unset. `master`'s CI never hit that guard (no
+`master` test imports those modules), so this was invisible until now.
+
+**What was done (`.github/workflows/ci.yml`, `.env.example` - commits
+`0914e1c` and `25c3e98`):**
+- `ci.yml`'s top-level `env:` block gained `GROQ_API_KEY` /
+  `GEMINI_API_KEY` set to `dummy-key-for-ci` - **placeholder strings,
+  never real keys**. Every test that touches those providers mocks or
+  monkeypatches the actual API call (`test_skills_matching_router.py`
+  installs in-memory fake backends, `test_backfill_pacer.py`
+  monkeypatches `time`, `test_backfill_lock.py` monkeypatches
+  `_run_backfill`), so a non-empty string is all CI collection needs.
+- Same block gained `HF_HUB_OFFLINE: "1"` and `TRANSFORMERS_OFFLINE: "1"`
+  so `sentence-transformers`' model fetch degrades the same way on every
+  run instead of depending on whether the runner can reach
+  huggingface.co that minute.
+- `.env.example` documents `GEMINI_API_KEY` (required by the Gemini
+  fallback backend, same fail-fast-at-import behaviour as `GROQ_API_KEY`)
+  plus commented `SKILLS_MATCHING_PROVIDERS` / `GEMINI_MODEL` with their
+  defaults, matching the format of the existing entries. Docs-only.
+- The Postgres service block, the workflow steps (`pip install -r
+  requirements.txt` / `alembic upgrade head` / `pytest`), the triggers,
+  and every test file were left untouched.
+
+**The real finding (why the first CI run went red):** with the offline
+flags in place, the first run (commit `0914e1c`) failed - 5 failures,
+all in `test_pipeline.py` (`test_process_item_inserts_job_posting`,
+`test_process_item_stores_department`, both `test_repost_*` cases - all
+`NoResultFound: No row was found` - plus
+`test_duplicate_job_url_hits_integrity_error_handler`). The CI traceback
+traced every one to `JobDataPipeline._get_reference_embedding()` in
+`src/huntloop/pipelines.py`: it caught only `ImportError` (torch not
+installed), but on CI `sentence-transformers` + torch **do** install, so
+the failure was a runtime `OSError` /
+`huggingface_hub.errors.LocalEntryNotFoundError` from
+`SentenceTransformer("all-MiniLM-L6-v2")` with offline mode and no local
+cache. That exception propagated out of `_get_reference_embedding`, past
+`_classify_and_embed` (which only guards the *per-row* `embed_texts`
+call, not the once-per-run reference one), and into `process_item`'s
+`except Exception` -> `session.rollback()` -> the row was never
+inserted. So the method did **not** actually degrade gracefully, despite
+its own docstring promising "not a fatal error, so a torch-less
+environment still completes a real scrape".
+
+**The fix (`src/huntloop/pipelines.py`, commit `25c3e98`):** broadened
+`_get_reference_embedding`'s `except ImportError` to `except Exception` -
+a missing library and a model that can't load at runtime are now treated
+identically: log one warning, set `_relevance_embedding_unavailable`,
+return `None`, leave `is_relevant` / `embedding` NULL for that run's
+inserts (picked up later by `scripts/backfill_relevance.py` /
+`scripts/backfill_embeddings.py`). This matches the documented
+graceful-degradation contract. No test file or assertion was touched -
+`test_pipeline.py` already expected exactly this (`row.is_relevant is
+None`, `row.embedding is None`).
+
+**Separate discovery - `master`'s CI had been silently red for ~10
+days.** `master`'s last run (commit `1577f5d`, 2026-08-25) fails with
+`test_process_item_inserts_job_posting - assert True is None` (1 failed,
+71 passed). Root cause is the same missing exception handling: on
+`master` (no offline flags) the model **downloads successfully** on the
+runner's network, so `is_relevant` gets a real value (`True`) instead of
+`None` and the assertion fails - the missing `_get_reference_embedding`
+guard was masked by the download succeeding rather than failing. This
+has been broken since commit `0e58de3` (2026-08-24, "Add automatic
+relevance filtering for scraped job postings"), the commit that
+introduced `_classify_relevance` and the `assert row.is_relevant is
+None` test. The offline flags plus the pipelines.py fix close this too.
+
+**Before / after (real GitHub Actions runs on PR #1, not simulated):**
+- Run 33788529240 (`0914e1c`, env vars + offline flags only): **5
+  failed, 220 passed** - collection succeeded (the `GROQ` / `GEMINI` fix
+  works), `test_backfill_lock.py`'s 3 tests **passed** in the isolated
+  container (confirming the local failures were purely a local
+  `run_orchestrator_cron.sh` advisory-lock collision, not a regression),
+  and only the 5 `test_pipeline.py` failures above remained.
+- Run 33789449523 (`25c3e98`, + pipelines.py fix): **225 passed**, all
+  11 workflow steps green.
+
+PR: https://github.com/Niramay-Kelkar/HuntLoop/pull/1 (into `master`;
+`test` check green on head `25c3e98`). Run URLs:
+https://github.com/Niramay-Kelkar/HuntLoop/actions/runs/33788529240 (red),
+https://github.com/Niramay-Kelkar/HuntLoop/actions/runs/33789449523 (green),
+https://github.com/Niramay-Kelkar/HuntLoop/actions/runs/32860069638
+(`master`, red).
+
+**What's next / still open:** nothing from this task - CI is green and the
+branch is merge-ready. (A larger question left untouched: whether the CI
+test job should install `sentence-transformers`/torch at all, or
+pre-cache the model - both out of scope here; the offline-degrade path is
+correct and cheap.)
+
+Not touched: any test file, `pytest.ini`, `requirements.txt`, the
+Postgres service block, or any workflow section other than the `env:`
+block. Only 3 files changed across the two commits: `.github/workflows/
+ci.yml`, `.env.example`, `src/huntloop/pipelines.py`.

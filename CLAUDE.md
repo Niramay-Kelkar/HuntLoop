@@ -172,12 +172,20 @@ conventions" and SESSIONS.md for the real current state).
   via `main.py` or programmatically (`process.crawl(SpiderClass, ...)`).
 - Docker: `Dockerfile` + `docker-compose.yml` (app + postgres:18) for a
   dev-oriented containerized setup. CI (`.github/workflows/ci.yml`) runs
-  migrations + pytest against a real Postgres service container on every
-  push/PR to `master`. The app container runs as a dedicated non-root
-  `huntloop` user (not root) — see the security audit entry in
-  SESSIONS.md (2026-08-21). `.dockerignore` excludes `data/raw/` and
-  `logs/` (mirroring `.gitignore`) so real LCA data and log output never
-  get baked into an image layer.
+  migrations + pytest against a real Postgres service container
+  (`pgvector/pgvector:pg18`) on every push/PR to `master`. **Its `env:`
+  block carries `GROQ_API_KEY` / `GEMINI_API_KEY` as the placeholder
+  string `dummy-key-for-ci` (2026-09-03, see SESSIONS.md) — the
+  skills-matching modules `raise` at import if these are unset and the
+  branch's tests are the first to import them; every real API call in the
+  suite is mocked, so a non-empty value is enough. The same block sets
+  `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1` so the
+  `sentence-transformers` model fetch degrades deterministically instead
+  of depending on the runner's network.** The app container runs as a
+  dedicated non-root `huntloop` user (not root) — see the security audit
+  entry in SESSIONS.md (2026-08-21). `.dockerignore` excludes `data/raw/`
+  and `logs/` (mirroring `.gitignore`) so real LCA data and log output
+  never get baked into an image layer.
 - **`docker-compose.yml` has a Prometheus/Pushgateway/Grafana
   observability stack, added 2026-08-22 (see SESSIONS.md), gated behind
   `profiles: ["observability"]` so plain `docker-compose up` never starts
@@ -761,12 +769,19 @@ conventions" and SESSIONS.md for the real current state).
   (the `launchd` job from the prior step) runs `main.py` via this
   machine's local `.venv`, which — as established repeatedly elsewhere
   in this doc — cannot run torch at all here. `JobDataPipeline` therefore
-  **degrades gracefully**: if `sentence-transformers`/torch isn't
-  importable, it logs one warning per spider run (not per row) and
-  leaves `is_relevant` NULL for that run's inserts, rather than crashing
-  the scrape; the same applies to an isolated per-row embedding failure
-  (any other exception), which leaves just that row's `is_relevant`
-  NULL rather than rolling back its whole insert.
+  **degrades gracefully**: if the embedding model can't be used for this
+  run — `sentence-transformers`/torch not importable, **or** the model
+  itself failing to load (e.g. offline with no HuggingFace cache, as in
+  CI) — `_get_reference_embedding()` logs one warning per spider run (not
+  per row) and leaves `is_relevant`/`embedding` NULL for that run's
+  inserts, rather than crashing the scrape; the same applies to an
+  isolated per-row embedding failure, which leaves just that row's
+  columns NULL rather than rolling back its whole insert.
+  **`_get_reference_embedding()` catches any exception here, not only
+  `ImportError` (fixed 2026-09-03, see SESSIONS.md — an offline model
+  load raises `OSError`/`LocalEntryNotFoundError`, which the old
+  `ImportError`-only catch let through, aborting the insert; this had
+  also left `master`'s CI silently red for ~10 days).**
   **As of 2026-08-31 the same method (`_classify_and_embed`, renamed from
   `_classify_relevance`) also computes and stores
   `job_postings.embedding` — the resume-match embedding of the
