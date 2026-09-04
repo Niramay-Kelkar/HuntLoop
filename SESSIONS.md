@@ -9429,3 +9429,103 @@ Nothing else was touched: no `companies` rows written, no spider or
 discovery script changes, no other company's data touched.
 
 **Files changed:** `CLAUDE.md`, `SESSIONS.md`.
+
+---
+
+## 2026-09-04 — Recalculate the skills-matching backlog clearance estimate after the groq_120b promotion
+
+**Did:** Measurement/reporting only — no application code, router logic,
+or scripts touched.
+
+**Current backlog (real, queried live via the exact same condition
+`_log_backlog()` uses — `matched_skills IS NULL AND is_relevant IS
+TRUE`):**
+```
+relevant_backlog: 84,251
+skipped_irrelevant (NULL, not relevant): 3,272
+already_matched: 8,886
+total job_postings: 96,409
+```
+84,251 — up slightly from the ~82,678 baseline the original 6-8-week
+estimate was based on (expected: new relevant postings keep arriving
+from the daily scrape faster than the backlog drains).
+
+**Real throughput data on the NEW three-stage rotation
+(`groq_120b,groq,gemini`): none exists yet.** The promotion commit
+(`b061bc9`) landed at **07:40:07 PDT today**. Today's only scheduled
+cron run started at **03:00:05 PDT** — over 4.5 hours *before* the
+promotion — and ran the OLD `groq,gemini` chain; it finished at 10:29:59
+PDT, itself before the `skills_matching_metrics` Prometheus wiring
+(pulled in at 10:40:44 PDT) even existed on the deployed checkout. No
+scheduled run has executed since the promotion; the next one is
+tomorrow's 3am run. Confirmed by direct evidence, not inference:
+`grep -c groq_120b logs/cron.log` → **0** (no run has ever logged that
+provider name), and a live Prometheus query for
+`skills_matching_jobs_succeeded_total` / `skills_matching_backlog_remaining`
+returned an empty result set — nothing has been pushed for this stage
+at all. The only real data that exists for `groq_120b` anywhere is the
+prior 11-single-job validation harness (quality check, not a throughput
+measurement — 11 calls, not a batch-paced production run).
+
+**So the estimate below is entirely theoretical, built from
+already-documented (and, in one case, explicitly flagged-uncertain)
+per-stage limits — not a measured recalculation.** Labeled accordingly:
+
+- **groq_120b — theoretical, ~1,500 jobs/day, with a real documented
+  caveat.** Derived (see the 2026-09-04 "Groq gpt-oss-120b as a
+  same-account capacity stage" entry) as 1,000 RPD × ~1.5 avg jobs/batch
+  (batches collapse from the same long-JD token pressure the 20b model
+  already shows). That same entry explicitly flags this as unresolved,
+  not confirmed: whether RPD=1,000 is truly the binding daily constraint,
+  or whether an invisible TPD-style ceiling (like 20b's earlier-measured
+  200K TPD → ~58 real jobs/day) still applies underneath it, was never
+  tested — "worth a future full-day remeasurement, out of scope" at the
+  time it was written, and still untested now. Reaching the full 1,000
+  RPD would also need ~16-17 continuous hours in a single run — plausible
+  for an unattended overnight backfill, but not verified.
+- **groq (20b) — real observed, ~0-16 jobs/day very recently.** The two
+  most recent real runs (both pre-promotion, both real): 2026-09-03
+  contributed 16 jobs via groq before its 200K-TPD-style quota exhausted
+  for the day; 2026-09-04's run contributed 0 (that day's quota was
+  already pre-spent before the run started). Once `groq_120b` is primary,
+  groq(20b) is only reached on a per-batch validation failover or after
+  `groq_120b` itself exhausts for the day, so its net contribution to the
+  new rotation is likely similar or smaller, not larger.
+- **gemini — real observed, high day-to-day variance.** 2026-09-03: 1,995
+  successful jobs before its own daily quota exhausted, in 97.8 minutes
+  of run time. 2026-09-04: only 656 successful jobs before exhausting, in
+  238.7 minutes of run time — a genuine >3x swing between two real
+  consecutive days, not a stable number. Gemini's role in the new
+  rotation is unchanged (still last fallback, tried once both Groq stages
+  are spent for the day), so this same variance carries forward
+  regardless of `groq_120b`.
+
+**Recalculated range, explicitly theoretical and wide because of the
+above:**
+- **Pessimistic** (if `groq_120b` turns out to be TPD-bound like 20b,
+  effectively ~58 jobs/day rather than ~1,500): combined daily capacity
+  ≈ 58 (groq_120b) + ~0-16 (groq) + 656-1,995 (gemini) ≈ **~700-2,000
+  jobs/day** → 84,251 backlog clears in roughly **42-120 days (~6-17
+  weeks)** — overlapping or in some cases *worse* than the original
+  pre-promotion 6-8-week estimate, since it depends entirely on which
+  day's gemini variance shows up.
+- **Optimistic** (if `groq_120b` genuinely sustains its documented
+  ~1,500/day theoretical ceiling): combined daily capacity ≈ 1,500 +
+  656-1,995 (gemini, largely redundant once groq_120b absorbs most
+  traffic, but still additive on days groq_120b exhausts before gemini
+  would have run out) ≈ **~2,150-3,500 jobs/day** → clears in roughly
+  **24-39 days (~3.5-5.5 weeks)** — meaningfully faster than before, but
+  contingent on a single overnight run actually sustaining ~16-17+ hours
+  of continuous groq_120b throughput, which has not been observed.
+
+**Bottom line, reported plainly:** the backlog is 84,251 relevant rows,
+real and current. Whether the groq_120b promotion actually shortens the
+6-8-week estimate meaningfully is **genuinely unknown until at least one
+real scheduled run happens under the new rotation** — the honest range
+today is roughly 3.5 to 17 weeks depending on which theoretical case
+holds, which is too wide to report as a single number. The right next
+step is checking `logs/cron.log` and the Prometheus
+`skills_matching_*` metrics after tomorrow's 3am run, which will be the
+first real data point on the new three-stage rotation.
+
+**Files changed:** `SESSIONS.md`.
