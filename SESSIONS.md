@@ -9035,3 +9035,152 @@ key committed anywhere
 `tests/test_skills_matching_router.py`, `.env.example`,
 `.github/workflows/ci.yml`, `SESSIONS.md`, `CLAUDE.md`,
 `huntloop-architecture-decisions.md`.
+
+---
+
+## 2026-09-04 — Groq gpt-oss-120b as a same-account capacity stage
+
+**Rate-limit reconciliation (real live header capture, several calls each,
+not assumed - see huntloop-architecture-decisions.md for the full
+reasoning).** Groq exposes exactly TWO header pairs per model -
+`x-ratelimit-{limit,remaining,reset}-requests` and
+`x-ratelimit-{limit,remaining,reset}-tokens` - never four, so there is no
+distinct RPM header separate from the requests-bucket and no distinct TPD
+header separate from the tokens-bucket. Working out which axis each pair
+actually represents from its reset-time math (not guessed): the requests
+bucket's reset time grows by ~86.4s per request consumed
+(`86400s / 1000 = 86.4s`) - unambiguously a **1,000-requests-per-DAY**
+cadence, not per-minute. The tokens bucket's reset time is sub-second to
+low-second and recovers within call-to-call gaps - unambiguously a
+**8,000-tokens-per-MINUTE** cadence. **Both `openai/gpt-oss-20b` (the
+production model) and `openai/gpt-oss-120b` show IDENTICAL live numbers:
+RPD=1,000, TPM=8,000.** A direct hammer-test (8 rapid calls to 20b, with
+qwen3.6/compound-mini/120b called before and after) proved these buckets
+are INDEPENDENT per model - hammering 20b's counter down 7-8 slots left
+the other three models' counters untouched. This directly answers the
+2026-08-30 open question: a second Groq model on this SAME account/key is
+a real, confirmed, independent capacity addition, not a shared-pool
+illusion.
+
+**Reconciliation against the 2026-08-22-documented "30 RPM / 8,000 TPM /
+200,000 TPD" for gpt-oss-20b:** TPM matches exactly (8,000 = 8,000,
+unchanged). RPM and TPD are **not directly comparable** - today's headers
+simply don't expose those axes at all (only RPD and TPM are visible per
+model), so this is a difference-in-axis, not a same-axis contradiction.
+Whether an invisible RPM or TPD ceiling still exists underneath the now-
+visible RPD/TPM pair was NOT tested (would require deliberately tripping
+it and burning real quota) - reported as unconfirmed rather than assumed
+either way. One flagged side-finding, not resolved here: if RPD=1,000 is
+genuinely 20b's new binding daily constraint (superseding the old 200K-
+TPD assumption), the router module's documented "~55 real jobs/day"
+20b throughput figure may itself be stale - worth a future full-day
+remeasurement, out of scope for this task.
+
+**Built `src/huntloop/skills_matching_groq_120b.py`** (openai/gpt-oss-
+120b), a separate module rather than a parameterized existing backend -
+matches every other backend's one-module-per-provider shape, and the
+router dispatches by provider NAME to a hardcoded import, not by
+module+parameter. Reuses the SAME `GROQ_API_KEY` as the production 20b
+backend (same account, confirmed independent bucket - not a new
+credential). Pacing constants mirror the 20b backend's margin-below-cap
+reasoning against the live-confirmed numbers (`MAX_BATCH_SIZE=5`,
+`MAX_BATCH_ESTIMATED_TOKENS=7_000`, `TARGET_TPM=6_000`, `MAX_RPM=30`) -
+the 7,000-token per-request ceiling and 30 RPM backstop are INHERITED
+from the 20b backend's own documented real per-request hard cap, not
+independently re-verified for 120b (doing so would mean deliberately
+sending an oversized request and eating the failure - not done). Added
+`"groq_120b"` as a known router stage
+(`huntloop.skills_matching_router._KNOWN`/`_backend()`); default
+`SKILLS_MATCHING_PROVIDERS` **unchanged** (`groq,gemini`) regardless of
+the validation outcome below - left opt-in, final promote-to-default
+decision left to the user (same posture as the Mistral stage).
+
+**11-job side-by-side harness (`scratch_groq_120b_validation.json`) -
+gpt-oss-120b vs. the gpt-oss-20b baseline. Result: CLEAN, genuinely good.**
+- **11/11 successful calls, 0 full-resume dumps** (max `matched_skills`
+  in any single job: 8, well under `MAX_PLAUSIBLE_MATCHED_SKILLS=20`).
+- **Palantir "Deployment Strategist" - the standing worst-case outlier
+  that has produced a full-resume dump on every backend tested so far**
+  (53 items on 20b historically, 44 on Gemini, 44 on Mistral): 120b gave
+  a clean 6 matched / 2 missing, no dump.
+- **Duolingo "Senior Data Science Manager" (the soft-match case)**: 120b
+  correctly inferred adjacent ML skills (`Machine learning models`,
+  `ML data pipelines`, `Semantic search (Sentence-BERT)`) rather than
+  dropping everything to missing - the known nuance this standing test
+  checks for.
+- **Grounding/format**: only 4/42 (9.5%) `matched_skills` entries were
+  long/parenthetical (mostly legitimate specific technology names, e.g.
+  "Semantic search (Sentence-BERT)"), a much tighter rate than Mistral's
+  equivalent check; `missing_skills` verbosity is expected/documented
+  behavior across every backend, not a defect.
+- Latency: 2.2s mean (11 successful calls) - slower than 20b's
+  historical ~1.4s (a bigger model), far faster than Gemini/Mistral's
+  ~6.1s.
+- **Important confound, reported honestly**: the 20b baseline COLUMN in
+  this specific run only succeeded on 4/11 jobs - not because of a code
+  problem, but because the real daily-scheduled production backfill
+  (`scripts/backfill_skills_matching.py`, launchd-triggered, PID
+  confirmed via `ps aux`, actively logged in `logs/cron.log`) was running
+  concurrently against the SAME shared `openai/gpt-oss-20b` bucket this
+  harness's baseline calls also use, causing real contention/`json_
+  validate_failed` 400s on that shared model. `openai/gpt-oss-120b`'s
+  independent bucket was completely unaffected - itself a second, organic
+  confirmation of the per-model scoping finding above. Where 20b DID
+  succeed in this run its own quality looked mixed (e.g. "Chief of Staff"
+  - 14 matched_skills including irrelevant tech terms like Kubernetes/
+  Docker/Microservices for a non-technical exec role), while 120b's
+  parallel answer (5 matched, more plausible) looked tighter - a real
+  observation from this run, not a controlled A/B, so not over-claimed as
+  proof 120b beats 20b on quality generally.
+
+**Effective-jobs/day estimate (theoretical, derived from the live-
+confirmed limits, NOT a measured full-day production run):** at
+`MAX_BATCH_ESTIMATED_TOKENS=7,000` against the real ~9.5k-char job
+descriptions at 380-company scale, batches collapse to the same ~1-2
+jobs/request the 20b backend already sees (same reasoning, same JD
+sizes). 1,000 RPD × ~1.5 avg jobs/batch ≈ **~1,500 jobs/day theoretical
+ceiling**, additive to the existing rotation since the bucket is
+independently confirmed. Reaching the full 1,000 RPD in practice needs
+roughly 16-17 hours of continuous run time at the `TARGET_TPM=6,000`
+pacing (~1 batch/minute) - plausible for an unattended daily backfill,
+not verified against a real unbounded run in this task. Real throughput
+will likely be lower once `json_validate_failed`-style
+`ProviderResponseInvalid` failovers are accounted for (historically ~18%
+for the 20b model on real batches; not separately measured for 120b here
+since only 11 single-job calls were run, not a large batch sample).
+
+**Recommendation (final call left to the user, per the task): promote to
+the default rotation.** Validation came back clean - zero dumps, the
+worst historical failure case fixed, grounding/format tight, real
+independent quota confirmed live, no new credential needed. Left OPT-IN
+in this commit rather than flipped automatically, matching the same
+conservative default-rotation posture used for the Mistral stage (there,
+opt-in because validation was poor; here, opt-in pending an explicit
+go-ahead despite validation being clean, since promoting a stage into the
+daily production rotation is a real behavioral change worth a deliberate
+decision, not an automatic one).
+
+**Verified:** full suite **283 → 294 passed** (+12 in the new
+`test_skills_matching_groq_120b.py`, +2 router tests, net +11 after one
+router test file's line-count shuffle - see the real diff). **3 pre-
+existing `tests/test_backfill_lock.py` tests failed in this run for a
+real, verified, unrelated reason**: the real daily-scheduled production
+backfill was actively running and holding the real Postgres advisory
+lock (key 1,751,937,901) at the moment these tests ran - confirmed via
+`ps aux` (a live `scripts/backfill_skills_matching.py` process, started
+by `run_orchestrator_cron.sh`) and `logs/cron.log` (real, in-progress
+Groq/Gemini calls against a live 84,907-row backlog). This is the lock
+mechanism correctly detecting a real concurrent holder, exactly as
+designed - not a regression from this diff (confirmed: `git diff` never
+touches `scripts/backfill_skills_matching.py` or
+`tests/test_backfill_lock.py`). Re-run once the production backfill
+finishes to confirm a clean pass; not done here since that backfill runs
+for hours-to-days against the real backlog and waiting on it was out of
+scope.
+
+**Files changed:** `src/huntloop/skills_matching_groq_120b.py` (new),
+`scripts/validate_groq_120b_skills_match.py` (new),
+`tests/test_skills_matching_groq_120b.py` (new),
+`src/huntloop/skills_matching_router.py`,
+`tests/test_skills_matching_router.py`, `SESSIONS.md`, `CLAUDE.md`,
+`huntloop-architecture-decisions.md`.

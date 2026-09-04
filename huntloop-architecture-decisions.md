@@ -444,6 +444,61 @@ on a non-free-tier-gated model before ever promoting it. Cerebras / the
 other candidates above remain the next things to try if real headroom
 (not just a fallback-of-last-resort) is what's needed.
 
+### Groq/Gemini quota-scoping investigation (2026-09-03/04, reporting only, then built 2026-09-04)
+
+Before reaching for a fourth external provider, a reporting-only pass
+checked whether the existing Groq/Gemini/Mistral accounts already had
+unused headroom via a second MODEL on an account already held, rather
+than a new account. Real findings, from live API calls and current docs,
+not assumption:
+
+- **Groq: per-model, confirmed live.** A direct hammer-test - call one
+  model 8x rapidly, check three OTHER models' rate-limit headers before
+  and after - showed the other models' `x-ratelimit-remaining-*`
+  counters completely untouched by the hammered model's traffic. Groq's
+  own docs page reads ambiguously here ("Rate limits apply at the
+  organization level, not individual users" - about the user/key axis,
+  not the model axis, but easy to misread as "pooled across models");
+  the live header behavior is unambiguous and is what should be trusted.
+- **Mistral: per-*bucket*, not strictly per-model.** `ministral-8b-
+  latest` (already tested, rejected), `open-mistral-nemo`, `open-
+  mistral-7b`, and `mistral-tiny(-latest)` all share ONE draining
+  request counter live - a "second model" from that group adds NO
+  capacity. `ministral-3b-latest` has its own separate, larger bucket,
+  but it's a smaller/weaker model than the already-rejected 8B.
+  `open-mixtral-8x7b`/`8x22b` are now pulled from the free tier
+  entirely (`req-minute limit: 0`), same as the flagship `mistral-
+  small/-medium` models found in the original build.
+  `codestral-latest` has its own separate bucket too, but is
+  code-specialized, not a general extraction-task fit.
+- **Gemini: genuinely unconfirmed.** Gemini's REST responses carry ZERO
+  rate-limit/quota headers on either success or error - checked directly
+  across 10 live calls, nothing. Docs confirm limits vary "per model"
+  in the sense that different model names get different numbers, but do
+  not resolve whether two different model names draw from one project-
+  level pool per resource type or track independently; secondary
+  sources disagree with each other on this. Not guessed either way.
+  `gemini-2.5-flash` / `gemini-2.5-flash-lite` are now fully sunset
+  ("no longer available to new users" - HTTP 404 with an explicit
+  redirect message to `gemini-3.5-flash-lite`/`gemini-3.6-flash`);
+  `gemini-3.1-flash-lite` and `gemini-flash-lite-latest` are both still
+  real, live, callable models (confirmed after retrying past a transient
+  503 "high demand" on each) - a possible second Gemini stage IF the
+  scoping question is ever resolved, not acted on here.
+
+**Follow-up (2026-09-04): the Groq per-model finding was acted on -
+`openai/gpt-oss-120b` was built as a same-account capacity stage
+(`huntloop.skills_matching_groq_120b`) and validated. See the SESSIONS.md
+2026-09-04 entry for the full rate-limit reconciliation (both gpt-oss-20b
+and gpt-oss-120b confirmed live at 1,000 requests/day / 8,000
+tokens/minute, independent buckets) and the 11-job validation result
+(clean - 0/11 dumps, fixed the standing Palantir "Deployment Strategist"
+failure case every other backend has hit). Wired as `"groq_120b"` in the
+router, left opt-in in `SKILLS_MATCHING_PROVIDERS` pending an explicit
+decision to promote it to the default rotation, despite the clean
+result - see CLAUDE.md for the current default-chain status, which can
+change independently of this document.**
+
 ---
 
 ## `is_relevant` relevance gate: title-only blue-collar denylist (redesigned 2026-09-03, see SESSIONS.md)

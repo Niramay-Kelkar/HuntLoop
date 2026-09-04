@@ -657,6 +657,25 @@ conventions" and SESSIONS.md for the real current state).
   (non-free-tier-gated) model. `scripts/validate_mistral_skills_match.py`
   is its harness (gitignored `scratch_mistral_validation.json`).
   `MISTRAL_API_KEY` is in `.env`.
+  **A FOURTH stage, `groq_120b` (`huntloop.skills_matching_groq_120b`,
+  `openai/gpt-oss-120b`), was built + wired 2026-09-04 (see SESSIONS.md +
+  `huntloop-architecture-decisions.md`) - a SAME-ACCOUNT Groq capacity
+  stage, not a new provider: reuses the existing `GROQ_API_KEY`, confirmed
+  live to hold its own INDEPENDENT rate-limit bucket from the production
+  `openai/gpt-oss-20b` model (1,000 requests/day, 8,000 tokens/min, both
+  identical to 20b's own live numbers, and provably unaffected by 20b
+  traffic - see the rate-limit reconciliation in SESSIONS.md for the full
+  header-capture evidence). Its 11-job validation came back CLEAN: 0/11
+  full-resume dumps (max 8 matched_skills, well under the 20 backstop),
+  fixed the Palantir "Deployment Strategist" dump that every other
+  backend (20b itself historically, Gemini, Mistral) has hit, correctly
+  handled the Duolingo soft-match case, tight grounding/format. Left
+  OPT-IN in `SKILLS_MATCHING_PROVIDERS` (still defaults to `groq,gemini`)
+  despite the clean result - promoting a stage into the daily production
+  rotation was treated as a deliberate user decision, not automatic; the
+  recommendation on file is to promote it. `scripts/
+  validate_groq_120b_skills_match.py` is its harness (gitignored
+  `scratch_groq_120b_validation.json`). Needs no new env var.
   **First unbounded (`--limit`-less) production run, 2026-08-30 (see
   SESSIONS.md) — measurement only, no code changed.** Backlog 12,682 →
   **11,057**; `job_postings` with a stored result 736 → 2,363 (733 of

@@ -182,6 +182,36 @@ def test_mistral_is_a_known_provider(monkeypatch):
         importlib.reload(router)
 
 
+def test_groq_120b_is_a_known_provider_and_independent_of_groq(monkeypatch):
+    # groq_120b is a same-account/same-key capacity stage, not a separate
+    # provider - confirm it's addable and that it fails over independently
+    # of the primary "groq" stage (its own DailyQuotaExhausted doesn't mark
+    # "groq" exhausted, and vice versa).
+    groq = FakeBackend("groq")
+    groq_120b = FakeBackend("groq_120b")
+    monkeypatch.setattr(router, "PROVIDER_CHAIN", ["groq", "groq_120b"])
+    monkeypatch.setitem(router._LOADED, "groq", groq)
+    monkeypatch.setitem(router._LOADED, "groq_120b", groq_120b)
+
+    groq.program("quota")
+    state = router.make_run_state()
+    out = router.match_skills_batch("r", ["a"], state)
+    assert out[0]["matched_skills"] == ["fake-groq_120b"]
+    assert state["exhausted"] == {"groq"}
+    assert "groq_120b" not in state["exhausted"]
+
+
+def test_groq_120b_known_in_env_chain_parsing(monkeypatch):
+    import importlib
+    monkeypatch.setenv("SKILLS_MATCHING_PROVIDERS", "groq,groq_120b,gemini")
+    mod = importlib.reload(router)
+    try:
+        assert mod.PROVIDER_CHAIN == ["groq", "groq_120b", "gemini"]
+    finally:
+        monkeypatch.setenv("SKILLS_MATCHING_PROVIDERS", "groq,gemini")
+        importlib.reload(router)
+
+
 def test_provider_chain_parsing(monkeypatch):
     import importlib
     monkeypatch.setenv("SKILLS_MATCHING_PROVIDERS", "groq")

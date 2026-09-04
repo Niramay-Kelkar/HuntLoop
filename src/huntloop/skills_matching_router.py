@@ -50,6 +50,13 @@ MISTRAL_API_KEY only when actually listed. Its 11-job validation came
 back POOR (ministral-8b full-resume-dumps on 7/11 - see SESSIONS.md
 2026-09-03), so it is wired-but-not-recommended: a last-resort capacity
 bucket if Groq+Gemini are ever both walled, not a quality peer.
+"groq_120b" (huntloop.skills_matching_groq_120b, openai/gpt-oss-120b,
+built 2026-09-04) is a same-account, same-key Groq capacity stage -
+confirmed live to hold its OWN independent rate-limit bucket from the
+primary openai/gpt-oss-20b backend (see SESSIONS.md 2026-09-04), needing
+no separate API key. Its 11-job validation result and default-chain
+status are documented in SESSIONS.md/CLAUDE.md 2026-09-04 - check there
+before assuming it is or isn't in the default rotation.
 """
 import logging
 import os
@@ -67,7 +74,7 @@ PROVIDER_CHAIN = [
 if not PROVIDER_CHAIN:
     raise RuntimeError("SKILLS_MATCHING_PROVIDERS resolved to an empty provider chain")
 
-_KNOWN = {"groq", "gemini", "mistral"}
+_KNOWN = {"groq", "gemini", "mistral", "groq_120b"}
 _unknown = [p for p in PROVIDER_CHAIN if p not in _KNOWN]
 if _unknown:
     raise RuntimeError(f"SKILLS_MATCHING_PROVIDERS has unknown provider(s): {_unknown} (known: {sorted(_KNOWN)})")
@@ -84,10 +91,12 @@ _LOADED: dict = {}
 
 
 def _backend(name: str):
-    """Lazy-import a backend module. gemini/mistral are only imported if
-    actually in the chain / actually reached - so a groq-only config
-    never needs GEMINI_API_KEY, and the default groq,gemini config never
-    needs MISTRAL_API_KEY."""
+    """Lazy-import a backend module. gemini/mistral/groq_120b are only
+    imported if actually in the chain / actually reached - so a groq-only
+    config never needs GEMINI_API_KEY, and the default groq,gemini config
+    never needs MISTRAL_API_KEY. groq_120b reuses GROQ_API_KEY (same
+    account/key as the primary "groq" stage), so it needs no new env var
+    at all."""
     m = _LOADED.get(name)
     if m is None:
         if name == "groq":
@@ -96,6 +105,8 @@ def _backend(name: str):
             from huntloop import skills_matching_gemini as m
         elif name == "mistral":
             from huntloop import skills_matching_mistral as m
+        elif name == "groq_120b":
+            from huntloop import skills_matching_groq_120b as m
         else:  # pragma: no cover - guarded at import
             raise ValueError(f"unknown skills-matching provider {name!r}")
         _LOADED[name] = m
