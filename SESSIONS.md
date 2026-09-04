@@ -9234,3 +9234,97 @@ duplicated here.
 **Files changed (this step only):** `src/huntloop/skills_matching_router.py`,
 `tests/test_skills_matching_router.py`, `.env.example`, `CLAUDE.md`,
 `SESSIONS.md`, `huntloop-architecture-decisions.md`.
+
+---
+
+## 2026-09-04 — Verify the observability continuity fix against a real cron run
+
+**Did:** Checked whether the earlier observability fix (commit `4876956`,
+"Keep the observability stack running continuously and off the frontend's
+port" - `restart: unless-stopped` on prometheus/pushgateway/grafana, a
+defensive `docker compose --profile observability up -d pushgateway` step
+in the cron wrapper, Grafana moved to port 3001) actually worked against
+today's real scheduled 3am run, not just the manual kill-and-observe test
+it originally shipped with.
+
+Before touching anything: `ps aux` and a `pg_try_advisory_lock` probe on
+key 1,751,937,901 found today's scheduled `backfill_skills_matching.py`
+(PID 10949, launched by `run_orchestrator_cron.sh` at 03:00:05) still
+actively running and holding the lock. Left it completely alone and
+proceeded with read-only checks; it finished naturally partway through
+this investigation (`run finished with exit code 0` at 10:29:59 PDT,
+logged in `logs/cron.log`), so nothing was interrupted.
+
+**Result: NOT fixed - the fix never actually reached the code that ran
+today, and a second, real networking gap remains underneath it.**
+
+1. **The fix commit isn't on the branch cron runs from.** `4876956` and
+   the PR that carries it (`origin/master`'s `c59818e`) both exist on
+   `origin/master`, but the local `master` checkout this machine's
+   launchd job actually executes from was 3 commits behind and had never
+   pulled it - confirmed via `git merge-base --is-ancestor 4876956 HEAD`
+   (false) and `git status` ("behind 'origin/master' by 3 commits").
+   `docker-compose.yml` and `scripts/run_orchestrator_cron.sh` on disk
+   still had none of the fix's changes: no `restart:` on any
+   observability service, no defensive pushgateway-start step, Grafana
+   still mapped to port 3000 in the file. The three observability
+   containers that are actually running right now (Prometheus ~1hr
+   uptime, Pushgateway ~1hr, Grafana ~55min at time of check, all with
+   `RestartPolicy: unless-stopped` and Grafana on host port 3001) were
+   evidently started from the *fixed* config in an earlier manual step
+   today, then the working tree reverted back to the stale, unpulled
+   `master` for the actual scheduled run - so the running containers and
+   the code the cron job executes are out of sync with each other.
+   Today's real 03:00:05 run reproduced exactly the original failure:
+   stage 1 (`main.py`, via `docker compose run`) logged `Failed to push
+   run metrics to Pushgateway at localhost:9091 ... Connection refused`
+   at its close, same as every prior day going back to 2026-08-22. A
+   direct Prometheus query (`huntloop_run_duration_seconds`,
+   `huntloop_jobs_scraped_total`) and a raw `curl localhost:9091/metrics`
+   both came back completely empty - no huntloop series at all, fresh or
+   stale.
+
+2. **Even pulled, the fix would not have closed stage 1's push failure.**
+   Root-caused why, independent of the branch gap: `PUSHGATEWAY_URL`
+   defaults to `localhost:9091` and nothing overrides it for `docker
+   compose run ... app python main.py` - unlike `DATABASE_URL`, which the
+   wrapper explicitly rewrites for the container. Inside the `app`
+   container, `localhost` means the container itself, not the host or
+   the `pushgateway` service, so the push is structurally unreachable
+   regardless of whether Pushgateway is running. Confirmed directly, not
+   just inferred: a throwaway container joined to the same
+   `huntloop_default` docker network could reach
+   `http://pushgateway:9091/-/healthy` (HTTP 200) but got connection
+   refused against `http://localhost:9091/-/healthy` from the identical
+   network. `origin/master`'s fix commit doesn't set `PUSHGATEWAY_URL`
+   for the `app` service or the `docker compose run` invocation either,
+   so pulling it as-is would not have fixed stage 1's push even once the
+   branch gap is closed - it only fixed the "is Pushgateway even running"
+   half of the problem. (Stage 2, `backfill_skills_matching.py`, runs on
+   the host via `.venv`, not in a container, so `localhost:9091` is
+   correct for it - but the local checkout doesn't even have the
+   `src/huntloop/skills_matching_metrics.py` module the fix commit adds,
+   so stage 2 isn't attempting a push at all right now.)
+
+**Not evaluated:** Grafana's own rendering of real data, since there was
+no fresh data for it to render (the Prometheus/Pushgateway query above
+already came back empty). Grafana itself is reachable and healthy
+(`GET localhost:3001/api/health` → `200 {"database":"ok",...}`), that
+part of the fix is fine as far as it goes.
+
+**Recommendation:** `git pull` (or merge) `origin/master` into local
+`master` first - the code currently running via launchd has none of the
+already-merged fix. Then additionally set `PUSHGATEWAY_URL=pushgateway:9091`
+for the `app` service's `docker compose run` invocation (the same kind of
+explicit override `DATABASE_URL` already gets) before trusting stage 1's
+push to work on a real run. Recheck after tomorrow's 3am run once both of
+those are in place.
+
+**Verified:** all evidence above gathered live against the real running
+system (`docker ps`, `docker inspect`, `ps aux`, a live Postgres advisory
+lock check, direct Prometheus/Pushgateway HTTP queries, a real
+network-scoped container test, and `git`/`log` inspection) - nothing
+mocked or assumed. The in-progress cron job was never touched; it
+completed on its own during the check.
+
+**Files changed:** `SESSIONS.md` only.
