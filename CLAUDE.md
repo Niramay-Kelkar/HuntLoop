@@ -543,9 +543,21 @@ conventions" and SESSIONS.md for the real current state).
   Step 5/7 — no separate schedule; that schedule is now launchd-driven,
   not cron-driven, see the Scheduling bullet above)** — stage 1 is the
   existing scraper (`main.py`), stage 2 processes `matched_skills IS
-  NULL` rows oldest-`scraped_at`-first under the real daily budget, then
+  NULL AND is_relevant IS TRUE` rows under the real daily budget, then
   stops itself when exhausted; both stages always run regardless of the
-  other's outcome. This is the only mechanism now — it both works down
+  other's outcome. **Selection order is resume `match_score` DESC as of
+  2026-09-03 (see SESSIONS.md), not the original
+  oldest-`scraped_at`-first** — postings that rank well against the
+  active resume get skills-gap analysis before generic backlog. The
+  ordering and the score expression are the shared
+  `huntloop.match_scoring` (`match_score_expr` / `match_score_order_by`),
+  the exact same definition `GET /jobs?sort=-score` uses (NULLS LAST,
+  with a stable deterministic `id ASC` fallback when the active resume
+  has no embedding); `backfill_skills_matching.py` and
+  `huntloop.api.routers.jobs` both call that module so they can't drift.
+  Pacing/`TokenPacer`, provider routing, batch building, and the
+  advisory lock were untouched by that change. This is the only
+  mechanism now — it both works down
   the backlog over time and keeps every future day's newly-scraped
   postings matched, with nothing to manually re-trigger ever again.
   **Sanity filter**: `MAX_PLAUSIBLE_MATCHED_SKILLS = 20` in

@@ -8906,3 +8906,55 @@ pipeline.
 `tests/test_relevance_filter.py`, `scripts/recompute_relevance.py` (new),
 `scripts/calibrate_relevance_threshold.py` (one-line note),
 `SESSIONS.md`, `CLAUDE.md`, `huntloop-architecture-decisions.md`.
+
+---
+
+## 2026-09-03 — Order the skills-matching backfill by resume match score
+
+**Did:** Changed `scripts/backfill_skills_matching.py`'s job-selection
+query from `ORDER BY scraped_at ASC, id ASC` to order by resume
+`match_score` descending, so postings that actually rank well against the
+active resume get skills-gap analysis before the generic backlog.
+Extracted the match-score definition into a new shared module
+`src/huntloop/match_scoring.py` (`match_score_expr()` /
+`match_score_order_by()`) — the cosine-similarity expression, the
+NULLS-LAST handling, and the "no active-resume embedding → stable
+deterministic `id ASC` fallback" — and pointed both
+`huntloop.api.routers.jobs` (`GET /jobs?sort=-score`) and the backfill
+script at it, so the two can't drift on what `match_score` means. Nothing
+else in the script touched: pacing/`TokenPacer`, provider routing, batch
+building, the advisory lock are all unchanged. This was a pure ORDER BY
+change plus the shared-expression refactor.
+
+**Verified:**
+- Real diff scoped to the ordering change + the shared refactor only
+  (`git diff`); `jobs.py`'s behaviour is identical (old inline
+  `score_expr` / `nulls_last()` / `id.asc()` branches replaced by the
+  helper calls, `Float`/`literal` imports dropped).
+- Real job-selection query run against local system Postgres (5432, the
+  real data) without invoking any provider: top-20 selected rows are
+  monotonically non-increasing by `match_score` (0.6800 → 0.6423) and the
+  id list is byte-identical to `GET /jobs?sort=-score` for the same rows;
+  per-row score equality between the two exact (`< 1e-12`).
+- No-active-resume-embedding fallback checked in a real test
+  (`tests/test_match_scoring.py`, new, 3 tests): descending + NULLS LAST,
+  ascending, and `resume_embedding=None` → stable repeatable `id ASC`.
+- Full suite: 260 → **263 passed**, 0 failed (local `.venv`).
+- `git status` / `git diff`: only `scripts/backfill_skills_matching.py`
+  and `src/huntloop/api/routers/jobs.py` modified; `match_scoring.py` and
+  `test_match_scoring.py` new. No other file's behaviour changed.
+
+**Git / CI:** The commit (`f3f7036`, "Prioritize skills matching by
+resume match quality") landed on `master` and was auto-amended (trailer)
++ auto-pushed to `origin/master` — it did **not** go through a PR like
+the CI-fix (#1) and `is_relevant` redesign (#2) work. Per the user's
+call, git was left as-is (no branch, no force-push, no PR). Real CI run
+on the master push — **CI #29, run 33840366193, Success** in 4m 38s; all
+steps passed; pytest `263 passed, 2 warnings in 18.06s`, 0 failures. Only
+notes: the pre-existing "Node.js 20 is deprecated … forced to run on
+Node.js 24" warning and two pre-existing Starlette/anyio
+DeprecationWarnings.
+
+**Files changed:** `scripts/backfill_skills_matching.py`,
+`src/huntloop/api/routers/jobs.py`, `src/huntloop/match_scoring.py`
+(new), `tests/test_match_scoring.py` (new), `SESSIONS.md`.
