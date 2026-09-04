@@ -8782,3 +8782,127 @@ Not touched: any test file, `pytest.ini`, `requirements.txt`, the
 Postgres service block, or any workflow section other than the `env:`
 block. Only 3 files changed across the two commits: `.github/workflows/
 ci.yml`, `.env.example`, `src/huntloop/pipelines.py`.
+
+---
+
+## Redesign `is_relevant` as a role-agnostic blue-collar denylist (2026-09-03)
+
+Replaced the hybrid keyword + embedding-similarity relevance gate in
+`src/huntloop/relevance_filter.py` with a pure, title-only denylist.
+
+**Why.** The old gate combined a category `REFERENCE_TEXT` embedding
+similarity with `HARD_EXCLUDE_KEYWORDS` / `SOFT_EXCLUDE_KEYWORDS`, which
+structurally blocked entire business functions — sales, marketing, HR,
+legal/tax/accounting, partnerships, procurement, communications — plus
+the embedding half produced real false negatives from the
+manufacturing/warehouse/retail hard-excludes. An "Account Executive",
+"HR Business Partner", or "Tax Manager" at a sponsoring company is a
+legitimate posting; the only thing the gate genuinely needs to remove is
+manual/hourly work, which is unambiguous from the title alone.
+
+**New logic.** `is_relevant = NOT title_matches_denylist(title)`. Title
+only (no description text — never validated). `DENYLIST_KEYWORDS` is 191
+terms: the 190-term hand-validated manual/blue-collar list (driving,
+warehouse/fulfillment, production/assembly line, skilled trades,
+automotive service-bay, janitorial, food service, retail floor, other
+front-line) plus `hoist operator` (added — the `forklift operator`
+phrase didn't match "Forklift/Hoist Operator" because of the interposed
+word). Clinical/healthcare titles were never on the denylist and stay
+included.
+
+**Matching.** A term with a space is a plain substring match; any other
+term is `(?<![a-z0-9])` + term + `(?![a-z])` — a word boundary in front,
+"not a letter" behind, so a term immediately followed by a digit still
+matches ("picker/packer" matches "Picker/Packer2"), while a trailing
+letter still blocks ("mason" ≠ "masonry"). The digit loosening was
+checked against all 94,060 titles: it newly catches exactly 2 rows
+(`Assembler1`, `Picker/Packer2 Labeler 1st shift`), both genuine
+blue-collar, zero false positives.
+
+**`warehouse` carve-out.** Bare `warehouse` also appears in technical
+titles as "data warehouse" / "data warehousing" (`Staff Data Warehouse
+Engineer`, the `Senior Solutions Architect (EDW Enterprise Data Warehouse
+Migrations)` step-2 case). When `data warehous` is in the title the bare
+`warehouse` term is skipped — every other explicit warehouse term
+(`warehouse operator`, `warehouse selector`) still applies. Accepted
+residual: ~6 distinct "Warehouse Automation Engineer" / "Warehouse &
+Logistics Engineer" titles are still denied by bare `warehouse` (the
+carve-out is "data warehouse" only) — MVP noise, same class as the old
+filter's "GRC Program Manager" / "Product Designer" acceptances.
+
+**Retained for backward-compatible imports, now inert:**
+`REFERENCE_TEXT`, `cosine_similarity` (both still imported by
+`huntloop.pipelines`, which computes/stores `job_postings.embedding` for
+the separate query-time `match_score` — untouched), and
+`HARD_EXCLUDE_KEYWORDS` / `SOFT_EXCLUDE_KEYWORDS` / `EXCLUDE_KEYWORDS` /
+`EMBEDDING_SIMILARITY_THRESHOLD` / `SOFT_EXCLUDE_RESCUE_THRESHOLD`
+(imported by `scripts/reclassify_soft_excludes.py` /
+`scripts/calibrate_soft_exclude_threshold.py`).
+`classify_relevance(title, embedding_similarity=None)` keeps its
+two-argument shape — `huntloop.pipelines` and
+`scripts/backfill_relevance.py` still pass a computed similarity as the
+second argument; it is now ignored. `scripts/calibrate_relevance_threshold.py`
+got a one-line "superseded" note and is otherwise left as a historical
+artifact.
+
+**Full recompute** (`scripts/recompute_relevance.py`, new — title-only,
+runs in the plain `.venv`, re-evaluates ALL rows since the logic itself
+changed, not just `IS NULL`):
+
+| | total | is_relevant True | False | NULL |
+|---|---|---|---|---|
+| before | 94,060 | 35,897 | 58,163 | 0 |
+| after  | 94,060 | 90,869 |  3,191 | 0 |
+
+Changed 55,314 rows: **True→False 171**, **False→True 55,143**, 0
+previously-NULL. The 171 True→False are all blue-collar mislabeled under
+the old logic (Maintenance Technician, Automotive Technician, Machinist,
+Electrician, Non CDL Driver, Assembler, Utility Worker, …) — exactly the
+171 the denylist validation had flagged. After the recompute,
+`is_relevant` equals `NOT title_matches_denylist` for every one of the
+94,060 rows (verified: 0 rows True-but-denylisted, 0 rows
+False-but-not-denylisted).
+
+**Step-2 named cases, confirmed by real query after the recompute:**
+- Palantir `Software Engineer%` — 47/47 `True`.
+- All `Forward Deployed Engineer` titles — 331/331 `True`.
+- `Sr. Forward Deployed Engineer (FDE) - Retail` (databricks) — 7/7
+  `True` (was `False` under the old `retail` hard-exclude).
+- `Senior Solutions Architect (EDW Enterprise Data Warehouse Migrations)`
+  — 5/5 `True` (was `False` under the old `warehouse` hard-exclude; now
+  saved by the carve-out).
+- `Technical Program Manager` — 349/349 `True`.
+- Previously hard-excluded business functions — `Account Executive` (43),
+  `HR Business Partner` (18), `Tax Manager` (24), `Marketing Manager`
+  (8), `Recruiter` (16) — all `True`.
+- Denylist-matched titles stay `False` — `Store Driver` (582),
+  `Warehouse Associate` (23), `Custodian` (12), `Line Cook` (2),
+  `Forklift/Hoist Operator` (16).
+
+**Safety metrics unchanged** (only `is_relevant` was written): total rows
+94,060, `embedding` non-NULL 94,060, `matched_skills` non-NULL 8,230,
+`companies` 743, `lca_disclosures` 1,431,321.
+
+**Tests.** `tests/test_relevance_filter.py` rewritten for the new logic
+(denylist hits/misses, digit-suffix boundary fix, the `hoist operator`
+fix, the previously-excluded categories now passing, clinical roles
+passing, the `data warehouse` carve-out, the retained-but-inert legacy
+constants). 26 → 61 tests in that file. Full suite: 225 → **260 passed**,
+0 failed.
+
+**Known follow-up (not done here, out of scope):** in a torch-less
+environment `huntloop.pipelines._classify_and_embed` still returns
+`(None, None)` early when the embedding model is unavailable, leaving
+`is_relevant` NULL even though the new logic needs no embedding — the
+daily scrape runs in Docker with torch so this only affects local/CI
+runs, and `recompute_relevance.py` / `backfill_relevance.py` mop up any
+NULLs. Decoupling `is_relevant` from embedding availability in the
+pipeline is a separate change (would touch `pipelines.py`). Also
+deliberately untouched: the API/frontend default sort/filter behaviour
+(a separate follow-up), `match_score` computation, and the embedding
+pipeline.
+
+**Files changed:** `src/huntloop/relevance_filter.py`,
+`tests/test_relevance_filter.py`, `scripts/recompute_relevance.py` (new),
+`scripts/calibrate_relevance_threshold.py` (one-line note),
+`SESSIONS.md`, `CLAUDE.md`, `huntloop-architecture-decisions.md`.
