@@ -594,3 +594,84 @@ Clinical/healthcare roles were never denylisted and remain relevant.
   `scripts/reclassify_soft_excludes.py` /
   `scripts/calibrate_soft_exclude_threshold.py` import them.
   `scripts/calibrate_relevance_threshold.py` carries a "superseded" note.
+
+---
+
+## `resume_versions.owner_id`: multi-user schema groundwork (added 2026-09-04, NOT wired)
+
+**Status: schema only, inert.** A nullable `owner_id` column exists on
+`resume_versions` (migration `df1f114b5aee`). Nothing in the application
+reads or writes it — no Pydantic schema, no API request/response model,
+no query filter references it. This is not a feature; it's a deliberate,
+narrow piece of groundwork for a possible future direction.
+
+### Why now
+
+HuntLoop today is a single-user local tool — one active resume, one
+person's job search, no auth, no concept of "whose" data anything is. A
+multi-tenant direction (multiple people, each with their own resume
+versions and match results) has been discussed but **not committed to** —
+there's no product decision to build multi-user support, no timeline, no
+users table.
+
+The reasoning for adding the column now anyway: `resume_versions` is
+currently a small table (a handful of rows — every real ingest/upload
+creates a new version, but nobody deletes old ones, so it only grows
+slowly). Adding a nullable column to a small table is a cheap,
+zero-risk `ALTER TABLE` today. Doing the same later, after this table
+has real production volume (or after other tables/queries have grown
+dependent assumptions around "there is exactly one implicit owner"),
+would be a more disruptive retrofit. Since the column is nullable with
+no default and nothing reads it, adding it now costs nothing and forecloses
+nothing — it's pure optionality, not a bet on the multi-user direction
+actually happening.
+
+### Why nullable, no default, no FK
+
+- **Nullable, no default**: every existing row (and every row inserted by
+  today's single-user code paths) legitimately has no owner — there is no
+  "current user" concept anywhere in the app to backfill it from. A
+  NOT NULL column or a synthetic default (e.g. `0` or `1` standing in for
+  "the one user") would misrepresent that nothing has actually been
+  decided about *how* ownership will work, and would need an immediate,
+  fake backfill just to satisfy the constraint.
+- **No `ForeignKey`**: there is no `users` table yet. Adding a FK now
+  would mean either pointing at a table that doesn't exist (impossible)
+  or inventing a placeholder `users` table purely to hang a constraint
+  off of — scope well beyond "add one nullable column," and a real
+  design decision (what does a user record even look like here — email?
+  an external auth provider's ID? something else?) that hasn't been made.
+
+### What "wiring this up" would actually require later
+
+Landing this column is intentionally the smallest possible first step.
+Turning it into a real feature would need, at minimum:
+
+- A `users` table (or equivalent — an external auth provider's user ID
+  referenced directly, with no local `users` table at all, is also a
+  legitimate design once that decision is made) for `owner_id` to
+  meaningfully reference, plus the FK this migration deliberately
+  doesn't add yet.
+- An actual authentication mechanism — HuntLoop has none today; every
+  request to the FastAPI backend is unauthenticated and implicitly
+  "the one local user."
+- Every query that currently assumes a single global active resume
+  (`ResumeVersion.filter_by(is_active=True).first()`, used by both the
+  resumes API and the live match-score query in `huntloop.api.routers.jobs`)
+  would need to become scoped by owner — "the active resume" would need
+  to mean "the active resume *for this user*," which changes the shape
+  of that query everywhere it's called, not just where the column lives.
+  It would very likely also mean `job_postings.matched_skills`/
+  `missing_skills`/scoring becoming per-user rather than a single global
+  precomputed value, since a match result is inherently resume-relative —
+  a materially larger change than this migration, not addressed here.
+- Probably an equivalent `owner_id` (or a shared `user_id` concept) on
+  other tables too (`job_applications` at minimum, since "which jobs I've
+  applied to" is exactly the kind of state that shouldn't be shared
+  across users) — not added here; this step deliberately touches only
+  `resume_versions`, the table named in the actual request.
+
+None of the above is being built now. This entry exists so that if/when
+the multi-user decision is actually made, the reasoning for why this one
+column already exists — and everything it still doesn't do — is written
+down rather than rediscovered.

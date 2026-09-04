@@ -322,6 +322,14 @@ class ResumeVersion(Base):
     extracted_text = Column(Text, nullable=False)
     is_active = Column(Boolean, nullable=False, default=False, server_default="false")
     embedding = Column(Vector(EMBEDDING_DIM), nullable=True)
+    # Schema groundwork only for a future multi-user direction that has
+    # been discussed but not committed to - see
+    # huntloop-architecture-decisions.md. Nullable, no default, and
+    # deliberately no ForeignKey yet (there is no users table to
+    # reference). Nothing reads or writes this column yet - added now
+    # while resume_versions is small and cheap to alter, not because
+    # multi-user support is being built.
+    owner_id = Column(Integer, nullable=True)
 
     def __repr__(self):
         return (

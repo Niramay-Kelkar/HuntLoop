@@ -9529,3 +9529,45 @@ step is checking `logs/cron.log` and the Prometheus
 first real data point on the new three-stage rotation.
 
 **Files changed:** `SESSIONS.md`.
+
+---
+
+## 2026-09-04 — Multi-user schema groundwork: `resume_versions.owner_id`
+
+**Did:** Added a nullable `owner_id` (`Integer`) column to
+`resume_versions` via a hand-written Alembic migration (`df1f114b5aee`,
+revises `0900f3514ad2`) — schema groundwork for a possible future
+multi-user direction that's been discussed but not committed to, not a
+feature. No default, no `ForeignKey` (no `users` table exists to
+reference yet). Nothing in the application reads or writes it.
+
+`alembic revision --autogenerate` was tried first but produced a mess of
+unrelated pre-existing schema drift (type/constraint diffs on
+`job_postings`/`job_sources`/`job_skills`/`job_locations` between the
+live DB and the current models, plus a Vector-type comparison quirk) on
+top of the one real change, and the generated file didn't even import
+cleanly (undefined `pgvector`/`huntloop` names). Replaced with a clean,
+hand-written migration containing only the `owner_id` addition.
+
+**Verified:**
+- Applied against the real local Postgres (`alembic upgrade head` →
+  `df1f114b5aee (head)`), then confirmed live via `information_schema`,
+  not by reading the migration: `resume_versions.owner_id` — type
+  `integer`, `is_nullable = YES`, `column_default = None`.
+- `grep -rn "owner_id" --include="*.py" .` (excluding `.venv`/
+  `__pycache__`) returns exactly two files: `db_models.py` (the column
+  definition) and the migration itself — no schema, API route, or query
+  references it anywhere.
+- Full suite: **304 passed before this change, 304 passed after**
+  (confirmed by literally stashing the diff, re-running, and restoring
+  it) — fully additive, nothing broken.
+
+Documented the full reasoning (why now while the table is small and
+cheap to alter, why nullable/no-FK, and what real multi-user wiring
+would still require — a users table, auth, per-owner query scoping, and
+likely an equivalent column on `job_applications`) in
+`huntloop-architecture-decisions.md`.
+
+**Files changed:** `src/huntloop/db_models.py`,
+`alembic/versions/df1f114b5aee_add_owner_id_to_resume_versions.py` (new),
+`huntloop-architecture-decisions.md`, `SESSIONS.md`.
