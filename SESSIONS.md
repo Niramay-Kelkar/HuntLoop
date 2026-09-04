@@ -9571,3 +9571,37 @@ likely an equivalent column on `job_applications`) in
 **Files changed:** `src/huntloop/db_models.py`,
 `alembic/versions/df1f114b5aee_add_owner_id_to_resume_versions.py` (new),
 `huntloop-architecture-decisions.md`, `SESSIONS.md`.
+
+---
+
+## 2026-09-04 — Health check: SmartRecruiters spider + bare-first-word companies
+
+**Did:** Read-only verification of two previously-completed features, no
+code changes. Both healthy.
+
+**SmartRecruiters:** still wired in `main.py`'s `SPIDERS_BY_PLATFORM`.
+21,300 `smartrecruiters_api` rows, 0 NULL `is_relevant`/`date_posted`/
+`embedding`, most recent `scraped_at` today. Its own stats block from
+today's run: 19,794 requests, 19,792×200 / 2×404 (both real deleted
+postings, cleanly ignored by Scrapy's httperror middleware, not a
+crash), 19,401 items scraped, `finish_reason: 'finished'` — the 6
+process-wide `[ERROR]` lines during today's run all trace to Greenhouse
+board fetches and generic already-documented pipeline error handling
+(a `varchar(255)` overflow, a duplicate-key repost), none to
+SmartRecruiters.
+
+**Bare-first-word companies:** all 42 confirmed slugs from
+`confirmed_bareword_ats_slugs.txt` (including `faire`/`highnote`) are
+present in `companies`, correctly platformed (greenhouse/lever), 0 NULL
+`is_relevant`/`date_posted`/`embedding` each, and confirmed actively
+included in today's real `main.py` company lists (not just present in
+the DB from a past run) — `faire`'s board specifically confirmed hit
+with a live `200` in today's log. A few (e.g. `keystone`) show an older
+`max(scraped_at)` — expected, not stale: that column reflects when a
+job was first inserted, and reposts of already-seen jobs don't touch it,
+so a quiet board looks the same as a healthy daily re-visit that found
+nothing new. The 46 originally-held candidates are fully dispositioned
+(2 confirmed correct and onboarded, 44 confirmed genuine collisions,
+0 left ambiguous) — nothing outstanding to review.
+
+**Files changed:** `SESSIONS.md`.
