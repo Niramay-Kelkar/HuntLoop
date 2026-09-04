@@ -641,9 +641,10 @@ conventions" and SESSIONS.md for the real current state).
   **A THIRD provider, Mistral (`huntloop.skills_matching_mistral`,
   `ministral-8b-latest`), was built + wired 2026-09-03 (see SESSIONS.md
   + `huntloop-architecture-decisions.md`) but is WIRED-BUT-NOT-RECOMMENDED
-  and NOT in the default chain.** `SKILLS_MATCHING_PROVIDERS` still
-  defaults to `groq,gemini`; `mistral` is a known third stage only if
-  explicitly appended (`groq,gemini,mistral`, needs `MISTRAL_API_KEY`).
+  and NOT in the default chain (unchanged by the 2026-09-04 groq_120b
+  promotion below).** `mistral` is a known further stage only if
+  explicitly appended (`groq_120b,groq,gemini,mistral`, needs
+  `MISTRAL_API_KEY`).
   Its 11-job side-by-side validation against the Groq baseline came back
   POOR: full-résumé-dumps into `matched_skills` on 7/11 jobs (rejected by
   the `MAX_PLAUSIBLE_MATCHED_SKILLS = 20` backstop → left NULL), grounding
@@ -657,6 +658,25 @@ conventions" and SESSIONS.md for the real current state).
   (non-free-tier-gated) model. `scripts/validate_mistral_skills_match.py`
   is its harness (gitignored `scratch_mistral_validation.json`).
   `MISTRAL_API_KEY` is in `.env`.
+  **A FOURTH stage, `groq_120b` (`huntloop.skills_matching_groq_120b`,
+  `openai/gpt-oss-120b`), was built + wired 2026-09-04 (see SESSIONS.md +
+  `huntloop-architecture-decisions.md`) - a SAME-ACCOUNT Groq capacity
+  stage, not a new provider: reuses the existing `GROQ_API_KEY`, confirmed
+  live to hold its own INDEPENDENT rate-limit bucket from the production
+  `openai/gpt-oss-20b` model (1,000 requests/day, 8,000 tokens/min, both
+  identical to 20b's own live numbers, and provably unaffected by 20b
+  traffic - see the rate-limit reconciliation in SESSIONS.md for the full
+  header-capture evidence). Its 11-job validation came back CLEAN: 0/11
+  full-resume dumps (max 8 matched_skills, well under the 20 backstop),
+  fixed the Palantir "Deployment Strategist" dump that every other
+  backend (20b itself historically, Gemini, Mistral) has hit, correctly
+  handled the Duolingo soft-match case, tight grounding/format.
+  **PROMOTED to the default rotation 2026-09-04, ahead of `groq`** -
+  `SKILLS_MATCHING_PROVIDERS` now defaults to `"groq_120b,groq,gemini"`
+  (was `groq,gemini`): two independent, same-account Groq buckets tried
+  bigger-model-first, Gemini still the fallback behind both. Needs no new
+  env var (same `GROQ_API_KEY`). `scripts/validate_groq_120b_skills_match.py`
+  is its harness (gitignored `scratch_groq_120b_validation.json`).
   **First unbounded (`--limit`-less) production run, 2026-08-30 (see
   SESSIONS.md) — measurement only, no code changed.** Backlog 12,682 →
   **11,057**; `job_postings` with a stored result 736 → 2,363 (733 of
