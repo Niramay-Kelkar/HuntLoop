@@ -12,11 +12,13 @@ env:
   POSTGRES_DB: ci_db
   DATABASE_URL: postgresql+psycopg2://ci_user:ci_password@localhost:5432/ci_db
   # Placeholder values only - never real keys. The skills-matching modules
-  # (huntloop.skills_matching / huntloop.skills_matching_gemini) raise at
-  # import if these are unset; the test suite mocks/monkeypatches every
-  # real API call, so any non-empty string is enough for CI collection.
+  # (huntloop.skills_matching / huntloop.skills_matching_gemini /
+  # huntloop.skills_matching_mistral) raise at import if these are unset;
+  # the test suite mocks/monkeypatches every real API call, so any
+  # non-empty string is enough for CI collection.
   GROQ_API_KEY: dummy-key-for-ci
   GEMINI_API_KEY: dummy-key-for-ci
+  MISTRAL_API_KEY: dummy-key-for-ci
   # Force sentence-transformers/huggingface offline so the model fetch
   # degrades deterministically on every run instead of depending on the
   # runner's network. Tests already expect graceful degradation

@@ -8958,3 +8958,80 @@ DeprecationWarnings.
 **Files changed:** `scripts/backfill_skills_matching.py`,
 `src/huntloop/api/routers/jobs.py`, `src/huntloop/match_scoring.py`
 (new), `tests/test_match_scoring.py` (new), `SESSIONS.md`.
+
+---
+
+## 2026-09-03 — Mistral as an (opt-in, not-recommended) third skills-matching provider
+
+**Did:** Built `src/huntloop/skills_matching_mistral.py`, contract-identical
+to `skills_matching_gemini.py` (same `match_skills` / `match_skills_batch`
+signatures, same `DailyQuotaExhausted`-on-quota shape, same
+`MAX_PLAUSIBLE_MATCHED_SKILLS = 20` backstop, same résumé-grounding
+prompts). Added `"mistral"` as a known third stage in
+`huntloop.skills_matching_router` (`_KNOWN`, lazy `_backend()` import),
+appendable via `SKILLS_MATCHING_PROVIDERS=groq,gemini,mistral`. Default
+chain is **unchanged** (`groq,gemini`) — see the validation result below.
+`.env.example` gained `MISTRAL_API_KEY` / `MISTRAL_MODEL`; `ci.yml` gained
+`MISTRAL_API_KEY: dummy-key-for-ci`. New `tests/test_skills_matching_mistral.py`
+(18 tests) + 2 router tests. New `scripts/validate_mistral_skills_match.py`
+(11-job side-by-side harness, mirrors the Gemini one).
+
+**Live-limits re-verification (the task said not to trust the 4-day-old
+research):** the 2026-08-30 figures (1 RPS / 500K TPM / ~1B tokens/month)
+describe the FLAGSHIP models, which are now effectively removed from the
+free tier — `mistral-small-latest` returns HTTP 429 with
+`x-ratelimit-limit-req-minute: 0` (same quiet cut Gemini made to its
+2.5-gen models). The `ministral-*` models ARE free-usable; live response
+headers for `ministral-8b-latest` show **625,000 tokens/min, 188
+req/min**, no per-day/month header. Default model set to
+`ministral-8b-latest` (largest free-usable); pacing constants
+(`TARGET_TPM=500_000`, `MAX_RPM=120`, `MAX_BATCH_ESTIMATED_TOKENS=30_000`,
+`MAX_BATCH_SIZE=5`) derived from those real headers.
+
+**11-job harness result (`scratch_mistral_validation.json`) — Mistral
+quality is POOR, not worth using as a quality peer:**
+- **7 of 11** Mistral results exceed `MAX_PLAUSIBLE_MATCHED_SKILLS=20` —
+  i.e. full-résumé dumps that the batch path would reject and leave NULL.
+  Worst cases: Palantir "Software Engineer – Defense Applications" 56
+  matched, Wealthfront "Fraud Operations Specialist" 53, Palantir
+  "Deployment Strategist" 44 (Groq correctly returns `[]`/`[]` here —
+  the known outlier), Duolingo "Senior DS Manager" 44 (Groq: 3).
+- **Grounding inversion:** it puts résumé skills into `matched_skills`
+  for jobs that never ask for them (SAP/RPG/Spring Boot for a Palantir
+  Deployment Strategist).
+- **Format non-compliance:** 63 matched-skill entries across the 11 jobs
+  are long or parenthetical ("Observability (Prometheus, Grafana,
+  Splunk, New Relic, SLI/SLO…)") — violates the "short phrase" rule the
+  prompt states explicitly.
+- Where it didn't dump, it added nothing over Groq (returned `[]` on the
+  same jobs Groq did).
+- Latency 6.1s/call vs Groq 1.4s (~4x slower).
+- Groq baseline stayed tight throughout (0–7 matched, correctly empty on
+  Deployment Strategist and Chief of Staff).
+- This is worse than the Gemini validation (which was "equivalent, better
+  on 2 SWE roles"). `ministral-8b` is too small for this task — same
+  conclusion the Ollama 3B/7B experiment reached (2026-08-29). The
+  bigger Mistral models that might do better are not free-usable.
+
+**Decision:** module + router wiring kept (so the option exists and is
+reproducible), but `mistral` is **NOT added to the default
+`SKILLS_MATCHING_PROVIDERS`** and is documented as
+wired-but-not-recommended — a last-resort capacity bucket only if Groq
+AND Gemini are ever both walled, where a stalled backlog is worse than
+low-quality (batch-cap-filtered) output. Groq→Gemini stays the real
+rotation. Left to the user to decide whether to ever enable it.
+
+**Verified:** full suite **263 → 283 passed**, 0 failed (local `.venv`;
++18 in `test_skills_matching_mistral.py`, +2 router tests). No real API
+key committed anywhere
+(`git diff` reviewed — only `<your-mistral-api-key>` placeholder,
+`dummy-key-for-ci`, `test-dummy-key`; the real key stays in gitignored
+`.env`; `scratch_mistral_validation.json` is gitignored via `scratch_*`).
+
+**Files changed:** `src/huntloop/skills_matching_mistral.py` (new),
+`scripts/validate_mistral_skills_match.py` (new),
+`tests/test_skills_matching_mistral.py` (new),
+`src/huntloop/skills_matching_router.py`,
+`tests/test_skills_matching_router.py`, `.env.example`,
+`.github/workflows/ci.yml`, `SESSIONS.md`, `CLAUDE.md`,
+`huntloop-architecture-decisions.md`.

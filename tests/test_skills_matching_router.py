@@ -142,6 +142,46 @@ def test_transient_none_is_passed_through_not_failed_over(fakes):
     assert state["batch_failover"] == {} and state["exhausted"] == set()
 
 
+def test_three_provider_chain_fails_over_groq_then_gemini_then_mistral(monkeypatch):
+    groq = FakeBackend("groq")
+    gemini = FakeBackend("gemini", max_batch_tokens=16000, target_tpm=200000, max_rpm=14)
+    mistral = FakeBackend("mistral", max_batch_tokens=30000, target_tpm=400000, max_rpm=55)
+    monkeypatch.setattr(router, "PROVIDER_CHAIN", ["groq", "gemini", "mistral"])
+    monkeypatch.setitem(router._LOADED, "groq", groq)
+    monkeypatch.setitem(router._LOADED, "gemini", gemini)
+    monkeypatch.setitem(router._LOADED, "mistral", mistral)
+
+    groq.program("quota")
+    gemini.program("quota")
+    state = router.make_run_state()
+
+    out = router.match_skills_batch("r", ["a", "b"], state)
+    assert [o["matched_skills"] for o in out] == [["fake-mistral"], ["fake-mistral"]]
+    assert state["exhausted"] == {"groq", "gemini"}
+    assert router.active_provider(state) == "mistral"
+    assert router.batch_limits(state) == (5, 30000, 400000, 55)
+
+    # gemini also gone now -> straight to mistral, no wasted calls
+    out2 = router.match_skills_batch("r", ["c"], state)
+    assert out2[0]["matched_skills"] == ["fake-mistral"]
+    assert groq.calls == [2] and gemini.calls == [2]
+
+    mistral.program("quota")
+    with pytest.raises(router.AllProvidersExhausted):
+        router.match_skills_batch("r", ["d"], state)
+
+
+def test_mistral_is_a_known_provider(monkeypatch):
+    import importlib
+    monkeypatch.setenv("SKILLS_MATCHING_PROVIDERS", "groq,gemini,mistral")
+    mod = importlib.reload(router)
+    try:
+        assert mod.PROVIDER_CHAIN == ["groq", "gemini", "mistral"]
+    finally:
+        monkeypatch.setenv("SKILLS_MATCHING_PROVIDERS", "groq,gemini")
+        importlib.reload(router)
+
+
 def test_provider_chain_parsing(monkeypatch):
     import importlib
     monkeypatch.setenv("SKILLS_MATCHING_PROVIDERS", "groq")
