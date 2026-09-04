@@ -641,9 +641,10 @@ conventions" and SESSIONS.md for the real current state).
   **A THIRD provider, Mistral (`huntloop.skills_matching_mistral`,
   `ministral-8b-latest`), was built + wired 2026-09-03 (see SESSIONS.md
   + `huntloop-architecture-decisions.md`) but is WIRED-BUT-NOT-RECOMMENDED
-  and NOT in the default chain.** `SKILLS_MATCHING_PROVIDERS` still
-  defaults to `groq,gemini`; `mistral` is a known third stage only if
-  explicitly appended (`groq,gemini,mistral`, needs `MISTRAL_API_KEY`).
+  and NOT in the default chain (unchanged by the 2026-09-04 groq_120b
+  promotion below).** `mistral` is a known further stage only if
+  explicitly appended (`groq_120b,groq,gemini,mistral`, needs
+  `MISTRAL_API_KEY`).
   Its 11-job side-by-side validation against the Groq baseline came back
   POOR: full-résumé-dumps into `matched_skills` on 7/11 jobs (rejected by
   the `MAX_PLAUSIBLE_MATCHED_SKILLS = 20` backstop → left NULL), grounding
@@ -669,13 +670,13 @@ conventions" and SESSIONS.md for the real current state).
   full-resume dumps (max 8 matched_skills, well under the 20 backstop),
   fixed the Palantir "Deployment Strategist" dump that every other
   backend (20b itself historically, Gemini, Mistral) has hit, correctly
-  handled the Duolingo soft-match case, tight grounding/format. Left
-  OPT-IN in `SKILLS_MATCHING_PROVIDERS` (still defaults to `groq,gemini`)
-  despite the clean result - promoting a stage into the daily production
-  rotation was treated as a deliberate user decision, not automatic; the
-  recommendation on file is to promote it. `scripts/
-  validate_groq_120b_skills_match.py` is its harness (gitignored
-  `scratch_groq_120b_validation.json`). Needs no new env var.
+  handled the Duolingo soft-match case, tight grounding/format.
+  **PROMOTED to the default rotation 2026-09-04, ahead of `groq`** -
+  `SKILLS_MATCHING_PROVIDERS` now defaults to `"groq_120b,groq,gemini"`
+  (was `groq,gemini`): two independent, same-account Groq buckets tried
+  bigger-model-first, Gemini still the fallback behind both. Needs no new
+  env var (same `GROQ_API_KEY`). `scripts/validate_groq_120b_skills_match.py`
+  is its harness (gitignored `scratch_groq_120b_validation.json`).
   **First unbounded (`--limit`-less) production run, 2026-08-30 (see
   SESSIONS.md) — measurement only, no code changed.** Backlog 12,682 →
   **11,057**; `job_postings` with a stored result 736 → 2,363 (733 of

@@ -230,3 +230,18 @@ def test_unknown_provider_rejected(monkeypatch):
         importlib.reload(router)
     monkeypatch.setenv("SKILLS_MATCHING_PROVIDERS", "groq,gemini")
     importlib.reload(router)
+
+
+def test_default_chain_tries_groq_120b_before_groq_before_gemini(monkeypatch):
+    # No SKILLS_MATCHING_PROVIDERS set at all - the real production
+    # default, as of 2026-09-04 (see SESSIONS.md): groq_120b promoted
+    # ahead of groq after a clean validation, both same-account Groq
+    # stages with independent quota, tried bigger-model-first.
+    import importlib
+    monkeypatch.delenv("SKILLS_MATCHING_PROVIDERS", raising=False)
+    mod = importlib.reload(router)
+    try:
+        assert mod.PROVIDER_CHAIN == ["groq_120b", "groq", "gemini"]
+    finally:
+        monkeypatch.setenv("SKILLS_MATCHING_PROVIDERS", "groq,gemini")
+        importlib.reload(router)

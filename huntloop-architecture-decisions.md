@@ -494,10 +494,12 @@ and gpt-oss-120b confirmed live at 1,000 requests/day / 8,000
 tokens/minute, independent buckets) and the 11-job validation result
 (clean - 0/11 dumps, fixed the standing Palantir "Deployment Strategist"
 failure case every other backend has hit). Wired as `"groq_120b"` in the
-router, left opt-in in `SKILLS_MATCHING_PROVIDERS` pending an explicit
-decision to promote it to the default rotation, despite the clean
-result - see CLAUDE.md for the current default-chain status, which can
-change independently of this document.**
+router; **promoted into the default rotation the same day, ahead of the
+original `"groq"` stage** (`SKILLS_MATCHING_PROVIDERS` default is now
+`"groq_120b,groq,gemini"`) - two independent same-account Groq buckets
+tried bigger-model-first, Gemini still the fallback behind both. See
+CLAUDE.md for the current default-chain status, which can change
+independently of this document.**
 
 ---
 

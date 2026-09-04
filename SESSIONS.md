@@ -9184,3 +9184,53 @@ scope.
 `src/huntloop/skills_matching_router.py`,
 `tests/test_skills_matching_router.py`, `SESSIONS.md`, `CLAUDE.md`,
 `huntloop-architecture-decisions.md`.
+
+---
+
+## 2026-09-04 — Promote gpt-oss-120b into the default skills-matching rotation
+
+**Did:** After confirming PR #3 (Mistral) had merged into `origin/master`
+via a real, ordinary merge commit (`ae9d3b6`, two parents - `5b448ba` the
+prior master tip and `8c0bbeb` the PR branch tip; `8c0bbeb`/`41d9e2f`/
+`f3f7036` all present as exact SHAs in `origin/master`'s history, not
+squashed/rewritten), rebased the local `add-groq-120b-capacity-stage`
+branch onto `origin/master` - clean, no conflicts, one commit replayed.
+Then changed `huntloop.skills_matching_router`'s default
+`SKILLS_MATCHING_PROVIDERS` from `"groq,gemini"` to
+`"groq_120b,groq,gemini"` - `groq_120b` (openai/gpt-oss-120b, see the
+prior 2026-09-04 entry) is now tried FIRST, ahead of the original `groq`
+(openai/gpt-oss-20b) stage, with Gemini still the fallback behind both.
+Two independent, same-account Groq buckets, tried bigger-model-first.
+Nothing else about the router's failover logic changed. `.env.example`,
+CLAUDE.md, and `huntloop-architecture-decisions.md` updated to match -
+the groq_120b stage is no longer described as "opt-in pending a
+decision," it's the new default.
+
+**Verified:** `test_default_chain_tries_groq_120b_before_groq_before_gemini`
+(new) asserts the real module default - `PROVIDER_CHAIN == ["groq_120b",
+"groq", "gemini"]` - with no `SKILLS_MATCHING_PROVIDERS` env var set at
+all (the real production/CI condition; nothing in `tests/conftest.py`,
+`.env`, or `ci.yml` overrides this var). Full suite:
+`.venv/bin/python -m pytest -q` → 294 → **295 passed** (the one new
+test; every other test in the file already pinned its own explicit
+`PROVIDER_CHAIN` via monkeypatch, so none of them depended on the old
+default and none needed changing). The same 3 `tests/test_backfill_lock.py`
+failures from the prior entry were still present - re-checked directly
+(not assumed): the real production backfill process (PID 10949, same
+one) was still running via `ps aux` at the time, still holding the real
+Postgres advisory lock. Confirmed unrelated to this diff the same way as
+before - not re-explained here, see the prior entry.
+
+**Git/PR:** commit `8c6d221` "Add a same-account Groq capacity stage for
+skills matching" (the 2026-09-04 groq_120b build, replayed cleanly onto
+merged master) plus this default-rotation-order commit, pushed as
+`add-groq-120b-capacity-stage`, opened as a new PR into `master`
+(`#4`, not merged) - its diff contains only these two commits, not a
+duplicate of the already-merged Mistral changes (`git log
+origin/master..HEAD` confirmed exactly 2 commits). Real CI run result
+and PR URL are in the PR itself / the session's own reporting, not
+duplicated here.
+
+**Files changed (this step only):** `src/huntloop/skills_matching_router.py`,
+`tests/test_skills_matching_router.py`, `.env.example`, `CLAUDE.md`,
+`SESSIONS.md`, `huntloop-architecture-decisions.md`.

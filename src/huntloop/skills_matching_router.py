@@ -1,6 +1,6 @@
 """
-Provider-routing wrapper for skills matching: Groq primary, Gemini
-fallback, optional Mistral third stage.
+Provider-routing wrapper for skills matching: Groq gpt-oss-120b primary,
+Groq gpt-oss-20b second, Gemini fallback, optional Mistral fourth stage.
 
 WIRED into scripts/backfill_skills_matching.py as of 2026-08-29 (Step K,
 see SESSIONS.md + huntloop-architecture-decisions.md). It became
@@ -41,22 +41,30 @@ Failover rules:
     fallback's finite daily quota for nothing.
 
 Config: SKILLS_MATCHING_PROVIDERS env, comma-separated, default
-"groq,gemini". Setting it to "groq" reproduces the exact pre-routing
-behavior and needs no GEMINI_API_KEY (the gemini backend is imported
-lazily, only if it's in the chain). "mistral" is a known third stage
-(huntloop.skills_matching_mistral, built 2026-09-03) that can be appended
-("groq,gemini,mistral"); it is NOT in the default chain and needs
-MISTRAL_API_KEY only when actually listed. Its 11-job validation came
-back POOR (ministral-8b full-resume-dumps on 7/11 - see SESSIONS.md
-2026-09-03), so it is wired-but-not-recommended: a last-resort capacity
-bucket if Groq+Gemini are ever both walled, not a quality peer.
+"groq_120b,groq,gemini" (as of 2026-09-04 - see SESSIONS.md for why
+groq_120b was promoted ahead of groq in the default chain). Setting it
+to "groq" alone reproduces the original pre-routing behavior and needs
+no GEMINI_API_KEY (the gemini backend is imported lazily, only if it's
+in the chain).
+
 "groq_120b" (huntloop.skills_matching_groq_120b, openai/gpt-oss-120b,
 built 2026-09-04) is a same-account, same-key Groq capacity stage -
-confirmed live to hold its OWN independent rate-limit bucket from the
-primary openai/gpt-oss-20b backend (see SESSIONS.md 2026-09-04), needing
-no separate API key. Its 11-job validation result and default-chain
-status are documented in SESSIONS.md/CLAUDE.md 2026-09-04 - check there
-before assuming it is or isn't in the default rotation.
+confirmed live to hold its OWN independent rate-limit bucket from
+"groq" (openai/gpt-oss-20b), needing no separate API key. Its 11-job
+validation came back clean (0/11 full-resume dumps, fixed the standing
+Palantir "Deployment Strategist" failure case every other backend has
+hit - see SESSIONS.md 2026-09-04), so it is now the DEFAULT primary
+stage, tried before the original "groq" stage - two independent buckets
+on the same Groq account, tried in size order (bigger model first).
+
+"mistral" is a known further stage (huntloop.skills_matching_mistral,
+built 2026-09-03) that can be appended
+("groq_120b,groq,gemini,mistral"); it is NOT in the default chain and
+needs MISTRAL_API_KEY only when actually listed. Its 11-job validation
+came back POOR (ministral-8b full-resume-dumps on 7/11 - see
+SESSIONS.md 2026-09-03), so it is wired-but-not-recommended: a
+last-resort capacity bucket if every other stage is ever walled, not a
+quality peer.
 """
 import logging
 import os
@@ -68,7 +76,7 @@ logger = logging.getLogger(__name__)
 
 PROVIDER_CHAIN = [
     p.strip().lower()
-    for p in os.getenv("SKILLS_MATCHING_PROVIDERS", "groq,gemini").split(",")
+    for p in os.getenv("SKILLS_MATCHING_PROVIDERS", "groq_120b,groq,gemini").split(",")
     if p.strip()
 ]
 if not PROVIDER_CHAIN:
