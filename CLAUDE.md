@@ -671,6 +671,31 @@ conventions" and SESSIONS.md for the real current state).
   regressed). Residual misses are on roles far from the résumé (TPM →
   "JIRA", HW verification → "SystemVerilog"). See SESSIONS.md 2026-08-30
   "Two backfill fixes".
+- **REDESIGNED 2026-09-03 — `is_relevant` is now a title-only
+  blue-collar denylist, NOT the hybrid keyword+embedding filter described
+  in the rest of this bullet (see SESSIONS.md "Redesign `is_relevant` as
+  a role-agnostic blue-collar denylist" + `huntloop-architecture-decisions.md`).**
+  `is_relevant = NOT title_matches_denylist(title)` — 191-term
+  manual/blue-collar denylist (driving, warehouse, production line,
+  trades, janitorial, food service, retail floor, …), word-boundary,
+  title only, no embedding/description. `sales`/`marketing`/`HR`/`legal`/
+  `tax`/`accounting`/`partnerships`/`procurement` and the other
+  previously hard-excluded business functions are **no longer blocked**;
+  clinical/healthcare was never on the denylist and stays included. Bare
+  `warehouse` is carved out when the title contains "data warehous".
+  `classify_relevance(title, embedding_similarity=None)` keeps its old
+  2-arg shape but ignores arg 2; `REFERENCE_TEXT`/`cosine_similarity`/
+  `HARD_EXCLUDE_KEYWORDS`/`SOFT_EXCLUDE_KEYWORDS`/`EMBEDDING_SIMILARITY_THRESHOLD`/
+  `SOFT_EXCLUDE_RESCUE_THRESHOLD` are retained as inert constants for
+  back-compat imports only. Full recompute (`scripts/recompute_relevance.py`,
+  new, title-only, runs in plain `.venv`) over all 94,060 rows:
+  is_relevant True **35,897 → 90,869**, False **58,163 → 3,191** (171
+  True→False, all blue-collar; 55,143 False→True). `job_postings.embedding`
+  / `match_score` / the embedding pipeline were NOT touched. Known
+  follow-up: the torch-less `pipelines._classify_and_embed` path still
+  leaves `is_relevant` NULL early (daily scrape runs in Docker w/ torch;
+  recompute/backfill scripts mop up NULLs). The rest of this bullet
+  describes the superseded hybrid design and is kept for history. —
 - **A hybrid keyword + embedding-similarity relevance pre-filter exists,
   added 2026-08-24 (see SESSIONS.md) — `job_postings.is_relevant`
   (nullable `Boolean`, migration `0900f3514ad2`), meant to flag whether

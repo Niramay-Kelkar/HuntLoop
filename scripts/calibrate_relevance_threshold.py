@@ -1,4 +1,11 @@
 """
+SUPERSEDED (2026-09-03): the embedding-similarity relevance gate this
+script calibrated was replaced by a title-only blue-collar denylist -
+EMBEDDING_SIMILARITY_THRESHOLD is no longer used for the is_relevant
+decision (see huntloop-architecture-decisions.md's relevance-gate
+redesign entry / SESSIONS.md). Kept as a historical artifact of the old
+approach; not updated to keep working.
+
 One-off calibration script: measures real cosine similarities between
 huntloop.relevance_filter.REFERENCE_TEXT and a handful of real
 job_postings rows already in the dataset with a known right answer, to

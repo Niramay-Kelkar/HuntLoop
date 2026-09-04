@@ -402,3 +402,97 @@ Whichever is picked: run the existing 11-job side-by-side harness
 soft-match + Palantir Deployment Strategist) against the Groq baseline
 before wiring, and keep `MAX_PLAUSIBLE_MATCHED_SKILLS = 20` as the
 model-agnostic backstop.
+
+---
+
+## `is_relevant` relevance gate: title-only blue-collar denylist (redesigned 2026-09-03, see SESSIONS.md)
+
+### Context
+
+The relevance gate (`src/huntloop/relevance_filter.py`,
+`job_postings.is_relevant`) decides whether a scraped posting is worth
+spending resume-match and skills-analysis effort on. The original design
+(2026-08-24) was a hybrid: `is_relevant = (keyword-include OR category
+embedding similarity >= 0.29) AND NOT keyword-exclude`, with
+`HARD_EXCLUDE_KEYWORDS` (~50 terms) and a `SOFT_EXCLUDE_KEYWORDS` rescue
+list layered on top (2026-08-30).
+
+Problems that accumulated:
+
+1. **Whole business functions were structurally blocked.** `sales`,
+   `marketing`, `recruiter`, `legal`, `tax`, `accounting`,
+   `partnerships`, `procurement`, `communications`, `chief of staff` and
+   more were hard-excludes. But an "Account Executive", "HR Business
+   Partner", or "Tax Manager" at a visa-sponsoring company is a
+   legitimate posting a user might want — the gate is supposed to remove
+   *manual* work, not *non-engineering* work.
+2. **The embedding half caused real false negatives.** The
+   `manufacturing` / `warehouse` / `retail` hard-excludes wrongly killed
+   `Sr. Forward Deployed Engineer (FDE) - Retail` and `Senior Solutions
+   Architect (EDW Enterprise Data Warehouse Migrations)`.
+3. **It needed torch at insert time.** The embedding-similarity input
+   meant the pipeline's relevance classification degraded to NULL in any
+   torch-less environment.
+
+### Decision
+
+`is_relevant = NOT title_matches_denylist(title)` — a pure, title-only,
+word-boundary denylist of manual / blue-collar / front-line hourly work.
+No description text (never validated). No embedding, similarity
+threshold, or reference text in the decision.
+
+`DENYLIST_KEYWORDS` is 191 terms: a 190-term hand-validated list
+(driving/delivery, warehouse/fulfillment, production/assembly-line,
+skilled trades, automotive service-bay, janitorial/housekeeping, food
+service/kitchen, retail floor, other manual front-line) plus
+`hoist operator` (the `forklift operator` phrase missed "Forklift/Hoist
+Operator"). Matching: space-containing terms are substring matches; other
+terms use `(?<![a-z0-9])term(?![a-z])` — word boundary in front,
+digit-tolerant behind ("picker/packer" matches "Picker/Packer2"), letter
+still blocks ("mason" ≠ "masonry").
+
+One carve-out: the bare `warehouse` term is skipped when the title
+contains "data warehous" (so "Staff Data Warehouse Engineer" and the EDW
+architect role pass), while `warehouse operator` / `warehouse selector`
+still apply.
+
+Clinical/healthcare roles were never denylisted and remain relevant.
+
+### Consequences
+
+- **Recompute (all 94,060 rows, since the logic itself changed):**
+  is_relevant True **35,897 → 90,869**; False **58,163 → 3,191**. 55,314
+  rows changed — 171 True→False (all blue-collar mislabeled under the old
+  logic), 55,143 False→True (the unblocked business functions + the
+  embedding-threshold misses).
+- Previously-excluded categories now pass (verified by query): Account
+  Executive, HR Business Partner, Tax Manager, Marketing Manager,
+  Recruiter, Sales Engineer, Customer Success Manager, Solutions
+  Consultant.
+- Old false negatives fixed (verified): FDE - Retail (7/7 True), EDW Data
+  Warehouse Migrations architect (5/5 True).
+- Denylisted work stays out (verified): Store Driver, Warehouse
+  Associate, Custodian, Line Cook, Forklift/Hoist Operator.
+- Accepted residual imprecision: ~6 "Warehouse Automation Engineer" /
+  "Warehouse & Logistics Engineer" titles are still denied by bare
+  `warehouse` — MVP noise, same class as the old filter's accepted "GRC
+  Program Manager" / "Product Designer".
+
+### What was deliberately NOT touched
+
+- `job_postings.embedding` computation and the query-time `match_score` —
+  a completely separate mechanism.
+- `huntloop.pipelines` — still imports `REFERENCE_TEXT` /
+  `cosine_similarity` (now inert for relevance) and still passes a
+  computed similarity to `classify_relevance` (now ignored). In a
+  torch-less pipeline run `is_relevant` is still left NULL early; the
+  daily scrape runs in Docker with torch, and
+  `scripts/recompute_relevance.py` / `backfill_relevance.py` mop up
+  NULLs. Decoupling the two in the pipeline is a separate follow-up.
+- The API/frontend default sort and filter behaviour — a separate
+  follow-up.
+- `HARD_EXCLUDE_KEYWORDS` / `SOFT_EXCLUDE_KEYWORDS` / the two thresholds —
+  retained as inert constants only because
+  `scripts/reclassify_soft_excludes.py` /
+  `scripts/calibrate_soft_exclude_threshold.py` import them.
+  `scripts/calibrate_relevance_threshold.py` carries a "superseded" note.
