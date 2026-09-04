@@ -205,8 +205,40 @@ conventions" and SESSIONS.md for the real current state).
   container start, no manual import). Verified end-to-end against a real
   `python main.py` run: Grafana's own datasource proxy returned the same
   metric values as a direct Prometheus query, matching the run's actual
-  DB row-count delta. Don't add more dashboards/panels unprompted unless
-  there's a real new need.
+  DB row-count delta.
+  **Real start/access instructions (re-confirmed 2026-09-04):** the stack
+  is NOT started by a plain `docker-compose up` — start it explicitly with
+  `docker compose --profile observability up -d pushgateway prometheus
+  grafana` (the `db`/`app`/`api` services are unaffected, no profile
+  flag needed for those). Real host ports as defined in
+  `docker-compose.yml`: Pushgateway `9091`, Prometheus `9090`, Grafana
+  `3000`. **Grafana's `3000` collides with the Next.js frontend's dev
+  server port** — `docker-compose.yml` was not changed to avoid this
+  (moving Grafana's port would be a real behavior change nobody asked
+  for), so don't run `npm run dev` and the observability stack at the
+  same time without remapping one of them (e.g. `docker compose
+  --profile observability up -d` then temporarily override Grafana's
+  published port, or run the frontend on a different port via `npm run
+  dev -- -p 3001`) — confirmed live: with the stack up, `lsof -iTCP:3000
+  -sTCP:LISTEN` shows Docker/Grafana holding the port. Login is
+  `admin` / `admin` (`GF_SECURITY_ADMIN_PASSWORD` defaults to `admin` per
+  `docker-compose.yml`; `.env.example`'s commented-out
+  `GRAFANA_ADMIN_PASSWORD` overrides it — unset in this repo's real
+  `.env`, so the default applies). **Whether the daily launchd cron job's
+  metrics are visible depends on Docker being up AT THE TIME the cron job
+  fires, not after** — both `push_run_metrics()` (scraping) and
+  `push_backfill_metrics()` (skills-matching, added below) push directly
+  to the Pushgateway container over `localhost:9091` mid-run; if that
+  container isn't running when the push happens, the push fails, is
+  caught, and logs one `WARNING` (`Failed to push ... metrics ...`) —
+  the scrape/backfill's real DB work is unaffected, but that run's
+  metrics are gone for good, not queued or retried. Starting the stack
+  later does NOT backfill historical runs' metrics — only runs that
+  happen to fire while both `pushgateway` and `prometheus` (which merely
+  needs to be up to have scraped it before the next `push_to_gateway`
+  overwrites it, since each push replaces the prior value under the same
+  grouping key) are already up will show data. Don't add more
+  dashboards/panels unprompted unless there's a real new need.
 - **`main.py`'s orchestrator pushes real per-run metrics to the
   Pushgateway, added 2026-08-22 (see SESSIONS.md).**
   `src/huntloop/metrics.py` holds a module-level `CollectorRegistry` (not
@@ -230,6 +262,69 @@ conventions" and SESSIONS.md for the real current state).
   metric-for-metric against DB row-count deltas; and a real run with the
   stack down, confirming the scrape/insert work completes normally and
   only a warning is logged, not a crash.
+- **`scripts/backfill_skills_matching.py` also pushes real per-run
+  metrics to the Pushgateway, added 2026-09-04 (see SESSIONS.md) — a
+  SEPARATE metrics module/registry/Pushgateway job from the scraping
+  metrics above, not an extension of `src/huntloop/metrics.py`.**
+  `src/huntloop/skills_matching_metrics.py` holds its own module-level
+  `CollectorRegistry` with `Counter`s
+  `huntloop_skills_matching_jobs_processed_total` /
+  `huntloop_skills_matching_jobs_succeeded_total` /
+  `huntloop_skills_matching_jobs_failed_total` (all labeled `provider` —
+  `groq_120b`/`groq`/`gemini`/`mistral`/`none`, where `none` means every
+  available provider structural-failed that specific batch — see
+  `skills_matching_router.match_skills_batch`'s fall-through branch, not
+  a real provider) and a `Gauge`
+  `huntloop_skills_matching_backlog_remaining` (the real
+  `matched_skills IS NULL AND is_relevant IS TRUE` count, measured via
+  the existing `_log_backlog()` helper at the end of the run — same
+  query the "skills-matching backlog: N relevant rows..." log line
+  already used). Pushed to the Pushgateway under job name
+  `huntloop_skills_matching_backfill` (deliberately distinct from
+  `huntloop_orchestrator`, so a backfill push can never collide with /
+  overwrite the scraper's own grouping key) via `push_backfill_metrics()`
+  — same never-raises defensive contract as `push_run_metrics()`.
+  Provider attribution for each batch is done by diffing
+  `state["batch_giveups"]` before/after the router call, not by trusting
+  `state["last_provider"]` directly — `match_skills_batch`'s giveup
+  branch (every provider structural-failed the batch) returns
+  `[None]*n` WITHOUT updating `last_provider`, so a naive read would
+  misattribute that failure to whichever provider handled the *previous*
+  batch. A second `--limit`-bounded run's or a lock-refused concurrent
+  run's early return pushes nothing (same as before this change — no
+  run happened, so there's nothing to report). **End-to-end dashboard
+  verification (Grafana's datasource proxy vs. a direct Prometheus
+  query against a real run) is DEFERRED — see the "HuntLoop
+  Skills-Matching Backfill" dashboard bullet below and SESSIONS.md's
+  2026-09-04 entry for why.**
+- **A second provisioned Grafana dashboard, "HuntLoop Skills-Matching
+  Backfill" (`observability/grafana/provisioning/dashboards/
+  huntloop-skills-matching.json`, uid `huntloop-skills-matching`, added
+  2026-09-04), covers the metrics above** — same file-provisioning
+  pattern as `huntloop-scraping.json` (auto-loaded by the same
+  `dashboards.yml` provider, no manual import). 4 panels: backlog
+  remaining over time, jobs processed per run by provider, a
+  succeeded-vs-failed stat panel, and success rate by provider. **NOT
+  YET verified end-to-end against a real run** — the daily production
+  backfill (started 2026-09-04 06:30 via launchd/cron, still running as
+  of this entry, PID 10949) is running the OLD code (predates this
+  metrics wiring) and holds the single-instance Postgres advisory lock
+  (key 1,751,937,901) for its entire duration, so no second
+  `backfill_skills_matching.py` invocation — bounded or not — can run
+  concurrently to exercise the new code today. Deliberately not forced
+  by killing that process (see SESSIONS.md — it's mid-run against a real
+  84,757+-row backlog, actively spending real Groq/Gemini quota; killing
+  it to unblock a verification step would waste that spend and lose
+  in-flight progress for no real benefit, since tomorrow's scheduled run
+  verifies the same code path for free). **Verify this specific item
+  once tomorrow's ~3am launchd-triggered run completes**: confirm the
+  new counters/gauge appear in a direct Prometheus query
+  (`http://localhost:9090`, e.g. `huntloop_skills_matching_backlog_remaining`)
+  and that Grafana's dashboard (`http://localhost:3000/d/huntloop-skills-matching`)
+  renders the same values via its datasource proxy — same method the
+  original scraping dashboard was verified with. Until then, treat this
+  dashboard as "wired but not yet confirmed against real data," not as
+  closed out the way the scraping dashboard above is.
 - One-off scripts live in `scripts/` (not part of the ongoing app pipeline
   or CI) — e.g. `scripts/ingest_lca_disclosures.py`, run manually. Uses
   `pandas`/`openpyxl` (in `requirements.txt`) to read DOL's `.xlsx`

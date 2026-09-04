@@ -9234,3 +9234,152 @@ duplicated here.
 **Files changed (this step only):** `src/huntloop/skills_matching_router.py`,
 `tests/test_skills_matching_router.py`, `.env.example`, `CLAUDE.md`,
 `SESSIONS.md`, `huntloop-architecture-decisions.md`.
+
+---
+
+## 2026-09-04 — Skills-matching backfill metrics + a second Grafana dashboard
+
+**Did (four parts, per the task):**
+
+**1. Reported real observability-stack access instructions** (re-confirmed
+against `docker-compose.yml`, not assumed from memory): start with
+`docker compose --profile observability up -d pushgateway prometheus
+grafana` (a plain `docker-compose up` never starts this stack). Real host
+ports: Pushgateway `9091`, Prometheus `9090`, Grafana `3000`. **Grafana's
+`3000` collides with the Next.js frontend dev server's port** — confirmed
+live via `lsof -iTCP:3000 -sTCP:LISTEN`, which showed Docker/Grafana
+holding it once the stack was up; `docker-compose.yml` was not changed to
+avoid this (see the dashboard section below for why). Login: `admin` /
+`admin` (`GF_SECURITY_ADMIN_PASSWORD` defaults to `admin`;
+`GRAFANA_ADMIN_PASSWORD` is commented out/unset in this repo's real
+`.env`). **Whether the daily launchd cron job's metrics are visible
+depends on Docker being up at the moment the push happens** — both
+`push_run_metrics()` and the new `push_backfill_metrics()` push directly
+to `localhost:9091` mid-run and log one `WARNING` (never crash) if that
+fails; starting the stack later does not retroactively backfill a missed
+run's metrics.
+
+**2. Reported real current skills-matching backfill numbers** (via direct
+`psql` against the real local Postgres, not the app's own code path, and
+`logs/cron.log`):
+- Yesterday (2026-09-03): backlog before the scheduled run **29,840**;
+  after, **27,836** — the run processed 2,072 jobs (2,011 succeeded, 61
+  failed) in 5,865.8s (97.8 min) before `AllProvidersExhausted` stopped it
+  (`groq`: 16 jobs/13 batches; `gemini`: 1,995 jobs/483 batches; both hit
+  their daily quota during the run).
+- Today (2026-09-04): the scheduled run started 06:30 and found backlog
+  **84,907** — a large jump from yesterday's 27,836 close, because stage
+  1 (the scraper) ran a fresh, larger crawl overnight that added far more
+  relevant postings than usual; not investigated further here, out of
+  this task's scope. **As of this entry the run is STILL IN PROGRESS**
+  (PID 10949, started 06:30, ~4h11m elapsed) — live counts pulled
+  directly from `logs/cron.log` mid-run: 1,442 jobs processed so far (170
+  succeeded, 1,272 failed — a real, unusually high failure rate today,
+  visibly driven by repeated Gemini `HTTP 503 "currently experiencing
+  high demand"` responses in the log, not a code regression), and a real
+  `SELECT count(*)` against `job_postings` confirms the live backlog has
+  dropped to **84,737** in that same window. Clearance-rate math from
+  yesterday's completed run (the last full data point): ~2,072 jobs/98
+  min while providers had quota, i.e. quota-bound rather than time-bound
+  — consistent with the ~1,000–1,300 successful-jobs/day estimate already
+  on record in CLAUDE.md, not a new regime.
+
+**3. Added skills-matching backfill metrics**, following
+`src/huntloop/metrics.py`'s exact pattern but in a **separate** module,
+`src/huntloop/skills_matching_metrics.py` (own `CollectorRegistry`, own
+Pushgateway job name `huntloop_skills_matching_backfill` — deliberately
+never touches `huntloop.metrics` or the scraping metrics/job name):
+`Counter`s `huntloop_skills_matching_jobs_processed_total` /
+`_jobs_succeeded_total` / `_jobs_failed_total` (all labeled `provider` —
+`groq_120b`/`groq`/`gemini`/`mistral`/`none`) and a `Gauge`
+`huntloop_skills_matching_backlog_remaining` (the real end-of-run
+backlog, from the existing `_log_backlog()` query).
+`scripts/backfill_skills_matching.py` wires these in: each batch's
+outcome is attributed to a provider by diffing
+`state["batch_giveups"]` before/after the router call, NOT by trusting
+`state["last_provider"]` directly — a giveup (every available provider
+structural-failed the batch) returns `[None]*n` without updating
+`last_provider` in `skills_matching_router.match_skills_batch`, so a
+naive read would misattribute that failure to whichever provider handled
+the *previous* batch; a giveup is labeled `"none"` instead. Pushed once
+via `push_backfill_metrics()` at the very end of `_run_backfill()`, same
+never-raises defensive contract as the scraper's `push_run_metrics()`. A
+run that exits early (lock refused, no active resume) pushes nothing —
+same "nothing happened" behavior as before this change.
+
+**4. Added a second provisioned Grafana dashboard**,
+`observability/grafana/provisioning/dashboards/huntloop-skills-matching.json`
+("HuntLoop Skills-Matching Backfill", uid `huntloop-skills-matching`) —
+same file-provisioning pattern as `huntloop-scraping.json`, auto-loaded
+by the existing `dashboards.yml` provider, no Prometheus config change
+needed (it already scrapes the whole Pushgateway). 4 panels: backlog
+remaining over time, jobs processed per run by provider, a
+succeeded-vs-failed stat panel, and success rate by provider.
+
+**End-to-end verification of this dashboard is EXPLICITLY DEFERRED, per
+direct instruction, not an oversight:** the daily production backfill
+(PID 10949, started 06:30 today) was already running the OLD code (it
+started hours before this change existed) and holds the single-instance
+Postgres advisory lock (key 1,751,937,901) for its entire run, so no
+second `backfill_skills_matching.py` invocation — bounded `--limit` or
+not — could exercise the new code today without either waiting an
+unknown number of additional hours or killing that live process mid-run
+(it's actively spending real Groq/Gemini quota against a real 84K-row
+backlog). Per direct instruction, **the running process was not touched
+in any way** — confirmed via `ps aux` and a live `pg_stat_activity` check
+both before and after this session's work that PID 10949 and its
+lock-holding connection were untouched throughout. **Verify this
+specifically once tomorrow's ~3am launchd-triggered run completes**:
+confirm `huntloop_skills_matching_backlog_remaining` and the
+`huntloop_skills_matching_jobs_*_total` counters appear in a direct
+Prometheus query (`http://localhost:9090`) and that Grafana's dashboard
+(`http://localhost:3000/d/huntloop-skills-matching`) renders the same
+values via its datasource proxy — the same method the original scraping
+dashboard was verified with (see CLAUDE.md's now-superseded "Verified
+end-to-end" language on the scraping dashboard bullet for that
+precedent). Until that check happens, this dashboard is wired but not
+yet confirmed against real data.
+
+**5. Tests added** (new, not modifying any existing scraping-metrics
+test — none existed before this either):
+`tests/test_skills_matching_metrics.py` (registry exposes the right
+metric names, counters are labeled by provider, the gauge reflects the
+last `set()`, `push_backfill_metrics()` never raises against an
+unreachable Pushgateway) and
+`tests/test_backfill_skills_matching_metrics_wiring.py` (a real
+`_run_backfill()` pass against the isolated pytest schema, with
+`router.batch_limits`/`router.match_skills_batch` monkeypatched to avoid
+any real Groq/Gemini/Mistral call — asserts processed/succeeded/failed
+land under the correct provider label, the backlog gauge matches the
+real post-run count, `push_backfill_metrics()` fires exactly once, and a
+giveup batch is labeled `"none"` rather than misattributed to a prior
+batch's provider). One real seeding bug was hit and fixed while writing
+these: constructing a `JobPosting` with `matched_skills=None` explicitly
+binds the JSON literal `null`, not a real SQL `NULL` — the exact
+documented `matched_skills`/`missing_skills` gotcha already on record in
+CLAUDE.md (from the resume-reset bug) — which made the seeded rows
+invisible to `_run_backfill`'s own `matched_skills IS NULL` filter;
+fixed by leaving the column untouched at construction instead of passing
+`None`.
+
+**Verified:** `.venv/bin/python -m pytest -q` → **301 passed, 3 failed**.
+The 3 failures are all in `tests/test_backfill_lock.py`
+(`test_second_holder_is_refused_then_lock_frees`,
+`test_advisory_lock_is_actually_released`,
+`test_main_exits_without_running_backfill_when_lock_held`) — the exact
+same pre-existing, unrelated failure mode already documented in the
+2026-09-04 groq_120b entries above: the real production backfill (PID
+10949) holds the real Postgres advisory lock for the whole suite run, so
+these tests (which each try to acquire that same lock themselves) can't
+get it. Re-confirmed via `ps aux` at the moment of the failing run that
+PID 10949 was still alive and via `pg_stat_activity` that its lock-holding
+connection was still open. `git diff`/`git status` confirm neither
+`scripts/backfill_skills_matching.py`'s advisory-lock code nor
+`tests/test_backfill_lock.py` were touched by this change — not a
+regression from this diff, same conclusion as before.
+
+**Files changed:** `src/huntloop/skills_matching_metrics.py` (new),
+`observability/grafana/provisioning/dashboards/huntloop-skills-matching.json`
+(new), `tests/test_skills_matching_metrics.py` (new),
+`tests/test_backfill_skills_matching_metrics_wiring.py` (new),
+`scripts/backfill_skills_matching.py`, `CLAUDE.md`, `SESSIONS.md`.
