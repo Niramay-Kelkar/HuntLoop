@@ -212,16 +212,15 @@ conventions" and SESSIONS.md for the real current state).
   grafana` (the `db`/`app`/`api` services are unaffected, no profile
   flag needed for those). Real host ports as defined in
   `docker-compose.yml`: Pushgateway `9091`, Prometheus `9090`, Grafana
-  `3000`. **Grafana's `3000` collides with the Next.js frontend's dev
-  server port** — `docker-compose.yml` was not changed to avoid this
-  (moving Grafana's port would be a real behavior change nobody asked
-  for), so don't run `npm run dev` and the observability stack at the
-  same time without remapping one of them (e.g. `docker compose
-  --profile observability up -d` then temporarily override Grafana's
-  published port, or run the frontend on a different port via `npm run
-  dev -- -p 3001`) — confirmed live: with the stack up, `lsof -iTCP:3000
-  -sTCP:LISTEN` shows Docker/Grafana holding the port. Login is
-  `admin` / `admin` (`GF_SECURITY_ADMIN_PASSWORD` defaults to `admin` per
+  `3001` (container-side still `3000`, Grafana's own default — only the
+  host-side mapping was moved). **Originally mapped `3000:3000`, which
+  collided with the Next.js frontend dev server's port — fixed
+  2026-09-04 by remapping Grafana to host port `3001` (`"3001:3000"` in
+  `docker-compose.yml`) instead of moving the frontend**, so `npm run
+  dev` and the observability stack can now run at the same time with no
+  conflict; confirmed live post-remap: `lsof -iTCP:3000 -sTCP:LISTEN`
+  found nothing (port free for the frontend) while Grafana answered on
+  `3001`. Login is `admin` / `admin` (`GF_SECURITY_ADMIN_PASSWORD` defaults to `admin` per
   `docker-compose.yml`; `.env.example`'s commented-out
   `GRAFANA_ADMIN_PASSWORD` overrides it — unset in this repo's real
   `.env`, so the default applies). **Whether the daily launchd cron job's
@@ -320,11 +319,103 @@ conventions" and SESSIONS.md for the real current state).
   once tomorrow's ~3am launchd-triggered run completes**: confirm the
   new counters/gauge appear in a direct Prometheus query
   (`http://localhost:9090`, e.g. `huntloop_skills_matching_backlog_remaining`)
-  and that Grafana's dashboard (`http://localhost:3000/d/huntloop-skills-matching`)
+  and that Grafana's dashboard (`http://localhost:3001/d/huntloop-skills-matching`
+  — `3001`, not `3000`, since Grafana's host port was remapped 2026-09-04,
+  see the port-conflict fix above)
   renders the same values via its datasource proxy — same method the
   original scraping dashboard was verified with. Until then, treat this
   dashboard as "wired but not yet confirmed against real data," not as
   closed out the way the scraping dashboard above is.
+- **Root cause found 2026-09-04 for "both dashboards show no data for
+  the last 7 days": the observability profile has never once been
+  running at 3am when the scheduled cron/launchd run actually pushes
+  metrics — confirmed with real evidence, not assumed.** Both stages'
+  push functions push over HTTP to `localhost:9091`; if nothing is
+  listening there, the push fails, is caught, and logs one `WARNING` —
+  by design (see the push-function bullets above), so this failure mode
+  is invisible unless someone specifically checks `logs/huntloop.log`.
+  **Evidence, not hypothesis:** a direct `curl` against Prometheus's own
+  API (`/api/v1/query_range`) over the last 7/14 days returned zero
+  `huntloop_*` samples; browsing the `prometheus_data` named volume
+  directly showed exactly ONE persisted TSDB block, covering
+  2026-08-22 18:15–20:00 UTC (11:15am–1:00pm PDT — the original
+  from-scratch manual verification session, not a 3am firing) with
+  nothing before or after it until this investigation restarted the
+  stack; `docker inspect`'s `Created`/`StartedAt` on the running
+  `prometheus`/`pushgateway`/`grafana` containers matched this session's
+  own start time, not any historical 3am timestamp. **The named
+  Docker volume itself is NOT the problem** — `prometheus_data` (created
+  2026-08-22, per `docker volume inspect`) genuinely retained that one
+  real block across 13 days of the containers not running at all, proof
+  the volume survives `docker compose down`/container recreation fine;
+  there was never a data-loss/persistence bug, only an "it was never
+  started when it needed to be" gap. **`scripts/run_orchestrator_cron.sh`
+  never referenced the `observability` profile at all** before this fix —
+  confirmed by reading the whole script, not inferred.
+  **Initial fix (2026-09-04, first pass)**: the wrapper started
+  `docker compose --profile observability up -d pushgateway` at the top
+  of every run, guarded so a failure to start it never aborted the real
+  work. This closed "the push fails outright" but left a real residual
+  gap: Pushgateway only holds the *latest* value per grouping key (not a
+  time series), so that value only became real history if Prometheus
+  *also* happened to be running and scraping before the next day's push
+  overwrote the same key — otherwise the day's numbers were silently
+  skipped, one day at a time.
+  **That gap is now closed, same day, second pass — see the
+  `restart: unless-stopped` bullet immediately below.** The cron-script
+  startup line is kept, but demoted to a defensive fallback (in case
+  Docker Desktop was fully quit) rather than the primary mechanism —
+  continuity now comes from the restart policy plus a one-time manual
+  start, not from the cron script re-starting things every run.
+- **`pushgateway`/`prometheus`/`grafana` all carry `restart:
+  unless-stopped` in `docker-compose.yml` (added 2026-09-04, second pass
+  on the entry above) — real, ongoing background services now, not
+  something started fresh around each cron run.** One-time setup:
+  `docker compose --profile observability up -d prometheus pushgateway
+  grafana` — after that they keep running in the background
+  indefinitely (surviving a terminal close, a container crash, or a
+  Docker Desktop restart) with nothing to re-run before each scheduled
+  cron firing. **Verified for real, not just written in the compose
+  file**: `docker inspect`'s `HostConfig.RestartPolicy.Name` reads
+  `unless-stopped` on all three actually-running containers after
+  recreating them with this config. **Also verified the restart
+  mechanism genuinely fires on a real crash** — an isolated throwaway
+  `alpine --restart unless-stopped` container whose process exited with
+  a failure code was auto-restarted by Docker repeatedly (`RestartCount`
+  climbing on its own with no intervention), proving the policy is live
+  in this Docker Desktop install, not just configured.
+  **One real, non-obvious finding from testing this**: `docker kill`
+  (or `docker stop`) on a container does **NOT** trigger `unless-stopped`
+  to restart it — confirmed directly (killed the real running
+  `pushgateway` container to simulate an unattended crash, and a
+  separate isolated test container; neither auto-restarted after 20-30s).
+  This is correct, documented Docker behavior, not a bug or a gap in this
+  setup: Docker treats any explicit Stop/Kill issued through its own API
+  (which is what both `docker kill` and `docker stop` use, regardless of
+  signal) as an intentional user action and deliberately will not
+  override it — `unless-stopped` means exactly what it says, restart
+  unless a human (or a script) explicitly stopped it. It's a real crash
+  (the container's own process dying unexpectedly, e.g. an OOM kill or
+  an internal bug) that the policy protects against, and that path was
+  independently confirmed to work (see the alpine crash-loop test
+  above). Practical consequence: a deliberate `docker stop pushgateway`/
+  `docker compose --profile observability down` stays down until
+  explicitly started again — expected, not something to "fix."
+  **What this does NOT cover, stated plainly, not left ambiguous**: if
+  the host machine itself reboots and Docker Desktop does not auto-start
+  on login, no containers restart either — `restart: unless-stopped`
+  only takes effect once the Docker daemon itself is running, it has no
+  power over whether the daemon starts in the first place. This is a
+  **real, still-open gap** for this specific machine: CLAUDE.md's Docker
+  section (`main.py`'s Docker-migration entry, 2026-08-24) already
+  documents that "Docker Desktop autostart-at-login" was separately
+  enabled on this machine (`AutoStart` in `settings-store.json`) and
+  verified surviving a `docker desktop restart`, but a genuine full OS
+  reboot was explicitly never tested there either — so if this machine
+  is ever fully rebooted (not just Docker Desktop restarted), whether
+  Prometheus/Pushgateway come back on their own rests entirely on that
+  separate, still-unverified autostart setting, not on anything added in
+  this step. Not solved here; flagged honestly rather than implied fixed.
 - One-off scripts live in `scripts/` (not part of the ongoing app pipeline
   or CI) — e.g. `scripts/ingest_lca_disclosures.py`, run manually. Uses
   `pandas`/`openpyxl` (in `requirements.txt`) to read DOL's `.xlsx`

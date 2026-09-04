@@ -9333,7 +9333,10 @@ specifically once tomorrow's ~3am launchd-triggered run completes**:
 confirm `huntloop_skills_matching_backlog_remaining` and the
 `huntloop_skills_matching_jobs_*_total` counters appear in a direct
 Prometheus query (`http://localhost:9090`) and that Grafana's dashboard
-(`http://localhost:3000/d/huntloop-skills-matching`) renders the same
+(`http://localhost:3001/d/huntloop-skills-matching` — `3000` at the time
+this entry was written, remapped to `3001` later the same day to free up
+`3000` for the Next.js frontend; see the "Remap Grafana's host port"
+entry below) renders the same
 values via its datasource proxy — the same method the original scraping
 dashboard was verified with (see CLAUDE.md's now-superseded "Verified
 end-to-end" language on the scraping dashboard bullet for that
@@ -9383,3 +9386,260 @@ regression from this diff, same conclusion as before.
 (new), `tests/test_skills_matching_metrics.py` (new),
 `tests/test_backfill_skills_matching_metrics_wiring.py` (new),
 `scripts/backfill_skills_matching.py`, `CLAUDE.md`, `SESSIONS.md`.
+
+---
+
+## 2026-09-04 — Investigate empty Grafana dashboards
+
+**Did:** Investigated why both Grafana dashboards (scraping activity,
+skills-matching backfill) showed no data for the last 7 days, reporting
+only for steps 1-3 and fixing only what the evidence supported for step
+4, per direct instruction. The real production skills-matching backfill
+(PID 10949, running since 06:30 that morning) was checked before and
+after and never touched.
+
+**1. Queried Prometheus directly** (`/api/v1/query`, `/api/v1/query_range`,
+`/api/v1/status/tsdb`, `/api/v1/label/__name__/values`) rather than
+trusting the dashboard's own rendering:
+- `huntloop_jobs_scraped_total` / `huntloop_skills_matching_backlog_remaining`:
+  zero data points over the last 7 AND 14 days — a real, confirmed
+  absence, not a dashboard time-range or query bug.
+- Pushgateway's own `/metrics` endpoint currently exposes **zero**
+  `huntloop_*` series (`grep -c '^huntloop_' `→ 0) — nothing has
+  successfully pushed to *this* Pushgateway instance since it was
+  restarted for this investigation.
+- Widening the window found exactly ONE real historical block, by
+  reading `prometheus_data`'s on-disk `meta.json` directly (via a
+  throwaway `alpine` container mounting the named volume): `minTime`
+  2026-08-22 18:15:30 UTC, `maxTime` 2026-08-22 20:00:00 UTC, 87 series /
+  825 samples — real `huntloop_jobs_scraped_total` data for
+  checkr/duolingo/figma/palantir etc. confirmed present via
+  `query_range` scoped to that exact window. **Nothing exists in
+  Prometheus for the ~13 days between that block and this
+  investigation** — a real, total gap, not a display artifact.
+  (The Prometheus container's own startup log even showed it compacting
+  this block from its WAL on this session's restart: `write block
+  mint=1787422530232 maxt=1787428800000 ulid=01M1PGBF47HV5FH0T77N4N1ZX4` —
+  meaning that data had been sitting in the WAL, uncompacted, since the
+  container was stopped mid-session on 2026-08-22, before its default
+  2h block boundary — consistent with a short manual verification
+  session, not a long-running service.)
+
+**2. Checked volume persistence** — quoted verbatim from
+`docker-compose.yml`: `prometheus` has `prometheus_data:/prometheus` (a
+named volume); `pushgateway` has no volume at all (in-memory only, which
+is upstream Pushgateway's own documented design — it's meant to be a
+short-lived relay in front of Prometheus's real storage, not a database).
+**The named volume is NOT the root cause** — `docker volume inspect
+huntloop_prometheus_data` shows it was created 2026-08-22 and genuinely
+retained that one real block across 13 days of the container not
+running at all (proof via the block's presence *before* this session
+ever touched the containers). Pushgateway's lack of a volume is
+consistent with its documented design, not a bug: Prometheus (which does
+persist) is the system of record for history; Pushgateway only needs to
+survive long enough for Prometheus's next scrape.
+
+**3. Checked whether the daily cron path ever starts the observability
+profile** — read the entirety of `scripts/run_orchestrator_cron.sh`
+(the only thing launchd invokes): it runs `docker compose run --rm
+--build ... app python main.py` (stage 1) and
+`.venv/bin/python scripts/backfill_skills_matching.py` (stage 2) and
+**never references the `observability` profile or any `pushgateway`/
+`prometheus`/`grafana` service at all**. Cross-referenced against real
+container timestamps: `docker inspect`'s `Created`/`StartedAt` for the
+currently-running `prometheus`/`pushgateway`/`grafana` containers all
+matched this investigation's own start time (this session, this
+afternoon), not any historical 3am firing; the one real historical data
+block found in step 1 falls at 2026-08-22 18:15-20:00 UTC = **11:15am-
+1:00pm PDT** (this machine's real local timezone) — nowhere near the
+`StartCalendarInterval Hour=3` launchd fires at. **Conclusion: the
+observability stack has never once been running at the moment a
+scheduled 3am run pushed its metrics** — every scheduled run's push has
+silently failed (one `WARNING` in `logs/huntloop.log`, by design) for
+the entire ~13-day gap; the sole real data point is from the original
+one-off manual verification session, not from any cron-triggered run,
+ever.
+
+**4. Fix applied** (root cause clearly supported the task's proposed
+fix, not something else): `scripts/run_orchestrator_cron.sh` now runs
+`docker compose --profile observability up -d pushgateway` at the very
+start of every run, before either stage can push anything — Pushgateway
+only, deliberately not `prometheus`/`grafana` (a scheduled run has no
+reason to keep a dashboard server running). Guarded so a failure here
+(Docker Desktop not running, a port conflict, network hiccup) is logged
+and swallowed, never aborting or failing the actual scrape/backfill work
+— same defensive principle `push_run_metrics()`/`push_backfill_metrics()`
+already use for the push itself. **Known, deliberately unsolved residual
+gap** (documented in CLAUDE.md, not silently left out): Pushgateway only
+holds the latest value per grouping key, not a time series — a scheduled
+run's push will now succeed, but it only becomes real history once
+Prometheus (still only started manually) happens to scrape it before the
+*next* day's push overwrites the same key. This closes "the push fails
+outright," not "guaranteed unbroken daily history" — that would need
+starting `prometheus` too, a larger, not-yet-requested change.
+
+**No test added** — this fix is a one-line addition to a bash cron
+wrapper (infra/config, not application code); there is no existing
+precedent in this repo for unit-testing `scripts/run_orchestrator_cron.sh`
+(confirmed via `grep -rl run_orchestrator_cron tests/` → no hits), and
+the change has no Python logic to exercise. `bash -n` confirms the
+script's syntax is still valid.
+
+**Verified:**
+- Real Prometheus queries (steps 1) run directly against
+  `http://localhost:9090`, not inferred from the dashboard UI.
+- Real `docker-compose.yml` volume config quoted verbatim (step 2).
+- Real `docker inspect`/volume-block timestamps cross-referenced against
+  the real launchd schedule (step 3) — not assumed.
+- `git diff --stat` → `scripts/run_orchestrator_cron.sh | 29 +++++++++++++++++++++++++++++`,
+  the only file changed — no application code, no other script, touched.
+- The real production backfill (PID 10949) was confirmed running via
+  `ps aux` and untouched both before and after this entire investigation
+  (same PID, monotonically increasing CPU time, no interruption).
+- Full test suite not re-run for this step (no Python code changed;
+  the last known state, from the prior 2026-09-04 entry, was 301 passed
+  / 3 failed, the 3 failures being the same pre-existing
+  `tests/test_backfill_lock.py` collisions with the still-running
+  production process, unrelated to any change in this repo).
+
+**Files changed:** `scripts/run_orchestrator_cron.sh`, `CLAUDE.md`,
+`SESSIONS.md`.
+
+---
+
+## 2026-09-04 — Make Prometheus/Pushgateway genuinely continuous background services
+
+**Did:** Follow-up to the same day's "Investigate empty Grafana
+dashboards" entry, closing the residual gap it flagged (Pushgateway
+holding only the latest value, needing Prometheus to scrape it before
+the next day's push overwrites it). The real production skills-matching
+backfill (PID 10949, still running from 06:30 that morning) was checked
+before and after and never touched.
+
+**1. `docker-compose.yml`**: added `restart: unless-stopped` to
+`pushgateway`, `prometheus`, and `grafana` (all within the
+`observability` profile — nothing about `db`/`app`/`api` changed).
+Grafana got it too, for consistency, even though only
+Prometheus/Pushgateway's continuity actually matters for data integrity
+(Grafana is a read-only viewer over Prometheus's own durable storage).
+
+**2. `scripts/run_orchestrator_cron.sh`**: kept the
+`docker compose --profile observability up -d pushgateway` line added in
+the prior entry, but reframed it in both comment and log message from
+"the fix" to a defensive fallback only (in case Docker Desktop was fully
+quit and nothing is running) — the primary continuity mechanism is now
+the restart policy plus a one-time manual start. Still guarded so a
+failure here never blocks or fails the real scrape/backfill work — same
+non-blocking behavior as before, unchanged.
+
+**3. Real verification, not just config inspection:**
+- Started the full profile: `docker compose --profile observability up
+  -d pushgateway prometheus grafana` — Docker recreated all three
+  containers (config changed) and reported them healthy.
+- `docker inspect`'s `HostConfig.RestartPolicy.Name` read
+  `unless-stopped` on all three **actually-running** containers — the
+  policy is really applied, not just written in the compose file.
+- **Simulated an unattended crash** on the real `pushgateway` container
+  via `docker kill` — it did NOT auto-restart (checked repeatedly over
+  ~30s). Investigated why with an isolated, disposable test: a plain
+  `docker run --restart unless-stopped alpine sleep 3600` also did not
+  restart after `docker kill`, but a **separate** test container whose
+  own process exited with a failure code (`alpine sh -c "sleep 3;
+  exit 1"`) was auto-restarted repeatedly by Docker with no
+  intervention (`RestartCount` climbing on its own: 2, then 5). **Root
+  cause of the kill-doesn't-restart result: this is correct, documented
+  Docker behavior, not a bug** — `docker kill`/`docker stop` are both
+  explicit Stop/Kill calls through Docker's own API, and Docker
+  deliberately treats any such explicit call as an intentional
+  user-initiated stop that `unless-stopped` will not override
+  (`unless-stopped` = "restart unless a human/script explicitly stopped
+  it"). The restart mechanism itself is confirmed genuinely live and
+  working for the actual failure mode it exists to protect against (an
+  unexpected crash of the monitored process), just not for a
+  deliberately-issued stop/kill — which is the desired behavior anyway.
+- Real `pushgateway` container (killed during the test above) was
+  restored via the same `docker compose --profile observability up -d`
+  command and confirmed healthy/running again before finishing.
+- **Full daemon-restart behavior (a real OS reboot or `Restart Docker
+  Desktop`) was NOT tested** — acknowledged directly rather than
+  implied. This machine's Docker Desktop autostart-at-login setting was
+  separately verified once before (2026-08-24, see the Docker
+  autostart-at-login entry) to survive a `docker desktop restart`, but a
+  genuine full OS reboot was never tested even there. Whether these
+  containers come back after a real reboot depends entirely on that
+  separate, still-unverified autostart setting — not solved or newly
+  verified by this step.
+
+**Honest current state of the residual gap**: closed for the case this
+task targeted — Prometheus/Pushgateway now stay running continuously in
+the background across cron runs, crashes, and terminal closures, with a
+one-time manual start instead of needing to be re-started before every
+run. **Not closed**: a full host reboot with Docker Desktop not
+auto-starting would still stop everything, same as any other Docker
+Desktop workload on this machine — a pre-existing, separately-tracked
+limitation, not something this step re-introduced or was asked to fix.
+
+**No test added** — this is a `docker-compose.yml` config change plus a
+comment/log-message-only edit to the same bash wrapper touched in the
+prior entry; no new Python logic exists to exercise, consistent with
+that entry's own "infra config, not application code" reasoning.
+`bash -n` confirms the wrapper script's syntax is still valid.
+
+**Verified:**
+- `git diff --stat` → `docker-compose.yml` (+18, three `restart:
+  unless-stopped` lines plus their explanatory comments) and
+  `scripts/run_orchestrator_cron.sh` (comment/log-message reframing
+  only, same guarded behavior) — no other files' behavior changed.
+- Real `docker inspect` output (above) confirms the policy is live on
+  the actually-running containers, not just present in the compose file.
+- The real production backfill (PID 10949) was confirmed running via
+  `ps aux` both before and after this entire investigation/fix — same
+  PID, monotonically increasing CPU time throughout, never touched.
+
+**Files changed:** `docker-compose.yml`, `scripts/run_orchestrator_cron.sh`,
+`CLAUDE.md`, `SESSIONS.md`.
+
+---
+
+## 2026-09-04 — Remap Grafana's host port to resolve the frontend conflict
+
+**Did:** `docker-compose.yml`'s `grafana` service port mapping changed
+from `"3000:3000"` to `"3001:3000"` — host port only; the container-side
+port stays `3000` (Grafana's own default, unrelated to the host mapping).
+This is the actual fix for the port collision with the Next.js frontend
+dev server flagged (but deliberately left unfixed) in the two prior
+2026-09-04 entries. The real production skills-matching backfill (PID
+10949, still running from 06:30 that morning) was checked before and
+after and never touched.
+
+**Verified for real, not just the compose file:**
+- `docker compose --profile observability up -d pushgateway prometheus
+  grafana` recreated only `grafana` (the one service whose config
+  changed) — `pushgateway`/`prometheus` were left running untouched.
+- `docker compose ps` shows `huntloop-grafana-1` with
+  `0.0.0.0:3001->3000/tcp` — the real mapping, not just what's written
+  in the file.
+- `curl http://localhost:3001/api/health` → `HTTP 200`,
+  `{"database":"ok","version":"11.3.0",...}` — Grafana is genuinely
+  reachable on the new port.
+- `lsof -iTCP:3000 -sTCP:LISTEN` → nothing listening — `3000` is
+  confirmed free for the Next.js frontend dev server.
+- `lsof -iTCP:3001 -sTCP:LISTEN` → Docker/Grafana holding it, as
+  expected.
+
+**Docs updated**: CLAUDE.md's port-conflict bullet and its dashboard-URL
+references now read `3001` and describe this as the actual fix rather
+than an accepted limitation; the "verify tomorrow" note in the
+skills-matching-dashboard bullet and the corresponding SESSIONS.md entry
+were corrected to `http://localhost:3001/d/huntloop-skills-matching`
+with an inline note on when/why the port changed, rather than silently
+leaving a stale `3000` URL in the historical record.
+
+**Verified:**
+- `git diff --stat` → `docker-compose.yml` (1 line changed, `"3000:3000"`
+  → `"3001:3000"`, plus an explanatory comment), `CLAUDE.md`,
+  `SESSIONS.md` — no other files.
+- The real production backfill (PID 10949) was confirmed running via
+  `ps aux` both before and after this change — same PID, untouched.
+
+**Files changed:** `docker-compose.yml`, `CLAUDE.md`, `SESSIONS.md`.
