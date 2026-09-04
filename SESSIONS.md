@@ -9375,3 +9375,57 @@ after the pull, the real `docker-compose.yml` diff, and real
 `docker ps`/`docker inspect` output after the restart. Nothing mocked.
 
 **Files changed:** `docker-compose.yml`, `SESSIONS.md`.
+
+---
+
+## 2026-09-04 — Final retry of Daiichi Sankyo and Whole Foods Workday onboarding
+
+**Did:** A third and final live retry of the two Workday `needs_review`
+companies still blocked by a platform-side outage (first found
+2026-08-31, retried 2026-09-01). Re-used the already-confirmed-correct
+`{tenant, dc, site}` identifiers exactly as before — no discovery
+re-run, since nothing suggested they were no longer valid:
+`daiichisankyo/wd1/DSI`, `wholefoods/wd5/wholefoods`.
+
+**Daiichi Sankyo — still down, same failure as both prior checks.**
+Two fresh CXS `/jobs` POSTs, seconds apart, both returned:
+```
+HTTP 403
+{"errorCode":"S22","errorCaseId":"...","httpStatus":403,"message":"permission denied","messageParams":{}}
+```
+`/en-US/DSI` still 302-redirects to
+`https://www.myworkday.com/wday/drs/outage?t=daiichisankyo&s=dsi` —
+Workday's own outage page, named by tenant.
+
+**Whole Foods — still down at the API, though the site shell now
+loads.** Three fresh CXS `/jobs` POSTs, all three:
+```
+HTTP 502
+{"errorCode":"HTTP_502","errorCaseId":"...","httpStatus":502,"message":"","messageParams":{}}
+```
+`/en-US/wholefoods` now returns a real `200` with genuine Whole Foods
+branding in the page (a change from the 2026-09-01 check, which got a
+maintenance-page redirect there) — but this is the static Workday app
+shell, not the jobs data. The shell's own embedded JS still carries
+`maintenancePageUrl: "https://wd5.myworkday.com/wday/drs/outage?t=wholefoods&s=wholefoods"`,
+and the actual jobs API it depends on (CXS `/jobs`) is still hard-down.
+The shell coming back before the API does isn't a partial recovery
+worth treating differently — nothing scrapable exists until CXS
+responds.
+
+**Verdict: both companies confirmed still blocked by a genuine,
+persistent Workday-side outage — not a HuntLoop detection or discovery
+issue. Both are being permanently dropped, not left flagged for another
+retry.** The identifiers are right and the mechanism is proven (see
+`harman` in the same investigation) — this is purely Workday's own
+infrastructure being down for these two specific tenants, and three
+checks across four days is enough evidence that this isn't a transient
+blip worth re-checking indefinitely. `CLAUDE.md`'s entry for these two
+companies is updated from "retry again when Workday brings the tenants
+back online" to a permanent-drop note — no file in this repo tracks
+them for future re-attempt any more.
+
+Nothing else was touched: no `companies` rows written, no spider or
+discovery script changes, no other company's data touched.
+
+**Files changed:** `CLAUDE.md`, `SESSIONS.md`.

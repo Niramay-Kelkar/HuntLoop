@@ -2026,19 +2026,30 @@ conventions" and SESSIONS.md for the real current state).
     `western.wd1` = Western Colorado University (not "WESTERN WASHINGTON
     UNIVERSITY"); `tera.wd3` = Teranet Inc, Canada (not "TERA CLOUDX").
     Confirmed by live `hiringOrganization` + posting text.
-  - **`daiichisankyo`, `wholefoods` — site known, STILL in a Workday-side
-    outage, not stored (retried 2026-09-01, see SESSIONS.md "Retry the two
-    outage-blocked Workday tenants").** Identifiers re-confirmed still
-    valid (the `__nosuchsite__` probe returns 404 on `daiichisankyo.wd1`
-    and `wholefoods.wd5`; a DC sweep shows daiichisankyo has not moved;
-    robots.txt still authoritatively lists `/wholefoods/`), but the live
-    retry reproduced the exact same failure: `daiichisankyo` CXS `/jobs`
-    → `403 S22 "permission denied"` and `/en-US/DSI` → 302 to
+  - **`daiichisankyo`, `wholefoods` — PERMANENTLY DROPPED, not stored,
+    not on any retry list (final retry 2026-09-04, see SESSIONS.md
+    "Final retry of Daiichi Sankyo and Whole Foods Workday onboarding").**
+    Two prior retries (2026-09-01, 2026-09-04) both re-confirmed the
+    `{tenant, dc, site}` identifiers are still correct (`daiichisankyo/
+    wd1/DSI`, `wholefoods/wd5/wholefoods`) and both found the exact same
+    persistent Workday-side outage: `daiichisankyo` CXS `/jobs` → `403
+    S22 "permission denied"` (reproduced twice in the same session,
+    2026-09-04) and `/en-US/DSI` → 302 to
     `www.myworkday.com/wday/drs/outage?t=daiichisankyo&s=dsi`;
-    `wholefoods` CXS `/jobs` → persistent `502` and `/en-US/wholefoods`
-    serves a maintenance page. Site names (`DSI`, `wholefoods`) are still
-    the right values — retry again when Workday brings the tenants back
-    online.
+    `wholefoods` CXS `/jobs` → persistent `502` (reproduced 3x
+    consecutively, 2026-09-04) — the site shell itself now loads (200,
+    real Whole Foods branding) but that's cosmetic; the actual jobs API
+    it depends on is still down, and a `maintenancePageUrl` config value
+    embedded in that shell's own JS confirms Workday itself still
+    considers this tenant in outage. This is a confirmed persistent
+    platform-side outage, not a HuntLoop detection or discovery
+    limitation — the identifiers are right, the mechanism works (see
+    `harman`, above), Workday's own infrastructure for these two
+    specific tenants is what's down. Dropped for good after this second
+    confirmation rather than left flagged for indefinite future retry;
+    don't re-attempt these two without a new, explicit signal that
+    Workday's outage for them has actually lifted (not just "it's been a
+    while").
 
 - **SmartRecruiters spider BUILT + onboarded 2026-09-01 (see SESSIONS.md
   "Build the SmartRecruiters spider").** `SmartRecruitersScraper`
