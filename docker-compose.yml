@@ -100,6 +100,16 @@ services:
   pushgateway:
     image: prom/pushgateway:v1.10.0
     profiles: ["observability"]
+    # Continuity matters here: Pushgateway only holds the latest value
+    # per grouping key, not a time series - if it (or Prometheus) isn't
+    # running when a scheduled run pushes, that day's numbers are lost
+    # for good (see CLAUDE.md/SESSIONS.md 2026-09-04 "Investigate empty
+    # Grafana dashboards"). `unless-stopped` means Docker restarts this
+    # container automatically if it crashes or Docker Desktop itself
+    # restarts, so a one-time `docker compose --profile observability up
+    # -d` keeps it running in the background indefinitely - not
+    # something to re-start before every cron run.
+    restart: unless-stopped
     ports:
       - "9091:9091"
     healthcheck:
@@ -111,6 +121,12 @@ services:
   prometheus:
     image: prom/prometheus:v2.55.1
     profiles: ["observability"]
+    # Same continuity reasoning as pushgateway's `restart` comment above -
+    # Prometheus has to actually be running to scrape a pushed value
+    # before the next day's push overwrites it under the same grouping
+    # key, so it needs to stay up continuously, not just around each
+    # cron run.
+    restart: unless-stopped
     volumes:
       - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
@@ -128,6 +144,12 @@ services:
   grafana:
     image: grafana/grafana:11.3.0
     profiles: ["observability"]
+    # Added for consistency with prometheus/pushgateway above, not
+    # because Grafana's own continuity matters for data integrity - it's
+    # a read-only viewer over Prometheus's real storage, so it staying
+    # off between manual look-ins loses nothing. No harm in it staying
+    # up automatically too.
+    restart: unless-stopped
     environment:
       # Local dev only - not a production credential. Override via
       # GRAFANA_ADMIN_PASSWORD in .env if you want something other than
@@ -137,7 +159,11 @@ services:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana_data:/var/lib/grafana
     ports:
-      - "3000:3000"
+      # Host port 3001, not 3000 - 3000 is the Next.js frontend dev
+      # server's port (see CLAUDE.md/SESSIONS.md 2026-09-04). Container
+      # port stays 3000 (Grafana's own default, unrelated to the host
+      # side of this mapping).
+      - "3001:3000"
     depends_on:
       prometheus:
         condition: service_healthy
