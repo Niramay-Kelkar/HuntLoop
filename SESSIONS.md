@@ -9605,3 +9605,85 @@ nothing new. The 46 originally-held candidates are fully dispositioned
 0 left ambiguous) — nothing outstanding to review.
 
 **Files changed:** `SESSIONS.md`.
+
+---
+
+## 2026-09-04 — Frontend test suite (Vitest + RTL) + CI wiring
+
+**Did:** `frontend/` had zero test tooling until now — only the backend
+(pytest) ran in CI. Set up a real, if intentionally small, frontend test
+suite and made it a required CI step.
+
+**Tooling choice: Vitest + React Testing Library.** Checked this against
+the actual installed stack before committing to it, rather than assuming
+it would just work — Next.js 16.3.2 / React 19.2.8 here is genuinely new
+(the repo's own `frontend/AGENTS.md` warns this Next version has breaking
+API changes vs. training data), so this was verified, not assumed:
+Next's own bundled docs (`node_modules/next/dist/docs/01-app/02-guides/
+testing/vitest.md`) name Vitest + RTL as the current recommended App
+Router setup; `@testing-library/react`'s published peer deps explicitly
+support React 19 (`^18.0.0 || ^19.0.0`); and native `resolve.tsconfigPaths`
+support in the installed Vite version meant the `@/*` import alias
+resolved without the older `vite-tsconfig-paths` plugin. No real config
+friction beyond a config-loader warning tied to `vitest.config.ts` being
+loaded as CommonJS — fixed by naming it `vitest.config.mts`, not by fighting
+the underlying setup. Jest itself was not seriously considered — it needs
+extra transform config to handle this project's TypeScript/ESM/App
+Router stack that Vitest handles natively via Vite.
+
+**Initial suite — 3 files, 14 tests, picked for real logic, not
+padding:**
+- `src/lib/api.test.ts` — the fetch client's real logic: `getJobs`'
+  query-string construction (only appends params that are actually set,
+  confirmed both for a couple of set params and for the no-params case),
+  the shared error path (a non-ok response's status/body surface in the
+  thrown error), and `uploadResume`'s deliberate divergence from the
+  shared `apiFetch` helper (no manual `Content-Type` header, since a
+  multipart upload needs the browser's own boundary).
+- `src/hooks/useApplicationStatus.test.tsx` — the one hook in this
+  codebase with real logic worth pinning down: `useApplicationStatusMutation`'s
+  optimistic cache update (the cached job list shows the new status
+  before the request resolves) and its rollback on failure (a rejected
+  request restores the prior cached status). A mutation with no
+  optimistic-update/rollback behavior wouldn't have been worth a test.
+- `src/components/JobFilters.test.tsx` — the one filter/UI component
+  with actual branching logic: the min-score slider's percent<->fraction
+  conversion, the "Clear filters" button's conditional visibility, and
+  the `UNSPECIFIED_DEPARTMENT` sentinel wiring for the "Not specified"
+  option.
+
+**Deliberately not covered, and not a gap to quietly patch over later —
+this is a starting point, not full coverage:** every page component
+(`dashboard`, `jobs`, `jobs/[id]`, `applications`, `resumes`), `JobCard`/
+`JobTable`/`KanbanBoard`/`ApplicationsList`/`ScoreIndicator`/`SkillChips`/
+`SegmentedToggle`/`NavBar`/`Pagination`/`StatusControl`, and `Toast`'s own
+provider/dismiss-timer behavior. Several of these (`ScoreIndicator`'s
+color calibration, `KanbanBoard`'s native HTML5 drag-and-drop, `StatusControl`)
+have real logic and would be reasonable next additions; pure-presentation
+components (rendering props into markup with no branching/state of their
+own) are explicitly skipped as low-value rather than padded for a
+coverage number. No E2E/browser-level tests exist either (Playwright or
+similar) — this suite is unit/component-level only.
+
+**Wiring:** `npm test` runs `vitest run` (single pass, not watch mode —
+matches what a CI/non-interactive run needs). `.github/workflows/ci.yml`
+gained a second job, `frontend-test`, alongside the existing `test`
+(backend) job — separate job rather than a step tacked onto the backend
+job, since it needs Node not Python/Postgres and can run in parallel.
+Installs via `npm ci` against the committed lockfile (verified clean
+against a fresh `node_modules` before wiring it into CI, not assumed),
+then `npm test`. Verified for real, not just written: pushed to a branch,
+opened a PR, and confirmed the `frontend-test` job actually executed and
+passed in a real GitHub Actions run (see the PR link in this session's
+record) — both jobs are independent required checks on the same
+workflow, so a frontend test failure fails the PR the same way a backend
+pytest failure already does.
+
+**Files changed:** `frontend/package.json`, `frontend/package-lock.json`
+(added `vitest`/`@vitejs/plugin-react`/`jsdom`/`@testing-library/react`/
+`@testing-library/dom`/`@testing-library/jest-dom` as dev dependencies),
+`frontend/vitest.config.mts` (new), `frontend/vitest.setup.ts` (new),
+`frontend/src/lib/api.test.ts` (new), `frontend/src/hooks/
+useApplicationStatus.test.tsx` (new), `frontend/src/components/
+JobFilters.test.tsx` (new), `.github/workflows/ci.yml`, `CLAUDE.md`,
+`SESSIONS.md`.

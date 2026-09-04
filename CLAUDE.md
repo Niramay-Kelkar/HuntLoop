@@ -163,6 +163,37 @@ conventions" and SESSIONS.md for the real current state).
   only). No URL query-param sync for any filter, department included —
   matches the existing `company`/`min_score` pattern, not a gap
   introduced here.
+- **Frontend test suite: Vitest + React Testing Library, added
+  2026-09-04 (see SESSIONS.md's "Frontend test suite (Vitest + RTL) + CI
+  wiring" entry) — the frontend had zero test tooling before this.**
+  Checked against this specific Next 16 / React 19 App Router setup
+  before committing to it (Next's own bundled docs recommend it, RTL's
+  peer deps support React 19) rather than assumed. Config:
+  `frontend/vitest.config.mts` (native `resolve.tsconfigPaths` for the
+  `@/*` alias — no extra plugin needed) + `frontend/vitest.setup.ts`
+  (`@testing-library/jest-dom`). Run via `cd frontend && npm test`
+  (`vitest run`, single pass — not watch mode). **This is a small
+  starting suite (3 files), not full coverage — don't treat it as a
+  finished testing effort.** Covers real logic only:
+  `frontend/src/lib/api.ts`'s query-string construction + error handling
+  + the multipart-upload Content-Type divergence
+  (`frontend/src/lib/api.test.ts`); `useApplicationStatusMutation`'s
+  optimistic-update/rollback cache behavior
+  (`frontend/src/hooks/useApplicationStatus.test.tsx`); and
+  `JobFilters`' slider/sentinel/clear-button logic
+  (`frontend/src/components/JobFilters.test.tsx`). **Not yet covered,
+  deliberately**: every page component, `JobCard`/`JobTable`/
+  `KanbanBoard`/`ApplicationsList`/`ScoreIndicator`/`SkillChips`/
+  `SegmentedToggle`/`NavBar`/`Pagination`/`StatusControl`/`Toast`, and
+  any E2E/browser-level testing — pure-presentation components are
+  explicitly skipped as low-value rather than padded for a coverage
+  number, but several of the untested ones (`ScoreIndicator`,
+  `KanbanBoard`'s drag-and-drop, `StatusControl`) do have real logic and
+  are reasonable next additions. **Wired into CI as a required check**:
+  `.github/workflows/ci.yml`'s `frontend-test` job (separate from the
+  existing backend `test` job — Node/npm, no Postgres needed) runs
+  `npm ci && npm test` on every push/PR to `master`, same as the backend
+  pytest job.
 - Entrypoint: `python main.py` runs the multi-ATS orchestrator end-to-end
   — queries `companies.ats_platform`, groups by platform, and runs
   `GreenhouseScraper`/`LeverScraper` once each with all tokens for that
