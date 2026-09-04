@@ -99,6 +99,37 @@ PYTHON="$REPO_ROOT/.venv/bin/python"
 
   DB_URL_FOR_DOCKER="$(grep -E '^DATABASE_URL=' "$REPO_ROOT/.env" | cut -d= -f2- | sed 's/localhost/host.docker.internal/')"
 
+  # Root-caused 2026-09-04 (see SESSIONS.md "Investigate empty Grafana
+  # dashboards"): both stages below push real per-run metrics to the
+  # Pushgateway (src/huntloop/metrics.py,
+  # src/huntloop/skills_matching_metrics.py), which needs somewhere to
+  # push to.
+  #
+  # The PRIMARY mechanism for that as of 2026-09-04's follow-up fix is
+  # `restart: unless-stopped` on the pushgateway/prometheus/grafana
+  # services in docker-compose.yml, plus a one-time manual
+  # `docker compose --profile observability up -d pushgateway prometheus
+  # grafana` (see README.md/CLAUDE.md) - once started, Docker keeps them
+  # running in the background continuously (surviving a crash or a
+  # Docker Desktop restart) without this script re-starting anything.
+  # This line below is now just a DEFENSIVE FALLBACK for the case where
+  # Docker Desktop itself was fully quit (which does stop every
+  # container, restart policy or not - see the docker-compose.yml
+  # comments for what that leaves as a real, accepted gap) - it costs
+  # nothing when pushgateway is already up (`up -d` on an already-running
+  # container is a no-op), and is guarded the same way
+  # `push_run_metrics()`/`push_backfill_metrics()` already are: a failure
+  # here (Docker Desktop not running at all, a port conflict, a network
+  # hiccup) is logged and swallowed, never allowed to abort or fail this
+  # run - the actual scrape/backfill work must not depend on an
+  # observability side-effect succeeding.
+  echo "--- defensive check: is pushgateway running? (starting it if not - see comment above) ---"
+  if docker compose --profile observability up -d pushgateway; then
+    echo "pushgateway is up (or already was)"
+  else
+    echo "WARNING: failed to start the observability profile's pushgateway service - continuing without it. This run's metrics push(es) will fail and be logged as a warning by the app itself, but the actual scrape/backfill work below is unaffected."
+  fi
+
   echo "--- stage 1/2: scraper orchestrator (main.py, via docker compose run) ---"
   docker compose run --rm --build -e DATABASE_URL="$DB_URL_FOR_DOCKER" app python main.py
   scrape_status=$?

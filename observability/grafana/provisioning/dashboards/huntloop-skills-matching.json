@@ -1,0 +1,114 @@
+{
+  "title": "HuntLoop Skills-Matching Backfill",
+  "uid": "huntloop-skills-matching",
+  "editable": true,
+  "schemaVersion": 39,
+  "timezone": "browser",
+  "time": { "from": "now-7d", "to": "now" },
+  "refresh": "30s",
+  "tags": ["huntloop"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Backlog remaining (end of run)",
+      "description": "huntloop_skills_matching_backlog_remaining - relevant job_postings rows still awaiting a skills-matching result, measured at the end of each backfill run (scripts/backfill_skills_matching.py).",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "huntloop_skills_matching_backlog_remaining",
+          "legendFormat": "backlog remaining",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "title": "Jobs processed per run, by provider",
+      "description": "huntloop_skills_matching_jobs_processed_total - jobs a backfill run attempted to match, broken down by which provider (groq_120b/groq/gemini/mistral/none) handled the batch. \"none\" means every available provider structural-failed that batch.",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "huntloop_skills_matching_jobs_processed_total",
+          "legendFormat": "{{provider}}",
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "Success vs. failure (most recent run)",
+      "description": "huntloop_skills_matching_jobs_succeeded_total vs. huntloop_skills_matching_jobs_failed_total, summed across providers. Zero series returned means zero of that outcome (Prometheus does not return a 0-valued series for a counter that was never incremented).",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(huntloop_skills_matching_jobs_succeeded_total) OR vector(0)",
+          "legendFormat": "succeeded",
+          "refId": "A",
+          "instant": true
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum(huntloop_skills_matching_jobs_failed_total) OR vector(0)",
+          "legendFormat": "failed",
+          "refId": "B",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "title": "Success rate by provider (most recent run)",
+      "description": "huntloop_skills_matching_jobs_succeeded_total / huntloop_skills_matching_jobs_processed_total per provider - fraction of attempted jobs that actually stored a result.",
+      "type": "barchart",
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "huntloop_skills_matching_jobs_succeeded_total / huntloop_skills_matching_jobs_processed_total",
+          "legendFormat": "{{provider}}",
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

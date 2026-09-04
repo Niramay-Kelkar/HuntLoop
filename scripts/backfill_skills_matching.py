@@ -90,6 +90,13 @@ from huntloop.db_models import JobPosting, ResumeVersion
 from huntloop.match_scoring import match_score_order_by
 from huntloop.settings import DATABASE_URL
 from huntloop import skills_matching_router as router
+from huntloop.skills_matching_metrics import (
+    push_backfill_metrics,
+    skills_matching_backlog_remaining,
+    skills_matching_jobs_failed_total,
+    skills_matching_jobs_processed_total,
+    skills_matching_jobs_succeeded_total,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -320,6 +327,13 @@ def _run_backfill(limit: int | None = None):
             pacer.wait_for_budget(_estimate_batch_tokens(resume_chars, contributions))
 
             descriptions = [j.job_description or "" for j in batch]
+            # Attribute this batch's outcome to a provider for the metrics
+            # below: batch_giveups only increments when every available
+            # provider structural-failed the batch (router.match_skills_batch
+            # returns [None]*n without updating last_provider in that case) -
+            # so a giveup is labeled "none" rather than misattributed to
+            # whichever provider handled the *previous* batch.
+            giveups_before = state["batch_giveups"]
             try:
                 results = router.match_skills_batch(resume_text, descriptions, state)
             except router.AllProvidersExhausted as e:
@@ -329,11 +343,14 @@ def _run_backfill(limit: int | None = None):
                 )
                 stopped_early = True
                 break
+            batch_provider = "none" if state["batch_giveups"] > giveups_before else (state["last_provider"] or "none")
 
             for job, result in zip(batch, results):
                 processed += 1
+                skills_matching_jobs_processed_total.labels(provider=batch_provider).inc()
                 if result is None:
                     failed += 1
+                    skills_matching_jobs_failed_total.labels(provider=batch_provider).inc()
                     logger.warning(
                         "[%d/%d] Skills match failed for job_postings.id=%s (%r) - leaving NULL",
                         processed, total, job.id, job.job_title,
@@ -342,6 +359,7 @@ def _run_backfill(limit: int | None = None):
                 job.matched_skills = result["matched_skills"]
                 job.missing_skills = result["missing_skills"]
                 succeeded += 1
+                skills_matching_jobs_succeeded_total.labels(provider=batch_provider).inc()
                 logger.info(
                     "[%d/%d] Stored skills match for job_postings.id=%s (%r)",
                     processed, total, job.id, job.job_title,
@@ -365,9 +383,12 @@ def _run_backfill(limit: int | None = None):
     # Leading-indicator line again at the end - the backlog after this run.
     session = Session()
     try:
-        _log_backlog(session)
+        remaining_backlog = _log_backlog(session)
     finally:
         session.close()
+
+    skills_matching_backlog_remaining.set(remaining_backlog)
+    push_backfill_metrics()
 
 
 if __name__ == "__main__":
