@@ -403,6 +403,47 @@ soft-match + Palantir Deployment Strategist) against the Groq baseline
 before wiring, and keep `MAX_PLAUSIBLE_MATCHED_SKILLS = 20` as the
 model-agnostic backstop.
 
+### Outcome — Mistral built + validated 2026-09-03: WIRED, NOT RECOMMENDED, NOT in the default chain
+
+Built `src/huntloop/skills_matching_mistral.py` (contract-identical to
+the Gemini backend) and added `"mistral"` as a known third router stage,
+appendable via `SKILLS_MATCHING_PROVIDERS=groq,gemini,mistral`. **The
+default chain is unchanged (`groq,gemini`).**
+
+**Live-limits re-check contradicted the 2026-08-30 research:** the
+1 RPS / 500K TPM / ~1B-tokens/month figures apply to Mistral's *flagship*
+models, which are now effectively pulled from the free tier —
+`mistral-small-latest` returns HTTP 429 with
+`x-ratelimit-limit-req-minute: 0` (the same silent cut Gemini made to its
+2.5-gen models). Only the smaller `ministral-*` models are free-usable;
+`ministral-8b-latest`'s live headers show 625,000 tokens/min and 188
+req/min, no per-day/month header. The module defaults to
+`ministral-8b-latest` with pacing constants read from those real headers
+(`TARGET_TPM=500_000`, `MAX_RPM=120`).
+
+**11-job harness verdict — POOR, worse than Gemini's was:**
+- 7 of 11 results are full-résumé dumps exceeding
+  `MAX_PLAUSIBLE_MATCHED_SKILLS = 20` (56, 53, 46, 44, 44, 42, 26 matched
+  skills) — the batch path rejects these and leaves the rows NULL, so on
+  the hard cases it produces *nothing usable*. Groq returns 0–7 on the
+  same jobs and correctly `[]`/`[]` on Palantir "Deployment Strategist".
+- Grounding inversion (résumé skills asserted as matched for jobs that
+  don't ask for them) and short-phrase-rule violations (63 long/
+  parenthetical entries across the 11 jobs).
+- ~4x slower per call (6.1s vs 1.4s).
+- Same conclusion as the 2026-08-29 Ollama 3B/7B experiment: an 8B-class
+  model is too small for this extraction task. The Mistral models that
+  might clear the bar aren't free-usable.
+
+**Decision:** keep the module + wiring (the option exists and is
+reproducible via `scripts/validate_mistral_skills_match.py`), but treat
+`mistral` as a **last-resort capacity bucket only** — enable it if and
+only if Groq *and* Gemini are ever both daily-walled and a stalled
+backlog is worse than batch-cap-filtered low-quality output. Re-validate
+on a non-free-tier-gated model before ever promoting it. Cerebras / the
+other candidates above remain the next things to try if real headroom
+(not just a fallback-of-last-resort) is what's needed.
+
 ---
 
 ## `is_relevant` relevance gate: title-only blue-collar denylist (redesigned 2026-09-03, see SESSIONS.md)

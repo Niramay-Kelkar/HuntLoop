@@ -22,10 +22,16 @@ provider hit its daily wall) - same "re-run tomorrow, it's interrupt-safe"
 behaviour Groq's DailyQuotaExhausted had before.
 
 Only rows where **matched_skills IS NULL AND is_relevant IS TRUE** are
-selected (oldest job_postings.scraped_at first) - Step K added the
-is_relevant filter: at 380-company scale ~57% of NULL rows are postings
-the relevance pre-filter already flagged as not-technical, and spending
-scarce Groq/Gemini quota on them was pure waste. Interrupt-safe: each
+selected, ordered by resume match_score descending (best matches against
+the currently active resume first) so postings that actually rank well
+get skills-gap analysis before generic backlog. The ordering expression
+is the shared huntloop.match_scoring.match_score_order_by() - the exact
+same definition GET /jobs?sort=-score uses - including its NULLS LAST
+handling and its fall-back to a stable deterministic order when the
+active resume has no embedding yet. Step K added the is_relevant filter:
+at 380-company scale ~57% of NULL rows are postings the relevance
+pre-filter already flagged as not-technical, and spending scarce
+Groq/Gemini quota on them was pure waste. Interrupt-safe: each
 day's run - whether it finishes the current backlog or stops early on the
 daily budget - naturally picks up wherever the previous run left off,
 with no state to track beyond the NULL columns themselves. A failed batch
@@ -81,6 +87,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from huntloop.db_models import JobPosting, ResumeVersion
+from huntloop.match_scoring import match_score_order_by
 from huntloop.settings import DATABASE_URL
 from huntloop import skills_matching_router as router
 
@@ -259,17 +266,21 @@ def _run_backfill(limit: int | None = None):
             return
         resume_text = active_resume.extracted_text
         resume_chars = len(resume_text)
+        resume_embedding = active_resume.embedding
 
         _log_backlog(session)
 
-        # Oldest-scraped-first: clears the longest-standing backlog before
-        # newer arrivals, deterministic day-to-day ordering (id tiebreak).
-        # is_relevant filter (Step K): don't spend scarce quota on
+        # Best resume match_score first: spend scarce Groq/Gemini quota on
+        # the postings that actually rank well against the active resume
+        # before the generic backlog. Same ordering definition as
+        # GET /jobs?sort=-score (huntloop.match_scoring) - NULLS LAST, and
+        # a stable deterministic fallback when the active resume has no
+        # embedding. is_relevant filter (Step K): don't spend quota on
         # postings the relevance pre-filter already flagged as not-technical.
         jobs = (
             session.query(JobPosting)
             .filter(JobPosting.matched_skills.is_(None), JobPosting.is_relevant.is_(True))
-            .order_by(JobPosting.scraped_at.asc(), JobPosting.id.asc())
+            .order_by(*match_score_order_by(resume_embedding))
             .all()
         )
         if limit is not None:

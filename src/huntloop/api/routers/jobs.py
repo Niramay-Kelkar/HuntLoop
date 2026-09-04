@@ -14,7 +14,7 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import Float, func, literal, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from huntloop.api.dependencies import get_db
@@ -29,6 +29,7 @@ from huntloop.api.schemas.jobs import (
 )
 from huntloop.api.sponsor_summary import get_sponsorship_summary
 from huntloop.db_models import ApplicationStatus, Company, JobApplication, JobPosting, ResumeVersion
+from huntloop.match_scoring import match_score_expr, match_score_order_by
 
 logger = logging.getLogger(__name__)
 
@@ -52,14 +53,10 @@ def _active_resume_embedding(db: Session):
 
 def _score_and_status_columns(resume_embedding):
     """The two computed columns every /jobs query needs: match_score
-    (null if there's no active resume) and application_status (defaults
-    to not_applied when no job_applications row exists - see
-    ApplicationStatus)."""
-    if resume_embedding is not None:
-        score_expr = (1 - JobPosting.embedding.cosine_distance(resume_embedding)).label("match_score")
-    else:
-        score_expr = literal(None, type_=Float).label("match_score")
-
+    (null if there's no active resume - see huntloop.match_scoring) and
+    application_status (defaults to not_applied when no job_applications
+    row exists - see ApplicationStatus)."""
+    score_expr = match_score_expr(resume_embedding)
     status_expr = func.coalesce(JobApplication.status, ApplicationStatus.NOT_APPLIED.value).label(
         "application_status"
     )
@@ -152,19 +149,10 @@ def list_jobs(
 
     total = db.execute(select(func.count()).select_from(query.subquery())).scalar_one()
 
-    if resume_embedding is not None:
-        # nulls_last() explicitly on both directions - Postgres's default
-        # is NULLS FIRST for DESC, which would put jobs with no embedding
-        # yet (score NULL) at the *top* of the "best matches first" sort.
-        # Not-yet-scored jobs should sort to the bottom either way.
-        query = query.order_by(
-            score_expr.desc().nulls_last() if sort == "-score" else score_expr.asc().nulls_last()
-        )
-    else:
-        # No active resume - nothing real to sort by, fall back to a
-        # stable, deterministic order rather than erroring on the
-        # default sort value.
-        query = query.order_by(JobPosting.id.asc())
+    # match_score_order_by handles both the NULLS LAST ordering (so
+    # not-yet-embedded jobs never sort to the top) and the no-active-resume
+    # fallback to a stable deterministic order - see huntloop.match_scoring.
+    query = query.order_by(*match_score_order_by(resume_embedding, descending=(sort == "-score")))
 
     query = query.limit(limit).offset(offset)
     rows = db.execute(query).all()

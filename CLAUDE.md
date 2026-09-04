@@ -543,9 +543,21 @@ conventions" and SESSIONS.md for the real current state).
   Step 5/7 — no separate schedule; that schedule is now launchd-driven,
   not cron-driven, see the Scheduling bullet above)** — stage 1 is the
   existing scraper (`main.py`), stage 2 processes `matched_skills IS
-  NULL` rows oldest-`scraped_at`-first under the real daily budget, then
+  NULL AND is_relevant IS TRUE` rows under the real daily budget, then
   stops itself when exhausted; both stages always run regardless of the
-  other's outcome. This is the only mechanism now — it both works down
+  other's outcome. **Selection order is resume `match_score` DESC as of
+  2026-09-03 (see SESSIONS.md), not the original
+  oldest-`scraped_at`-first** — postings that rank well against the
+  active resume get skills-gap analysis before generic backlog. The
+  ordering and the score expression are the shared
+  `huntloop.match_scoring` (`match_score_expr` / `match_score_order_by`),
+  the exact same definition `GET /jobs?sort=-score` uses (NULLS LAST,
+  with a stable deterministic `id ASC` fallback when the active resume
+  has no embedding); `backfill_skills_matching.py` and
+  `huntloop.api.routers.jobs` both call that module so they can't drift.
+  Pacing/`TokenPacer`, provider routing, batch building, and the
+  advisory lock were untouched by that change. This is the only
+  mechanism now — it both works down
   the backlog over time and keeps every future day's newly-scraped
   postings matched, with nothing to manually re-trigger ever again.
   **Sanity filter**: `MAX_PLAUSIBLE_MATCHED_SKILLS = 20` in
@@ -626,6 +638,25 @@ conventions" and SESSIONS.md for the real current state).
   `scripts/validate_gemini_skills_match.py` (side-by-side harness, writes
   gitignored `scratch_gemini_validation.json`) is unchanged.
   `GEMINI_API_KEY` is in `.env`.
+  **A THIRD provider, Mistral (`huntloop.skills_matching_mistral`,
+  `ministral-8b-latest`), was built + wired 2026-09-03 (see SESSIONS.md
+  + `huntloop-architecture-decisions.md`) but is WIRED-BUT-NOT-RECOMMENDED
+  and NOT in the default chain.** `SKILLS_MATCHING_PROVIDERS` still
+  defaults to `groq,gemini`; `mistral` is a known third stage only if
+  explicitly appended (`groq,gemini,mistral`, needs `MISTRAL_API_KEY`).
+  Its 11-job side-by-side validation against the Groq baseline came back
+  POOR: full-résumé-dumps into `matched_skills` on 7/11 jobs (rejected by
+  the `MAX_PLAUSIBLE_MATCHED_SKILLS = 20` backstop → left NULL), grounding
+  inversion, ignores the short-phrase rule; ~4x slower than Groq. The
+  free tier's flagship `mistral-small/-medium/-large` models are
+  req-limited to 0 now (only the smaller `ministral-*` models are
+  free-usable, and 8B is too small for this task — same conclusion as the
+  2026-08-29 Ollama 3B/7B experiment). Kept wired purely as a last-resort
+  capacity bucket if Groq AND Gemini are ever both walled. Don't add
+  `mistral` to the default rotation without re-validating on a better
+  (non-free-tier-gated) model. `scripts/validate_mistral_skills_match.py`
+  is its harness (gitignored `scratch_mistral_validation.json`).
+  `MISTRAL_API_KEY` is in `.env`.
   **First unbounded (`--limit`-less) production run, 2026-08-30 (see
   SESSIONS.md) — measurement only, no code changed.** Backlog 12,682 →
   **11,057**; `job_postings` with a stored result 736 → 2,363 (733 of
