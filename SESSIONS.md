@@ -9317,3 +9317,61 @@ Files changed: `docker-compose.yml`, `CLAUDE.md`, `SESSIONS.md`.
 - `SESSIONS.md` (this file)
 
 **Note:** the merged record above preserves both the incoming branch's implemented observability/metrics/dashboard work and the live verification that the local launchd-run checkout was behind and that an additional container-target `PUSHGATEWAY_URL` change is required for stage-1 pushes to succeed from inside the `app` container.
+
+---
+
+## 2026-09-04 — Close the two confirmed observability gaps
+
+**Did:** Acted on the prior entry's two open findings.
+
+Before touching anything, checked for a running scheduled job: `ps aux`
+showed no `backfill_skills_matching.py`/`main.py`/cron process, and a
+`pg_try_advisory_lock` probe on key `1751937901` succeeded and was
+immediately released, confirming nothing held it. Safe to proceed.
+
+1. **Deploy gap:** `git fetch` + `git merge-base --is-ancestor
+   origin/master HEAD` showed the local `master` checkout (the one
+   launchd runs) was already at `origin/master`'s tip by the time this
+   step ran — a prior push/merge had already landed it. Ran `git pull
+   origin master` explicitly anyway ("Already up to date") and confirmed
+   with a second `git merge-base` check plus a direct SHA comparison that
+   local `HEAD` and `origin/master` are byte-for-byte the same commit.
+   Nothing left to pull.
+
+2. **PUSHGATEWAY_URL gap:** added an explicit `PUSHGATEWAY_URL:
+   pushgateway:9091` entry to the `app` service's `environment:` block in
+   `docker-compose.yml`, right next to the existing `DATABASE_URL`
+   container-network-hostname override it mirrors. `pushgateway` is this
+   compose project's own service name, resolvable on the shared default
+   network with no `host.docker.internal`-style workaround needed (unlike
+   `DATABASE_URL`, whose real target is the host's system Postgres, not
+   the project's own `db` service). Nothing outside `app`'s environment
+   block was touched — `.env`, `scripts/backfill_skills_matching.py`
+   (host-run stage 2), and `src/huntloop/metrics.py`/
+   `skills_matching_metrics.py`'s own `localhost:9091` default are all
+   unchanged, so local/host-run scripts still resolve Pushgateway
+   correctly.
+
+Then did a clean `docker compose --profile observability down` +
+`up -d` of pushgateway/prometheus/grafana so any config changes are
+picked up rather than assumed live on already-running containers. All
+three came back `healthy` with `RestartPolicy: unless-stopped` and the
+expected ports (Pushgateway 9091, Prometheus 9090, Grafana 3001).
+Confirmed the new hostname resolves for real, not just by reading the
+compose file: a throwaway container joined to the same
+`huntloop_default` network reached `http://pushgateway:9091/-/healthy`
+with HTTP 200.
+
+**Deliberately not done:** no manual backfill/cron run was triggered to
+test this end-to-end — per the task, the next real scheduled 3am run is
+the right test, and forcing one here would just repeat the same
+kill-and-observe shortcut the original fix was criticized for. Final
+confirmation (fresh Prometheus data points, a populated Grafana
+dashboard) is still open pending that run.
+
+**Verified:** all of the above against the live system — `ps aux` +
+advisory-lock probe, `git fetch`/`merge-base`/SHA comparison before and
+after the pull, the real `docker-compose.yml` diff, and real
+`docker ps`/`docker inspect` output after the restart. Nothing mocked.
+
+**Files changed:** `docker-compose.yml`, `SESSIONS.md`.

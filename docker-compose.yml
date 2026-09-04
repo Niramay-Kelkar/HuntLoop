@@ -31,6 +31,20 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      # Same container-network-hostname override pattern as DATABASE_URL
+      # above. src/huntloop/metrics.py's PUSHGATEWAY_URL defaults to
+      # localhost:9091, which is correct for anything run on the host
+      # (local dev, scripts/backfill_skills_matching.py) but wrong here -
+      # inside this container, "localhost" means the container itself,
+      # not the pushgateway service, so a push from main.py would always
+      # get connection-refused regardless of whether pushgateway is
+      # running. `pushgateway` is this compose project's own service
+      # hostname, resolvable on the shared default network without any
+      # host.docker.internal-style workaround (unlike DATABASE_URL, whose
+      # real target is the host's system Postgres, not this project's own
+      # `db` service - see the wrapper script's runtime -e override for
+      # that case).
+      PUSHGATEWAY_URL: pushgateway:9091
     # Added 2026-08-24 when the daily scraper (main.py) moved from the
     # local .venv to `docker compose run` (see
     # scripts/run_orchestrator_cron.sh and SESSIONS.md) - without this,
