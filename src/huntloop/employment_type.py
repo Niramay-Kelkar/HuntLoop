@@ -71,6 +71,93 @@ _PART_TIME_RE = re.compile(
 )
 
 
+# --------------------------------------------------------------------------
+# Greenhouse-specific: pick the best raw employment-type label out of a
+# company's free-form `metadata` array.
+#
+# Only ~20% of Greenhouse companies configure a literal "Employment Type"
+# custom field. Investigating the real stored metadata (see
+# CLAUDE.md/SESSIONS.md) showed a handful of adjacent field names that
+# some companies use instead, and whose real values genuinely describe
+# employment type:
+#   - "Time Type"                    Full-time / Part-time only (Workday's
+#                                    own term, surfaced as a GH field)
+#   - "Full-time/ Part-time"         the field name IS the concept
+#   - "Full-Time/Part-Time Status"   Full-Time / Part-Time only
+#   - "Employment Status"            "Regular Full-time", ...
+#   - "Work Type"                    Full-time / "Contract, Full-time" / ...
+#   - "WORKER_CATEGORY"              Full Time / Contract
+#
+# Fields investigated and deliberately REJECTED (real values don't map
+# onto the Full-time/Part-time/Contract/Internship set):
+#   - "Worker Type"    legal classification - "Employee" (~98%), not hours
+#   - "Pay Rate Type"  compensation basis - "Salary"/"Hourly"
+#   - "Employee Type"  dominated by "Regular" (a job-category value)
+#   - "Job Type"       job category - "Standard"/"Pipeline"/"Regular";
+#                      also "(PT)" in role names false-triggers Part-time
+#
+# The literal "Employment Type" field keeps full normalization (an
+# unrecognized value there legitimately becomes "Other"). The adjacent
+# fallback fields contribute a value only when it resolves to one of the
+# four SPECIFIC buckets - if a secondary field normalizes to "Other" that
+# is a sign it isn't really describing employment type for that row, so
+# it is ignored rather than stored.
+_GREENHOUSE_PRIMARY_MARKER = "employment type"
+_GREENHOUSE_FALLBACK_FIELDS = (
+    "time type",
+    "full-time/ part-time",
+    "full-time/part-time",
+    "full-time/part-time status",
+    "employment status",
+    "work type",
+    "worker_category",
+)
+_SPECIFIC_TYPES = frozenset({FULL_TIME, PART_TIME, CONTRACT, INTERNSHIP})
+
+
+def greenhouse_employment_type(metadata_entries) -> str | None:
+    """Return the best employment-type label from a Greenhouse job's raw
+    `metadata` list, or None if none of the recognized fields carry a
+    usable value.
+
+    A literal "Employment Type" entry wins outright and is returned as-is
+    for the caller to normalize (it may legitimately become "Other").
+    Otherwise the curated adjacent fields are tried in priority order and
+    the first whose value resolves to a specific bucket
+    (Full-time/Part-time/Contract/Internship) is returned already
+    normalized. Re-normalizing that value is idempotent, so callers can
+    pass the result straight through ``normalize_employment_type``.
+    """
+    if not isinstance(metadata_entries, list):
+        return None
+
+    primary = None
+    fallbacks: dict[str, str] = {}
+    for entry in metadata_entries:
+        if not isinstance(entry, dict):
+            continue
+        name = (entry.get("name") or "").strip().lower()
+        value = entry.get("value")
+        if not value or not isinstance(value, str):
+            continue
+        if _GREENHOUSE_PRIMARY_MARKER in name:
+            primary = value
+        elif name in _GREENHOUSE_FALLBACK_FIELDS and name not in fallbacks:
+            fallbacks[name] = value
+
+    if primary is not None:
+        return primary
+
+    for field in _GREENHOUSE_FALLBACK_FIELDS:
+        raw = fallbacks.get(field)
+        if raw is None:
+            continue
+        normalized = normalize_employment_type(raw)
+        if normalized in _SPECIFIC_TYPES:
+            return normalized
+    return None
+
+
 def normalize_employment_type(raw: str | None) -> str | None:
     """Map one source's raw employment-type label to the normalized set.
 

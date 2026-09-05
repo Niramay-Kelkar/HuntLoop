@@ -14,6 +14,7 @@ from huntloop.employment_type import (
     INTERNSHIP,
     OTHER,
     PART_TIME,
+    greenhouse_employment_type,
     normalize_employment_type,
 )
 
@@ -101,3 +102,73 @@ def test_international_is_not_misread_as_an_internship():
     # check would wrongly bucket this as an internship.
     assert normalize_employment_type("Vice President of International Sales") == OTHER
     assert normalize_employment_type("International") == OTHER
+
+
+# ---------------------------------------------------------------------------
+# greenhouse_employment_type(): picking the best label out of a company's
+# free-form `metadata` array (literal "Employment Type" first, then a
+# curated set of adjacent fields). Field names/values are real, live-
+# observed - see CLAUDE.md/SESSIONS.md.
+# ---------------------------------------------------------------------------
+
+
+def _md(*pairs):
+    return [{"name": n, "value": v} for n, v in pairs]
+
+
+def test_greenhouse_literal_employment_type_wins_and_keeps_other():
+    # The explicitly-named field is authoritative - an unrecognized value
+    # there is a real answer and legitimately normalizes to Other.
+    assert greenhouse_employment_type(_md(("Employment Type", "Full-time"))) == "Full-time"
+    assert (
+        normalize_employment_type(
+            greenhouse_employment_type(_md(("Employment Type", "Regular")))
+        )
+        == OTHER
+    )
+
+
+def test_greenhouse_falls_back_to_time_type_when_no_employment_type():
+    assert greenhouse_employment_type(_md(("Time Type", "Full time"))) == FULL_TIME
+    assert greenhouse_employment_type(_md(("Time Type", "Part-time"))) == PART_TIME
+    assert (
+        greenhouse_employment_type(_md(("Full-time/ Part-time", "Full-time"))) == FULL_TIME
+    )
+    assert (
+        greenhouse_employment_type(_md(("Employment Status", "Regular Full-time")))
+        == FULL_TIME
+    )
+    assert greenhouse_employment_type(_md(("Work Type", "Intern, Full-time"))) == INTERNSHIP
+    assert greenhouse_employment_type(_md(("WORKER_CATEGORY", "Contract"))) == CONTRACT
+
+
+def test_greenhouse_literal_field_takes_priority_over_adjacent_fields():
+    entries = _md(("Time Type", "Part-time"), ("Employment Type", "Full-time"))
+    assert greenhouse_employment_type(entries) == "Full-time"
+
+
+def test_greenhouse_adjacent_field_ignored_when_value_is_not_a_specific_bucket():
+    # "peo" under Employment Status is real but maps to Other - for a
+    # secondary field that means "not actually an employment type here",
+    # so it must be ignored (leave NULL), not stored as Other.
+    assert greenhouse_employment_type(_md(("Employment Status", "peo"))) is None
+
+
+def test_greenhouse_rejected_fields_are_not_consulted():
+    # Worker Type / Pay Rate Type / Employee Type / Job Type were
+    # investigated and deliberately excluded - their real dominant values
+    # ("Employee", "Salary", "Regular", "Standard") don't describe
+    # employment type. A "(PT)" in a Job Type role name must NOT leak
+    # through as Part-time.
+    assert greenhouse_employment_type(_md(("Worker Type", "Employee"))) is None
+    assert greenhouse_employment_type(_md(("Pay Rate Type", "Salary"))) is None
+    assert greenhouse_employment_type(_md(("Employee Type", "Regular"))) is None
+    assert greenhouse_employment_type(_md(("Job Type", "Physical Therapist (PT)"))) is None
+
+
+def test_greenhouse_handles_empty_null_and_malformed_metadata():
+    assert greenhouse_employment_type(None) is None
+    assert greenhouse_employment_type([]) is None
+    assert greenhouse_employment_type("not a list") is None
+    assert greenhouse_employment_type([{"name": "Time Type", "value": None}]) is None
+    assert greenhouse_employment_type([{"name": "Time Type"}, "junk", 42]) is None

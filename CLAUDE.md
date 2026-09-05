@@ -1930,7 +1930,31 @@ conventions" and SESSIONS.md for the real current state).
   - gem_api: 0 → 498 / 521 (95.6%)
   - greenhouse_api: 0 → 6,326 / 32,319 (19.6% — most Greenhouse
     companies never configure an "Employment Type" custom field; this is
-    a true source-data ceiling, not a backfill miss)
+    a true source-data ceiling, not a backfill miss). **Widened
+    2026-09-05 (see SESSIONS.md "Widen the Greenhouse employment_type
+    backfill to adjacent metadata fields") — 19.5% → 27.6% for
+    Greenhouse (+2,613 rows, +8.0pp).**
+    `huntloop.employment_type.greenhouse_employment_type()` (new shared
+    helper, used by both `greenhouse_spider.py` and
+    `backfill_employment_type_from_metadata.py`) now checks a curated set
+    of adjacent metadata field names when the literal "Employment Type"
+    field is absent: **`Time Type` / `Full-time/ Part-time` /
+    `Full-Time/Part-Time Status` / `Employment Status` / `Work Type` /
+    `WORKER_CATEGORY`** — folded in because their real live values are
+    genuinely Full/Part-time/Contract/Internship. **Investigated and
+    REJECTED: `Worker Type`** (real values `Employee` 414 / `Contractor`
+    3 — a legal worker classification, not hours/duration),
+    **`Pay Rate Type`** (`Salary` 157 / `Hourly` 1 — compensation
+    basis), **`Employee Type`** (`Regular` 534 — a job-category value),
+    **`Job Type`** (`Standard`/`Pipeline`/`Regular` — job category; also
+    `(PT)` in role names false-triggers Part-time). The literal
+    "Employment Type" field keeps full normalization (unrecognized →
+    "Other"); the adjacent fallback fields contribute a value ONLY when
+    it resolves to a specific bucket — an adjacent field normalizing to
+    "Other" is treated as "not really an employment-type field here" and
+    ignored (row stays NULL), never stored. Backfill fills only
+    currently-NULL rows, never overwrites a value from the real
+    "Employment Type" field.
   - **whole table: 0 → 66,634 / 96,910 (68.8%)**. The scheduled daily
     scrape fired mid-backfill (2026-09-05) and its ~480 new rows all got
     `employment_type` populated at insert via the fixed pipeline, with

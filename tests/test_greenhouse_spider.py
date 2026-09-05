@@ -55,3 +55,31 @@ def test_metadata_department_fallback_when_named_department():
     spider = GreenhouseScraper(companies=["testco"])
     items = list(spider.parse(_response({"jobs": [job]})))
     assert items[0]["department"] == "Support"
+
+
+def test_employment_type_from_literal_field():
+    job = {
+        **_JOB,
+        "metadata": [{"id": 1, "name": "Employment Type", "value": "Full-time"}],
+    }
+    spider = GreenhouseScraper(companies=["testco"])
+    items = list(spider.parse(_response({"jobs": [job]})))
+    assert items[0]["employment_type"] == "Full-time"
+
+
+def test_employment_type_falls_back_to_adjacent_time_type_field():
+    # Company configured no "Employment Type" field, only "Time Type" -
+    # the widened logic should still populate employment_type.
+    job = {
+        **_JOB,
+        "metadata": [{"id": 1, "name": "Time Type", "value": "Part time"}],
+    }
+    spider = GreenhouseScraper(companies=["testco"])
+    items = list(spider.parse(_response({"jobs": [job]})))
+    assert items[0]["employment_type"] == "Part-time"
+
+
+def test_employment_type_unset_when_no_recognized_field():
+    spider = GreenhouseScraper(companies=["testco"])
+    items = list(spider.parse(_response({"jobs": [_JOB]})))
+    assert items[0].get("employment_type") is None
