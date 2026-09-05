@@ -557,7 +557,22 @@ conventions" and SESSIONS.md for the real current state).
   wrapper's own redirection takes effect (exactly how a real failure was
   caught during setup — see below). `logs/cron.log`'s format and
   `logs/huntloop.log` are completely unchanged — only the trigger
-  mechanism changed, not what runs or how it logs. **Verified end-to-end
+  mechanism changed, not what runs or how it logs.
+  **`logs/cron.log` is now date-rotated at the start of each run, as of
+  2026-09-05 (see SESSIONS.md's "cron.log rotation stopgap" entry) — an
+  explicit STOPGAP, not a logging-architecture decision.**
+  `run_orchestrator_cron.sh`, before stage 1, gzips any non-empty
+  previous `logs/cron.log` into `logs/archive/cron-<timestamp>.log.gz`
+  and truncates `cron.log` for the fresh run (it had grown to ~4.85 GB —
+  it captures every run's full stdout/stderr including stage 1's
+  `--build` output, and nothing trimmed it). `logs/archive/` is
+  gitignored. Deliberately NO retention/deletion cap (archives kept
+  indefinitely) and NO mid-run rotation — the script only emits a
+  `WARNING` line if the just-rotated log exceeded `CRON_LOG_MAX_BYTES`
+  (500 MB), as a "something is spamming the log" signal. `huntloop.log`'s
+  separate `RotatingFileHandler` is untouched. Expected to be superseded
+  once scraping moves to GitHub Actions (which captures its own workflow
+  logs). **Verified end-to-end
   for real, not just "job loaded"**: `launchctl kickstart -p
   gui/<uid>/com.huntloop.scraper` force-fired the job immediately
   (evidence given `StartCalendarInterval` doesn't need to be awaited

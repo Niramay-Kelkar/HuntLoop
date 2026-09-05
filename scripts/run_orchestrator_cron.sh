@@ -81,6 +81,38 @@ cd "$REPO_ROOT"
 mkdir -p "$REPO_ROOT/logs"
 CRON_LOG="$REPO_ROOT/logs/cron.log"
 
+# --- cron.log rotation (STOPGAP) -----------------------------------------
+# logs/cron.log captures the full stdout/stderr of every scheduled run
+# (stage 1's Docker build output + stage 2's per-job lines), so it grows
+# without bound. Before this run starts, gzip the previous run's log into
+# logs/archive/ with a timestamped name and truncate cron.log for a fresh
+# start. Date-based rotation at the start of each run is the primary (and
+# only) mechanism - there is deliberately NO mid-run rotation and NO
+# retention/deletion cap (archives are kept indefinitely for now). If a
+# single run's cron.log ever exceeds CRON_LOG_MAX_BYTES, something is
+# spamming it - that's flagged as a warning here and noted as a known
+# limitation in SESSIONS.md, not handled with mid-run rotation logic.
+#
+# This is an explicit stopgap, not a considered logging architecture: it
+# is expected to be superseded once scraping moves to GitHub Actions,
+# which captures its own per-workflow logs. huntloop.log's separate
+# RotatingFileHandler is unrelated and untouched.
+CRON_LOG_ARCHIVE_DIR="$REPO_ROOT/logs/archive"
+CRON_LOG_MAX_BYTES=$((500 * 1024 * 1024))  # 500 MB
+
+if [ -s "$CRON_LOG" ]; then
+  mkdir -p "$CRON_LOG_ARCHIVE_DIR"
+  prev_bytes=$(wc -c < "$CRON_LOG" | tr -d ' ')
+  archive="$CRON_LOG_ARCHIVE_DIR/cron-$(date '+%Y%m%dT%H%M%S').log.gz"
+  if gzip -c "$CRON_LOG" > "$archive"; then
+    : > "$CRON_LOG"
+    echo "rotated previous cron.log ($prev_bytes bytes) -> $archive" >> "$CRON_LOG"
+    if [ "$prev_bytes" -gt "$CRON_LOG_MAX_BYTES" ]; then
+      echo "WARNING: previous cron.log exceeded $CRON_LOG_MAX_BYTES bytes before rotation - something is likely spamming it (see SESSIONS.md 'cron.log rotation stopgap')." >> "$CRON_LOG"
+    fi
+  fi
+fi
+
 # See the PATH comment above - launchd's own environment doesn't include
 # /usr/local/bin, where Docker Desktop's `docker` CLI lives on this
 # machine.

@@ -10060,3 +10060,47 @@ images unless it changes or a periodic prune is scheduled. The "Docker
 daemon stopped → `restart: unless-stopped` can't recover it, and Docker
 Desktop only autostarts at login" gap already noted in CLAUDE.md's
 observability section is exactly what bit here.
+
+---
+
+## 2026-09-05 — cron.log rotation stopgap
+
+**Did:** Added a lightweight, date-based rotation step to the top of
+`scripts/run_orchestrator_cron.sh`, before stage 1. If `logs/cron.log`
+has content from the previous run, it is gzip-compressed into
+`logs/archive/cron-<timestamp>.log.gz` (`logs/archive/` created on
+demand) and `cron.log` is truncated for a fresh start. Motivation:
+`cron.log` had grown to ~4.85 GB — it captures the full stdout/stderr of
+every scheduled run, including stage 1's `docker compose ... --build`
+output and stage 2's per-job lines, with nothing ever trimming it (this
+is a direct contributor to the same disk-full incident logged above, on
+top of the Docker build artifacts). Also added `logs/archive/` to
+`.gitignore` (already covered by the existing `logs/` rule; added
+explicitly for clarity).
+
+**Deliberately NOT done:** no retention cap / deletion logic — archives
+are kept indefinitely for now. No mid-run rotation. The script emits a
+`WARNING` line if the just-rotated `cron.log` exceeded
+`CRON_LOG_MAX_BYTES` (500 MB), as a signal that something is spamming
+the log, but does not act on it beyond that — pointing here is the
+handling. `huntloop.log`'s separate `RotatingFileHandler` was not
+touched.
+
+**Explicit stopgap:** this whole local-cron logging path is expected to
+be superseded once scraping moves to GitHub Actions, which captures its
+own per-workflow logs. This is not a considered long-term logging
+architecture — just a bound on unbounded growth until then.
+
+**Verified:** checked `ps aux` and the run history first — no scheduled
+process running (the day's launchd run finished at 10:06 PDT, exit 0 for
+stage 2; advisory lock 1751937901 released). Exercised the rotation
+block in a temp-dir harness against all three cases: (1) no prior
+`cron.log` → no archive written, fresh log started; (2) prior log with
+content → gzipped to a timestamped `logs/archive/*.log.gz` with the
+original bytes intact after decompression, `cron.log` truncated and
+carrying only the rotation marker line; (3) prior log over a lowered
+threshold → the oversize `WARNING` line emitted. Also ran the real
+rotation against the actual ~4.85 GB `cron.log`. Still needs tomorrow's
+real 3am launchd firing to confirm end-to-end that the block runs
+correctly as the first thing in a genuine scheduled invocation (the
+harness spliced the exact block but did not run the full wrapper).
