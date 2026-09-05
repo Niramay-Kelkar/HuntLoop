@@ -4,18 +4,19 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { JobFilters, type JobFiltersValue } from "./JobFilters";
 import * as api from "@/lib/api";
-import { UNSPECIFIED_DEPARTMENT } from "@/types/api";
+import { UNSPECIFIED_DEPARTMENT, UNSPECIFIED_EMPLOYMENT_TYPE } from "@/types/api";
 
 /**
  * Covers the filter component's real logic: the min-score slider's
  * fraction<->percent conversion (0-1 stored, 0-95% displayed/edited), the
  * "Clear filters" button only appearing once a filter is actually set, and
- * the department sentinel value - not the department <select>'s options
- * themselves, which are just a query result rendered as <option>s.
+ * the department/employment-type sentinel values - not those <select>s'
+ * options themselves, which are just a query result rendered as <option>s.
  */
 function renderFilters(value: JobFiltersValue, onChange = vi.fn()) {
   const queryClient = new QueryClient();
   vi.spyOn(api, "getDepartments").mockResolvedValue(["Engineering", "Sales"]);
+  vi.spyOn(api, "getEmploymentTypes").mockResolvedValue(["Contract", "Full-time"]);
   render(
     <QueryClientProvider client={queryClient}>
       <JobFilters value={value} onChange={onChange} />
@@ -24,7 +25,13 @@ function renderFilters(value: JobFiltersValue, onChange = vi.fn()) {
   return onChange;
 }
 
-const emptyValue: JobFiltersValue = { company: "", department: "", minScore: "", sort: "-score" };
+const emptyValue: JobFiltersValue = {
+  company: "",
+  department: "",
+  employmentType: "",
+  minScore: "",
+  sort: "-score",
+};
 
 describe("JobFilters", () => {
   afterEach(() => {
@@ -42,7 +49,13 @@ describe("JobFilters", () => {
     const clearButton = screen.getByText(/Clear filters/);
     fireEvent.click(clearButton);
 
-    expect(onChange).toHaveBeenCalledWith({ company: "", department: "", minScore: "", sort: "-score" });
+    expect(onChange).toHaveBeenCalledWith({
+      company: "",
+      department: "",
+      employmentType: "",
+      minScore: "",
+      sort: "-score",
+    });
   });
 
   it("converts the min-score slider's percent value back to a 0-1 fraction", () => {
@@ -67,5 +80,14 @@ describe("JobFilters", () => {
     fireEvent.change(select, { target: { value: UNSPECIFIED_DEPARTMENT } });
 
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ department: UNSPECIFIED_DEPARTMENT }));
+  });
+
+  it("sends the UNSPECIFIED_EMPLOYMENT_TYPE sentinel when 'Not specified' is selected", () => {
+    const onChange = renderFilters(emptyValue);
+
+    const select = screen.getByDisplayValue("All employment types");
+    fireEvent.change(select, { target: { value: UNSPECIFIED_EMPLOYMENT_TYPE } });
+
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ employmentType: UNSPECIFIED_EMPLOYMENT_TYPE }));
   });
 });

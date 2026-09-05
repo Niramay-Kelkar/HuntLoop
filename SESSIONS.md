@@ -9687,3 +9687,192 @@ pytest failure already does.
 useApplicationStatus.test.tsx` (new), `frontend/src/components/
 JobFilters.test.tsx` (new), `.github/workflows/ci.yml`, `CLAUDE.md`,
 `SESSIONS.md`.
+
+---
+
+## 2026-09-05 — Add employment_type support end-to-end
+
+**Did:** Added `job_postings.employment_type` as a real, populated,
+filterable column across all 7 ATS sources — the same investigation →
+migration → pipeline fix → backfill → API/UI filter shape as the
+`job_postings.department` NULL fix (2026-09-02), but `employment_type`
+had never existed as a column at all.
+
+### 1. Per-source investigation (real data, not assumptions)
+
+Every one of the 7 spiders was ALREADY writing a raw employment-type
+value into `item["employment_type"]` — `JobDataPipeline.process_item()`
+simply never passed it into the `JobPosting(...)` insert (identical to
+the department bug). Confirmed each source's real shape against live raw
+responses + stored `job_metadata`:
+
+| Source | Field | Real values seen | Clean? | In stored metadata_json? |
+|---|---|---|---|---|
+| Workday | `jobPostingInfo.timeType` | `Full time` / `Part time` / `""` | yes | yes (`timeType`) |
+| Ashby | `employmentType` | `FullTime` `PartTime` `Contract` `Temporary` `Intern` | yes (enum) | no |
+| Gem | `job.employmentType` | `FULL_TIME` (+ `PART_TIME`/… per schema) | yes (enum) | no |
+| iCIMS | JSON-LD `employmentType` | `FULL_TIME`, `OTHER` (real per-tenant variation) | yes (schema.org enum) | no |
+| SmartRecruiters | `typeOfEmployment.label` | `Full-time` (+ company-selectable others) | mostly | no (but on list endpoint) |
+| Lever | `categories.commitment` | `Full-Time`, `Permanent`, `正社員`, `Modified Full-Time`, `FT`, … | **no — per-company free text** | yes (`categories`) |
+| Greenhouse | free-form `metadata[]` entry named `Employment Type` / `LEGACY - Employment Type` | `Regular`, `Fulltime Employee`, `Full-Time: Experienced`, `Full-time_exempt`, … | **no — free text, and only ~20% of companies configure the field at all** | yes (whole raw `metadata` array) |
+
+Greenhouse has NO structured employment-type field anywhere on the job
+object (checked live: only `metadata` — and that's null for the ~28% of
+companies without the "Metadata" feature enabled). Workday's `timeType`
+is genuinely blank (`""`, not missing) for ~1.3% of rows.
+
+### 2. Normalization — `huntloop.employment_type`
+
+`normalize_employment_type(raw) -> "Full-time" | "Part-time" | "Contract"
+| "Internship" | "Other" | None`. Called once, centrally, in the
+pipeline (the item keeps the raw label; the pipeline normalizes at
+insert) rather than duplicated across 7 spiders.
+
+- **`None`/`""` → NULL** (source gave no signal). **A real but
+  ambiguous/unrecognized label → `"Other"`** (`"Regular"`, `"Employee"`,
+  `"Salary"`, iCIMS `"OTHER"`, `"正社員"`) — never guessed into
+  Full-time/Part-time/etc. just because that's the common case. This is
+  the task's explicit rule: don't invent a value where the source gives
+  none, but a real-but-messy value is data, not absence.
+- Regex is word-boundary anchored (`\bintern\b` so `"International
+  Sales"` is NOT an internship) with a `(?![a-zA-Z])` trailing guard
+  instead of a bare `\b` — real Greenhouse data appends an FLSA suffix
+  with an underscore (`"Full-time_exempt"`, `"Internship_non-exempt"`),
+  and `\b` doesn't fire between `e` and `_`.
+- Most-specific-first: a label naming two things (`"Temporary
+  Full-Time"`, `"Full Time - Fixed Term Employment"`) is bucketed by the
+  more decisive signal (Contract/Internship beats Full-time/Part-time).
+- Validated against every distinct real raw value in the live DB for
+  Greenhouse (52 distinct) and Lever (52 distinct) before wiring in.
+- `tests/test_employment_type.py` — 6 tests, all from real observed
+  values.
+
+### 3. Migration `f3a7c9d21b44`
+
+**Schema-drift finding**: this dev machine's live `job_postings` ALREADY
+had an `employment_type VARCHAR(100)` column — untracked by any prior
+migration, a leftover from the pre-Alembic `Base.metadata.create_all()`
+era (`db_models.py` has had `employment_type = scrapy.Field()` on the
+item since early on). It held zero data (0 / 96,409 rows; no code path
+ever wrote to it). Guarded the migration the same way `37f5b1de06fe`
+guarded its drifted `location` column: `inspect()` the table — if the
+column exists, `alter_column` it to `VARCHAR(50)` (the normalized values
+are all ≤10 chars); on a clean DB (CI) `add_column` it fresh. Applied
+against real local Postgres, verified `VARCHAR(50)` + head =
+`f3a7c9d21b44`.
+
+### 4. Pipeline
+
+`process_item()` now passes `employment_type=normalize_employment_type(
+item.get("employment_type"))` into the insert, and the repost-match path
+(previously department-only) now also backfills `employment_type` on a
+repost when the existing row's is NULL — narrow/additive, every other
+column still untouched on a repost. 4 new `tests/test_pipeline.py` tests
+(`test_process_item_stores_normalized_employment_type`,
+`…_leaves_employment_type_null_when_source_gives_none`,
+`test_repost_backfills_null_employment_type_only`,
+`test_repost_does_not_overwrite_existing_employment_type`).
+
+### 5. Backfill — 5 scripts, one per real mechanism
+
+- **`scripts/backfill_employment_type_from_metadata.py`** —
+  Greenhouse + Lever + Workday, entirely from already-stored
+  `job_metadata.metadata_json` (double-decoded), **zero network**.
+  Unlike the department backfill (where only Lever's raw field was
+  stored), all three of these sources' raw employment-type fields are
+  already in `metadata_json` as a side effect of storing broader
+  metadata. Keyset-paginated by id (a row with no signal stays NULL, so
+  a repeated `IS NULL` query would loop forever).
+- **`scripts/backfill_employment_type_smartrecruiters.py`** — list-only
+  re-fetch (label is inline on the list endpoint; the per-job detail
+  fetch the spider makes is only for the description). Mirrors
+  `backfill_department_smartrecruiters.py` exactly.
+- **`scripts/backfill_employment_type_ashby.py`** /
+  **`…_gem.py`** — one API/GraphQL-list call per company (both sources
+  return `employmentType` inline in the list response).
+- **`scripts/backfill_employment_type_icims.py`** — the only source
+  needing a per-JOB re-fetch (JSON-LD `employmentType` lives only on
+  each detail page). Re-fetches each existing row's stored `job_url`
+  directly rather than re-walking listing pages; different tenants
+  (different hosts) run concurrently in a thread pool with per-host
+  politeness (1.5s between same-host requests, honest UA, robots.txt
+  re-checked per tenant). Took ~2h wall-clock, ~52% of that on
+  `primehealthcare` alone (3,355 rows); every other tenant finished in
+  parallel well before. Many `HTTP 410 Gone` on old primehealthcare
+  postings — expected (expired), gracefully skipped.
+
+### 6. Real before → after NULL counts (live query)
+
+Before: **0 populated** across all 7 sources (the drifted column existed
+but nothing ever wrote it).
+
+| Source | after: filled / total | % |
+|---|---|---|
+| workday_api | 28,403 / 28,773 | 98.7% |
+| lever_api | 3,923 / 4,056 | 96.7% |
+| gem_api | 498 / 521 | 95.6% |
+| ashby_api | 3,357 / 3,515 | 95.5% |
+| icims_portal | 5,726 / 6,374 | 89.8% |
+| smartrecruiters_api | 18,401 / 21,322 | 86.3% |
+| greenhouse_api | 6,326 / 32,319 | 19.6% |
+| **whole table** | **66,634 / 96,910** | **68.8%** |
+
+Greenhouse's 19.6% is a true source-data ceiling — most Greenhouse
+companies never configure an "Employment Type" custom field. The
+per-source residual NULLs are genuine gaps (Workday's empty `timeType`,
+iCIMS 410-expired postings, SmartRecruiters boards that don't set the
+field), not backfill failures.
+
+Distinct stored values: Full-time 53,438 · Other 5,580 · Part-time
+4,501 · Contract 2,510 · Internship 605.
+
+**End-to-end confirmation**: the scheduled daily scrape fired during the
+backfill window (2026-09-05) and its ~480 new rows all got
+`employment_type` populated at insert via the fixed pipeline, zero
+manual step.
+
+### 7. API + Frontend filter (mirrors the department filter exactly)
+
+- `GET /jobs?employment_type=<value>` — exact match, or
+  `__unspecified__` (`UNSPECIFIED_EMPLOYMENT_TYPE`) for NULL. Unset =
+  all postings including NULL (additive/optional, never silently
+  exclusionary).
+- `GET /jobs/employment-types` — real distinct non-null values (returns
+  `["Contract","Full-time","Internship","Other","Part-time"]` right
+  now); registered before `/jobs/{job_id}` so the int path param can't
+  intercept it.
+- `employment_type` added to `JobSummary`/`JobDetail` schemas + both
+  router response builders.
+- Frontend: `JobFilters.tsx` employment-type `<select>` (its own
+  `useQuery` against `/jobs/employment-types`), `JobFiltersValue.employmentType`
+  threaded through `frontend/src/app/jobs/page.tsx`'s query key/params,
+  `UNSPECIFIED_EMPLOYMENT_TYPE` + `getEmploymentTypes()` +
+  `ListJobsParams.employment_type` + `JobSummary.employment_type` in the
+  TS layer. 1 new frontend test.
+
+**Verified live**: filter totals sum exactly
+(53,438 + 4,501 + 2,510 + 605 + 5,580 = 66,634 populated; + 30,276
+unspecified = 96,910 total).
+
+### 8. Tests
+
+Backend: **304 → 318 passing** (+6 `test_employment_type.py`, +4
+`test_pipeline.py`, +4 `test_api_jobs.py`). Frontend: **14 → 15
+passing**. `tsc --noEmit` clean.
+
+**Files changed:** `alembic/versions/f3a7c9d21b44_add_employment_type_to_job_postings.py`
+(new), `src/huntloop/employment_type.py` (new), `src/huntloop/db_models.py`,
+`src/huntloop/pipelines.py`, `src/huntloop/api/routers/jobs.py`,
+`src/huntloop/api/schemas/jobs.py`,
+`scripts/backfill_employment_type_from_metadata.py` (new),
+`scripts/backfill_employment_type_smartrecruiters.py` (new),
+`scripts/backfill_employment_type_ashby.py` (new),
+`scripts/backfill_employment_type_gem.py` (new),
+`scripts/backfill_employment_type_icims.py` (new),
+`tests/test_employment_type.py` (new), `tests/test_pipeline.py`,
+`tests/test_api_jobs.py`, `frontend/src/types/api.ts`,
+`frontend/src/lib/api.ts`, `frontend/src/components/JobFilters.tsx`,
+`frontend/src/components/JobFilters.test.tsx`,
+`frontend/src/app/jobs/page.tsx`,
+`frontend/src/hooks/useApplicationStatus.test.tsx`, `CLAUDE.md`,
+`SESSIONS.md`.

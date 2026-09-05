@@ -23,6 +23,7 @@ export interface JobSummary {
   company_name: string;
   job_url: string;
   department: string | null;
+  employment_type: string | null;
   date_posted: string | null;
   match_score: number | null;
   matched_skills: string[] | null;
@@ -92,6 +93,13 @@ export interface DashboardStats {
 // "postings with no department set" - mirrors
 // huntloop.api.routers.jobs.UNSPECIFIED_DEPARTMENT.
 export const UNSPECIFIED_DEPARTMENT = "__unspecified__";
+
+// Same idea for the `employment_type` query param - mirrors
+// huntloop.api.routers.jobs.UNSPECIFIED_EMPLOYMENT_TYPE. Same literal
+// value as UNSPECIFIED_DEPARTMENT (both are "__unspecified__" on the
+// backend), kept as a separate exported constant so each filter reads
+// its own name at the call site rather than sharing one generic sentinel.
+export const UNSPECIFIED_EMPLOYMENT_TYPE = "__unspecified__";
 
 export interface ResumeVersionSummary {
   id: number;

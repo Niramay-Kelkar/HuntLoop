@@ -136,6 +136,13 @@ class JobPosting(Base):
     job_title = Column(String(300), nullable=False)
     job_url = Column(String(500), nullable=False)
     department = Column(String(255), nullable=True)
+    # Normalized employment type (see huntloop.employment_type) - one of
+    # Full-time/Part-time/Contract/Internship/Other, or NULL when the
+    # source genuinely exposes no employment-type signal at all for this
+    # posting (as opposed to a real-but-unrecognized raw label, which
+    # normalizes to "Other" rather than NULL - see that module's
+    # docstring for the full reasoning).
+    employment_type = Column(String(50), nullable=True)
     job_description = Column(Text, nullable=True)
     date_posted = Column(DateTime, nullable=True)
     is_active = Column(Boolean, nullable=True, default=True, server_default="true")

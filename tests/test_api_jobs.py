@@ -71,6 +71,7 @@ def _seed(db_session):
         source_id=source.id,
         embedding=HIGH_MATCH_EMBEDDING,
         department="Engineering",
+        employment_type="Full-time",
     )
     mid = JobPosting(
         job_title="Mid Match Job",
@@ -82,6 +83,7 @@ def _seed(db_session):
         matched_skills=["Python", "AWS"],
         missing_skills=["Go"],
         department="Sales",
+        employment_type="Contract",
     )
     low = JobPosting(
         job_title="Low Match Job",
@@ -91,6 +93,7 @@ def _seed(db_session):
         source_id=source.id,
         embedding=LOW_MATCH_EMBEDDING,
         department="Engineering",
+        employment_type="Full-time",
     )
     no_embedding = JobPosting(
         job_title="Not Yet Embedded Job",
@@ -100,6 +103,7 @@ def _seed(db_session):
         source_id=source.id,
         embedding=None,
         department=None,
+        employment_type=None,
     )
     db_session.add_all([high, mid, low, no_embedding])
     db_session.commit()
@@ -295,6 +299,45 @@ def test_list_departments_returns_distinct_non_null_values_sorted(api_client, db
     response = api_client.get("/jobs/departments")
     assert response.status_code == 200
     assert response.json() == ["Engineering", "Sales"]
+
+
+def test_list_jobs_filters_by_employment_type(api_client, db_session):
+    _seed(db_session)
+
+    response = api_client.get("/jobs", params={"employment_type": "Full-time"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 2
+    assert {item["job_title"] for item in body["items"]} == {"High Match Job", "Low Match Job"}
+
+
+def test_list_jobs_filters_by_unspecified_employment_type(api_client, db_session):
+    _seed(db_session)
+
+    response = api_client.get("/jobs", params={"employment_type": "__unspecified__"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["items"][0]["job_title"] == "Not Yet Embedded Job"
+
+
+def test_list_jobs_no_employment_type_filter_includes_null_employment_type_jobs(api_client, db_session):
+    _seed(db_session)
+
+    response = api_client.get("/jobs")
+    assert response.status_code == 200
+    body = response.json()
+    # All 4 seeded jobs, including the one with employment_type=None, are
+    # returned when no employment_type filter is applied.
+    assert body["total"] == 4
+
+
+def test_list_employment_types_returns_distinct_non_null_values_sorted(api_client, db_session):
+    _seed(db_session)
+
+    response = api_client.get("/jobs/employment-types")
+    assert response.status_code == 200
+    assert response.json() == ["Contract", "Full-time"]
 
 
 def test_list_jobs_filters_by_min_score(api_client, db_session):
