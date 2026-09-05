@@ -9962,3 +9962,101 @@ before running the employment_type backfill).
 `scripts/backfill_employment_type_from_metadata.py`,
 `tests/test_employment_type.py`, `tests/test_greenhouse_spider.py`,
 `CLAUDE.md`, `SESSIONS.md`.
+
+---
+
+## 2026-09-05 — Greenhouse employment_type widening: backfill run + confirmed
+
+**Did:** The entry above ("Widen the Greenhouse employment_type
+backfill…", merged as PR #8) was written while today's scheduled
+skills-matching backfill held the Postgres advisory lock, so its
+before/after numbers were a dry-run projection over the exact code path,
+not a persisted run. That backfill has now been run for real
+(`backfill_employment_type_from_metadata.py greenhouse_api`) once the
+lock was free.
+
+**Result — matched the projection exactly, no correction needed:**
+
+| | rows | % |
+|---|---|---|
+| before (live query) | 6,340 / 32,489 populated | 19.51% |
+| after (live query) | 8,953 / 32,489 populated | 27.56% |
+
+**+2,613 rows filled, +8.05 pp.** 26,120 rows scanned in 41s; 23,507
+genuinely have no employment-type signal in stored metadata. Newly
+added values: Full-time 2,590 · Part-time 16 · Contract 5 · Internship 2
+— the adjacent fallback fields only ever contribute a specific bucket,
+never "Other" (the "Other" total for Greenhouse is unchanged, since only
+the literal "Employment Type" field can produce it and those rows were
+never touched).
+
+**Tests:** full backend suite **327 / 327 passing** with the advisory
+lock free — the 3 `test_backfill_lock.py` tests that failed mid-session
+in the entry above were transient (a real backfill was holding the lock
+then), not a defect. Advisory lock / `ps aux` checked before and after;
+the scheduled run was never disturbed and completed on its own.
+
+**No code change** — backfill execution + verification only.
+
+---
+
+## 2026-09-05 — Incident: host disk full, Docker Desktop stopped
+
+**What happened:** The machine's system disk (`/System/Volumes/Data`)
+reached 100% full (~238 MiB free). Docker Desktop was quit **cleanly** at
+09:32 PDT — its backend log shows an orderly shutdown sequence ("waiting
+for electron to quit" → "electron processes have shut down" → "shutting
+down vital services" → socket close), not a crash, panic, or OOM kill.
+All five Docker containers (the scraper run-container plus `db`,
+`grafana`, `prometheus`, `pushgateway`) went down with the daemon.
+`restart: unless-stopped` does not help here — that policy only acts
+while the Docker daemon itself is running.
+
+**Independent, not caused by this:** today's scheduled scrape (stage 1
+of `run_orchestrator_cron.sh`) had **already failed earlier**, at
+~07:51 PDT, exit code 1 — before the Docker shutdown and unrelated to
+it. Stage 2 proceeded anyway, as designed.
+
+**Skills-matching backfill — entirely unaffected:** it is host Python
+only (system Postgres on :5432 + Groq/Gemini over HTTP, no Docker
+dependency). It ran straight through the Docker shutdown and **completed
+naturally on its own at 10:06:16 PDT** (exit 0) once all three provider
+quotas (`groq_120b`, `groq`, `gemini`) were exhausted — the designed
+clean-stop path (2,314 succeeded / 69 failed / 2,383 processed this run;
+~83,575 relevant rows still awaiting a result for the next quota
+window). Its final metrics push failed with connection-refused
+(Pushgateway was down) — one logged warning, results unaffected, by
+design. The Postgres advisory lock (1751937901) released cleanly on
+exit.
+
+**Root cause of the disk fill:** accumulated Docker build artifacts.
+`run_orchestrator_cron.sh` stage 1 runs `docker compose run --rm
+--build ... app python main.py`, and every daily `--build` left the
+prior `huntloop-app` image dangling plus ~800 MB of fresh build cache.
+By this morning: 11 dangling `<none>` `huntloop-app` images (~7.3 GB
+disk-usage each, sharing a common base), ~24 GB of build cache, and a
+47 GB `Docker.raw` VM image.
+
+**Resolution — real Docker/filesystem cleanup, ~29 GiB freed:** removed
+`frontend/.next` + disposable `scratch_*` files; relaunched Docker
+(daemon only, no build); removed the 11 dangling `huntloop-app` images
+(re-verified untagged / 0 containers first); `docker builder prune`;
+brought `db` + the observability stack back up via `docker compose up
+-d` for those services only (no `app`/`api` build). `huntloop-app:latest`,
+`huntloop-api:latest`, and the unrelated `mssql` / `hands-off-*` images
+were deliberately kept. `Docker.raw` shrank 47 GB → 21 GB on its own
+(Docker Desktop 4.72 runs automatic block discard on the VM image); a
+further manual Settings → Resources compaction is possible but not
+urgent with ~29 GiB now free. No code changed — this entry is the
+record.
+
+**Follow-ups (not done here):** two orphaned anonymous Docker volumes
+(168 MB, created 2020 — pre-dates this project; 49 MB, created
+2026-08-20) flagged for human review before removal; `huntloop-api` /
+`mssql` / `hands-off-*` images are human-decision reclaim candidates
+(~10 GB combined) if space gets tight again; the `--build`-every-run
+pattern in `run_orchestrator_cron.sh` will keep generating dangling
+images unless it changes or a periodic prune is scheduled. The "Docker
+daemon stopped → `restart: unless-stopped` can't recover it, and Docker
+Desktop only autostarts at login" gap already noted in CLAUDE.md's
+observability section is exactly what bit here.
