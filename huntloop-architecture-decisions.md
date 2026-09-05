@@ -675,3 +675,394 @@ None of the above is being built now. This entry exists so that if/when
 the multi-user decision is actually made, the reasoning for why this one
 column already exists — and everything it still doesn't do — is written
 down rather than rediscovered.
+
+---
+
+## Hosted Postgres migration: Supabase vs Neon + GitHub Actions cron (researched 2026-09-05, PLANNING ONLY — nothing migrated, no infra changed)
+
+Research pass to put real current numbers behind the already-made
+decision (CLAUDE.md) to move the DB off this laptop's local Postgres and
+move scheduling off launchd. This section is the reference for the future
+migration prompt. **No database was created, no `DATABASE_URL` changed,
+no `docker-compose.yml` / GitHub Actions workflow touched.** All provider
+numbers below were read from official pricing/docs pages in September
+2026 (sources inline); all HuntLoop numbers were measured directly
+against the live local DB and the archived `logs/cron.log`.
+
+### Real numbers this analysis is grounded in
+
+**The database (measured 2026-09-05, local system Postgres :5432 / `jobsight`):**
+
+| Item | Value |
+|---|---|
+| `pg_database_size` (total) | **1341 MB (~1.31 GiB)** |
+| `lca_disclosures` | 1,431,321 rows — 646 MB (383 MB heap + 262 MB indexes) |
+| `job_postings` | 98,167 rows — 642 MB (229 MB heap + ~413 MB indexes/TOAST) |
+| `job_postings.embedding` populated | 98,167 / 98,167 — every row is a `vector(384)` (~150 MB of raw vector data alone) |
+| `job_metadata` / `job_locations` | 32 MB / 11 MB |
+| `companies` / `resume_versions` | 743 rows / 3 rows |
+| skills-matching backlog (`matched_skills IS NULL AND is_relevant IS TRUE`) | 83,575 rows |
+| Server / extension versions | PostgreSQL **18.0**, pgvector **0.8.6**; extensions in use: `plpgsql`, `vector` |
+| pgvector ANN index (ivfflat/hnsw) | **none** — every match-score query is a Seq Scan + top-N heapsort, by deliberate decision (see CLAUDE.md) |
+
+The dataset does not fit under 500 MB by any realistic trimming —
+`job_postings` alone is 642 MB and ~413 MB of that is indexes + the
+embedding column + description TOAST, none of it optional to the product.
+
+**The daily scheduled job (`run_orchestrator_cron.sh`), real wall-clock
+from the archived `logs/cron.log`:**
+
+| Date | Total run wall-clock | Stage 2 "processed in" (self-reported) |
+|---|---|---|
+| 2026-08-26 | **45 min** | 41.1 min |
+| 2026-08-27 | **55 min** | 51.5 min |
+| 2026-08-28 | **51 min** | 47.5 min |
+| 2026-08-24 | 56 min | 55.6 min |
+| 2026-08-25 | 4 h 22 min | 39.5 min |
+| 2026-08-29 | 4 h 49 min | 51.8 min |
+| 2026-08-30 | 4 h 45 min | 44.8 min |
+| 2026-08-31 | 6 h 24 min (killed, exit 143) | — |
+| 2026-09-01 | 4 h 20 min | 79.8 min |
+| 2026-09-03 | **8 h 36 min** | 97.8 min |
+| 2026-09-04 | **7 h 30 min** | 238.7 min (1648 of 2304 calls failed) |
+| 2026-09-05 | 3 h 30 min | 135.0 min |
+
+"Good" days are ~45–56 min end-to-end. The multi-hour days are driven by
+two things, neither of which is DB-bound: (a) stage 1's `docker compose
+run --rm --build` rebuilding the image every run (worse recently under
+host disk pressure — see the 2026-09-05 disk-full incident in
+SESSIONS.md), and (b) stage 2's `TokenPacer` sleeping against Groq/Gemini
+**free-tier daily quotas** — most of stage 2's wall-clock is deliberate
+rate-limit backoff, not compute. Stage 2 runs until
+`AllProvidersExhausted` and stops; the 83,575-row backlog clears over
+weeks regardless of where it runs.
+
+### Supabase — current free & paid limits (Sept 2026)
+
+- **Free:** 500 MB database, shared compute / 500 MB RAM, 5 GB egress, 2
+  active projects, **project paused after 7 days of inactivity**, no
+  backups. pgvector **is** available on Free (pgvector 0.8.0 with a
+  current Postgres version). Source:
+  [supabase.com/pricing](https://supabase.com/pricing),
+  [Supabase pgvector docs](https://supabase.com/docs/guides/database/extensions/pgvector).
+- **Pro:** **$25/mo** per organization. 8 GB disk included, then
+  **$0.125/GB**; "Micro" compute included in the base price (60 direct /
+  200 pooler connections, shared CPU, ~1 GB RAM); 250 GB egress included;
+  no inactivity pause; daily backups. **Spend cap is ON by default** on
+  Pro — usage beyond plan limits is refused rather than billed unless you
+  explicitly turn the cap off. Source:
+  [supabase.com/pricing](https://supabase.com/pricing).
+- **pgvector:** included at every tier, no add-on. HNSW + IVFFlat both
+  supported. `vector` up to 2000 dims (we use 384).
+- **Postgres version:** new projects provision PG15 / PG17 —
+  **not 18 yet** (our source is 18.0).
+- **Networking gotcha:** new Supabase projects are **IPv6-only** on the
+  direct connection since Jan 2024; an IPv4 direct address is a **+$4/mo
+  add-on**. The Supavisor **pooler is IPv4** and free — so an IPv4-only
+  client (GitHub Actions runners are IPv4-only) **must** use the pooler
+  connection string, not the direct one. Source:
+  [Supabase IPv4 address docs](https://supabase.com/docs/guides/platform/ipv4-address),
+  [PgBouncer/IPv4 deprecation changelog](https://supabase.com/changelog/17817-pgbouncer-and-ipv4-deprecation).
+
+**Verdict for HuntLoop:** Free is a non-starter — 1.31 GiB > 500 MB (hard
+limit, writes are refused past it) and the 7-day pause would kill a DB
+that a daily-only job touches. So Supabase means **Pro at $25/mo flat**.
+1.31 GiB fits the 8 GB included disk with zero overage; Micro compute is
+fine for a single-user tool + one daily batch.
+
+### Neon — current free & paid limits (Sept 2026)
+
+- **Free:** **0.5 GB storage per project**, **100 CU-hours/month**
+  compute, autoscale up to 2 CU (1 CU = 1 vCPU / 4 GB RAM),
+  **scale-to-zero after 5 min idle (always on, can't disable on Free)**,
+  5 GB egress, 100 projects / 10 branches. Source:
+  [neon.com/pricing](https://neon.com/pricing),
+  [Neon plans docs](https://neon.com/docs/introduction/plans).
+- **Launch:** **no monthly minimum** — pure usage-based since the
+  Dec 2025 pricing change. Storage **$0.35/GB-month** (no included
+  allowance), compute **$0.106/CU-hour** (no included hours), autoscale
+  up to 8 CU, scale-to-zero configurable, 500 GB egress/project
+  included. Source:
+  [neon.com/pricing](https://neon.com/pricing),
+  [Neon "new usage-based pricing" blog](https://neon.com/blog/new-usage-based-pricing).
+- **Scale:** usage-based, compute $0.222/CU-hour — only relevant if
+  HIPAA/SOC2/higher autoscale is ever needed. Not for this project.
+- **pgvector:** available on **every** Neon plan, no add-on; HNSW +
+  IVFFlat supported, `vector` up to 2000 dims. Source:
+  [Neon pgvector docs](https://neon.com/docs/extensions/pgvector).
+- **Postgres version:** Neon supports **PG 14–17** for new projects —
+  **not 18** (same version-gap issue as Supabase). Source:
+  [Neon migrate-from-Postgres docs](https://neon.com/docs/import/migrate-from-postgres).
+- **Connection gotcha:** Neon publishes a **direct** endpoint and a
+  **`-pooler`** endpoint (PgBouncer, transaction mode). Long-lived
+  SQLAlchemy pools should use the direct endpoint; short-lived / many
+  concurrent clients use the pooler. `pg_dump`/`pg_restore` **must** use
+  the direct (unpooled) endpoint.
+
+**Verdict for HuntLoop:** Free is disqualified by **storage only** —
+1.31 GiB > 0.5 GB. Compute-wise the workload would nearly fit Free's
+100 CU-h/month, but that doesn't matter once storage forces the upgrade.
+So Neon means **Launch**, which has **no minimum**: storage is
+1.31 GiB × $0.35 ≈ **$0.46/month**, plus metered compute. Realistic
+compute estimate for a single-user tool that scales to zero between a
+once-daily batch: ~2–4 CU-h/day for the batch (autoscaling 1–2 CU for
+~1–2 h of actual DB-active time) ≈ 60–120 CU-h/month ≈ **$6–13/month**,
+plus a few CU-h for ad-hoc/dev queries. **All-in ≈ $7–15/month**, and it
+genuinely drops toward the storage floor in a quiet month.
+
+### Recommendation: **Neon (Launch plan).**
+
+Reasoning, in priority order:
+
+1. **Neither free tier fits** (1.31 GiB vs 0.5 GB on both), so the real
+   choice is Supabase **Pro ($25/mo flat)** vs Neon **Launch (~$7–15/mo,
+   usage-based, no minimum)**. For a workload that is one developer's
+   local tool plus a single daily batch job — idle the vast majority of
+   the time — Neon's scale-to-zero + metered model matches the shape;
+   Supabase's flat compute charge is paying 24/7 for compute that's used
+   maybe an hour a day.
+2. **HuntLoop uses none of Supabase's platform.** It's a plain
+   SQLAlchemy + Alembic app — no Supabase Auth, Storage, Edge Functions,
+   PostgREST, Realtime. The $25 buys a managed Postgres and a dashboard;
+   Neon is also a managed Postgres with a dashboard, for less.
+3. **pgvector parity** — both include it at every tier, both support the
+   index types we don't currently use, both handle `vector(384)` /
+   `public.vector`. No differentiation here.
+4. **Capacity is not close to a limit on either** — 1.31 GiB is small;
+   the concern is cost efficiency, not headroom, and Neon wins that.
+5. **Migration cost is identical** — a `pg_dump` / restore either way, so
+   a later Neon→Supabase move (if HuntLoop ever grows a always-on hosted
+   API with steady traffic, the one scenario where Supabase's flat rate
+   becomes the safer bet) is the same operation, not a lock-in.
+
+Secondary tie-breakers for Neon: cheaper/branchable for testing the
+migration itself (spin a branch, dry-run the restore, throw it away);
+usage-based means a botched heavy backfill costs a dollar of compute, not
+a plan upgrade.
+
+The one real reason to pick Supabase instead: if predictable flat billing
+matters more than absolute cost, or if a future step wants Supabase Auth
+for the multi-user work sketched in the `resume_versions.owner_id` entry
+above. Neither applies today.
+
+### GitHub Actions as the scheduler — realistic?
+
+- **Free tier:** 2,000 Actions minutes/month for private repos (public
+  repos are unmetered). Source:
+  [github.com/pricing](https://github.com/pricing),
+  [GitHub Actions billing docs](https://docs.github.com/en/actions/concepts/billing-and-usage).
+- **Minimum cron interval:** 5 minutes. **`schedule` runs are delayed
+  under load** — "can be delayed during periods of high loads … high
+  load times include the start of every hour"; community reports of
+  10–30 min and occasionally >1 h delays. A `0 3 * * *`-style job will
+  fire, just not punctually — fine for this workload. Source:
+  [GitHub "events that trigger workflows" docs](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows).
+- **Auto-disable:** scheduled workflows auto-disable after 60 days of no
+  repo activity (documented for public repos; HuntLoop commits far more
+  often than that, so moot).
+- **HuntLoop is a PRIVATE repo** (confirmed 2026-09-05 — the GitHub API
+  returns 404 unauthenticated; the existing `.github/workflows/ci.yml`
+  runs push/PR-triggered Actions on it today, so Actions itself is
+  enabled). Several third-party 2026 write-ups claim `schedule:` events
+  are disabled on private repos on the **Free** personal plan and need
+  **Pro ($4/mo)** — GitHub's own docs neither confirm nor deny this.
+  **This must be verified directly before relying on GitHub Actions
+  cron** (create a trivial `schedule:` workflow on a throwaway private
+  repo under this account and see if it fires). If true, GitHub Pro at
+  $4/mo also raises the minutes allowance to 3,000/month.
+
+**Timing fit — this is the real problem, independent of the private-repo
+question:**
+
+- A GitHub-hosted job has a **6-hour hard limit** per job. Real runs on
+  2026-08-31 (6 h 24 m), 2026-09-03 (8 h 36 m) and 2026-09-04 (7 h 30 m)
+  **would have been killed.**
+- Minutes budget: even "good" days at ~50 min × 30 = 1,500 min/month
+  leaves almost no margin under the 2,000 free minutes, and one bad day
+  (238 min of stage 2 alone on 2026-09-04) burns an eighth of the
+  monthly budget. The current shape does **not** fit 2,000 min/month
+  with any safety margin.
+- **Root cause is fixable but not by lifting-and-shifting:** most of the
+  wall-clock is (a) the per-run Docker `--build` (eliminate by building
+  the image once in a separate workflow / using GHCR, or by not
+  containerising stage 1 on a GHA runner that has Python), and (b) stage
+  2 sleeping on external LLM free-tier daily quotas — which is *paying
+  for an idle runner to sleep*. Stage 2 is a poor fit for per-run CI
+  minutes no matter what; it wants to be a cheap always-on worker
+  (small VM, Fly.io/Railway/a Neon-adjacent worker) or stay on the
+  local machine until the LLM-quota situation changes.
+
+**GitHub Actions recommendation:** split the two stages.
+- **Stage 1 (scraper)** → GitHub Actions `schedule:` is a fine fit once
+  the image build is moved out of the hot path: ~5–15 min/run ≈
+  150–450 min/month, well inside 2,000. Do this after the DB is hosted
+  (a GHA runner is IPv4-only → it must reach the hosted DB over an
+  IPv4-reachable endpoint: Neon's endpoints are dual-stack/IPv4-OK;
+  Supabase would force the pooler string here).
+- **Stage 2 (skills-matching backfill)** → do **not** put on GHA cron as
+  currently structured. Keep it on launchd locally for now, or move it
+  to a small persistent worker later. Revisit only if the LLM provider
+  mix stops being free-tier-daily-quota-bound.
+
+### Migration checklist (DB move specifically) — real steps
+
+Ordered. Assumes target = Neon Launch (Supabase Pro differs only where
+noted).
+
+1. **Pre-flight / inventory.**
+   - Confirm source is reachable and note exact versions: PG 18.0,
+     pgvector 0.8.6, extensions `plpgsql` + `vector` only (already
+     measured above).
+   - Confirm no ANN indexes exist on vector columns (already true — the
+     `public.vector` DDL from `huntloop.db_models.Vector` plus plain
+     b-tree / FK indexes are all that restore needs to recreate).
+   - `alembic current` on the source — record the revision; it travels
+     inside the dump as the `alembic_version` table, so post-restore
+     `alembic current` against the target must return the **same**
+     revision with **no** `alembic upgrade` needed.
+2. **Create the target.**
+   - Neon: create org → project → **choose the highest available PG
+     major (17)**, region close to the dev machine / future runner.
+     Note that Neon auto-creates a default database; either use it or
+     `CREATE DATABASE jobsight`.
+   - `CREATE EXTENSION IF NOT EXISTS vector;` on the target
+     (`neon_superuser` can do this; pgvector is pre-listed as available).
+     Verify `\dx` shows `vector` before restoring.
+   - Supabase variant: pgvector is toggled on via the dashboard
+     Extensions page (or `create extension vector;` in the SQL editor).
+3. **Handle the PG 18 → PG 17 major-version gap.** Neither provider
+   offers PG 18 yet. `pg_restore` of a custom-format dump into an older
+   major is not officially supported, so use the **plain-SQL** path:
+   - `pg_dump` with an **18.x client** (match the source) against the
+     source, `--format=plain --no-owner --no-privileges
+     --no-tablespaces --quote-all-identifiers`, over the **direct
+     (unpooled)** connection.
+   - Dump schema and data (single file is fine at this size — ~1.3 GiB
+     logical, compresses well; `--format=custom -Z` + `pg_restore
+     --no-owner -j4` is the faster alternative *if* a same-major restore
+     ever becomes possible).
+   - Skim the resulting SQL for any PG18-only syntax before loading —
+     this schema is vanilla (tables, FKs, one `JSON` column, one
+     `vector(384)` column, b-tree indexes) so there should be nothing,
+     but confirm rather than assume.
+   - Load with `psql "$NEON_DIRECT_URL" -v ON_ERROR_STOP=1 -f dump.sql`.
+   - The `CREATE EXTENSION vector` line in the dump is a harmless no-op
+     if step 2 already created it; keep `ON_ERROR_STOP` but expect and
+     allow the "extension already exists" notice.
+4. **Verify data parity** before any cutover:
+   - Row counts table-by-table match the numbers above
+     (`lca_disclosures` 1,431,321; `job_postings` 98,167; `companies`
+     743; `resume_versions` 3).
+   - `SELECT count(*) FROM job_postings WHERE embedding IS NOT NULL` ==
+     98,167 (vectors survived the text round-trip).
+   - A spot pgvector query works on the target:
+     `SELECT id FROM job_postings ORDER BY embedding OPERATOR(public.<=>)
+     (SELECT embedding FROM resume_versions WHERE is_active) LIMIT 5;`
+     — must not error and should rank sanely.
+   - `alembic current` against the target == the revision recorded in
+     step 1.
+5. **Cut over `DATABASE_URL` (the actual switch — do last).**
+   - `.env`: `DATABASE_URL` → the Neon **direct** URL, `postgresql+psycopg2://…`,
+     `?sslmode=require` (Neon requires TLS). Keep the local URL commented
+     out for rollback.
+   - `.env` also documents the Docker-side URL substitution
+     (`localhost` → `host.docker.internal`) used by
+     `run_orchestrator_cron.sh` and `scripts/backfill_embeddings.py`:
+     with a hosted DB that `sed 's/localhost/host.docker.internal/'` step
+     becomes **a no-op / wrong** — a hosted hostname needs no rewrite.
+     `run_orchestrator_cron.sh` line ~100 (`DB_URL_FOR_DOCKER=…sed…`) and
+     the equivalent in the embeddings script must be updated to pass the
+     hosted URL straight through.
+   - `docker-compose.yml`: the `app` and `api` services currently default
+     `DATABASE_URL` to the compose `db` service / `host.docker.internal:5432`.
+     Point them at the hosted URL (via `.env` interpolation, not a
+     hardcoded value). **Decide the fate of the compose `db` service**
+     (the :5433 instance) — see "two-instance situation" below.
+   - `alembic.ini` / `tests/conftest.py`: **do not** point tests at the
+     hosted DB. `conftest.py`'s throwaway-schema isolation reuses
+     whatever `DATABASE_URL` points at — running the suite against the
+     hosted DB would create/drop schemas on it and burn compute. Keep a
+     separate local Postgres (or a Neon *branch*) for tests, set via a
+     test-only env override. This interacts with the
+     **`search_path` must never include `public`** rule (CLAUDE.md) —
+     unchanged, but now with a remote blast radius if violated.
+   - CI (`.github/workflows/ci.yml`) already spins its own
+     `pgvector/pgvector:pg18` service container — **leave that as-is**,
+     it should not talk to the hosted DB.
+6. **Downtime:** effectively zero and not a real concern — HuntLoop has
+   no live external users, the API is run locally on demand, and the
+   scraper is idempotent (`job_url` unique key, upserts). Do the dump
+   at a quiet moment (no scrape / backfill running — check `ps` and the
+   `pg_try_advisory_lock` key 1751937901 first, per the standing
+   rule), accept that any rows written to local Postgres after the dump
+   and before cutover are lost, and re-run the scraper once after
+   cutover to backfill the gap. No maintenance window needed.
+7. **Post-cutover:** keep the local Postgres data intact (do not drop
+   `jobsight` locally) for at least one full successful scheduled run
+   against the hosted DB, as rollback.
+
+### Project-specific risks & gotchas (evidence-backed)
+
+- **PG 18 → 17 downgrade on restore** (both providers). Real, handled by
+  the plain-SQL dump path in step 3 — but it *is* a manual review step,
+  not a clean `pg_restore`. The schema is simple enough that this is low
+  risk; flagging it so it isn't discovered mid-migration.
+- **The two-instance situation** (CLAUDE.md: local system Postgres on
+  :5432 holds the real data; the `docker-compose` `db` service on :5433
+  is a separate, smaller instance). After migration the **hosted DB
+  becomes the single source of truth** and both local instances become
+  vestigial. Decide explicitly: (a) drop the compose `db` service
+  entirely and have `app`/`api` only ever talk to the hosted DB, or
+  (b) keep `db` on :5433 purely as a local scratch/test DB. Option (a)
+  is cleaner but means you can't work fully offline; (b) keeps the
+  current "which Postgres am I hitting?" ambiguity alive. This is a
+  decision to make in the migration prompt, not silently.
+- **SQLAlchemy connection pooling vs scale-to-zero / serverless.** The
+  app uses SQLAlchemy's default `QueuePool` (`create_engine` with no
+  explicit pool args, per `src/huntloop/db.py`-style setup). Against a
+  serverless/pooled hosted DB:
+  - Set `pool_pre_ping=True` — Neon (and Supabase pooler) will drop idle
+    server-side connections; without pre-ping the first query after an
+    idle gap throws a stale-connection error. This is the single most
+    likely "it worked locally, breaks hosted" failure.
+  - Keep the pool small (`pool_size=5`, `max_overflow=5`) — this is a
+    single-user tool; a large idle pool just holds a serverless compute
+    awake and costs money (defeats scale-to-zero) or exhausts pooler
+    slots (Supabase Micro = 60 direct / 200 pooler).
+  - The daily batch scripts (`backfill_skills_matching.py`,
+    `backfill_embeddings.py`) open a session for a multi-hour run — fine,
+    but `pool_pre_ping` matters there too across the `TokenPacer` sleeps.
+  - Neon direct endpoint is fine for the app's long-lived pool; only use
+    Neon's `-pooler` string for the GHA scraper job if it opens many
+    short connections (it doesn't — one Scrapy process, one pool).
+- **`pg_dump` must not run over a pooled connection** (both providers
+  document this). Use the direct/unpooled string for the migration
+  itself; easy to get wrong because the pooled string is often the one
+  the dashboard shows first.
+- **TLS required.** Both hosted providers require `sslmode=require` (or
+  stricter). The local setup uses no SSL. `psycopg2` honours `sslmode`
+  in the URL query string; confirm every consumer builds the URL from
+  `DATABASE_URL` verbatim and doesn't strip query params.
+- **IPv4 from GitHub Actions.** GHA runners are IPv4-only. Neon
+  endpoints resolve on IPv4 — fine. Supabase direct is IPv6-only without
+  the +$4/mo add-on, so a Supabase + GHA-scraper combo is **forced onto
+  the Supavisor pooler string** (transaction mode — set
+  `prepare_threshold=0` / disable prepared statements for `psycopg2`, or
+  use session-mode port 5432). One more reason Neon is the lower-friction
+  pick here.
+- **Test suite blast radius.** `tests/conftest.py` runs real
+  CREATE/DROP SCHEMA against `DATABASE_URL`. Once that points at a hosted
+  DB, an accidental `pytest` run mutates production and spends compute.
+  The migration must introduce a hard test/prod env split (test-only
+  `DATABASE_URL` override, or a Neon branch), not rely on remembering.
+- **Egress / embedding backfill.** `scripts/backfill_embeddings.py` and
+  the relevance/skills backfills read `job_postings` in batches; a full
+  re-backfill pulls the whole 642 MB table across the wire. Well within
+  both providers' included egress (Supabase 250 GB, Neon 500 GB/project)
+  but it's real compute-time on the hosted side — run big backfills
+  deliberately, not casually.
+- **No connection from the migration to the skills-matching LLM quota
+  problem.** Moving the DB does not speed up or unblock the 83,575-row
+  skills backlog — that's gated entirely by Groq/Gemini free-tier daily
+  quotas (see the routing entries above). Stated here so the migration
+  isn't expected to help with it.
