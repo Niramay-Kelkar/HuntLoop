@@ -4,6 +4,7 @@ import logging
 import scrapy
 from scrapy.http import Response
 from ..items import JobPostingItem
+from ..employment_type import greenhouse_employment_type
 from .. import metrics
 
 logger = logging.getLogger(__name__)
@@ -115,10 +116,15 @@ class GreenhouseScraper(scrapy.Spider):
                     value = entry.get('value')
                     if 'department' in name and not item.get('department'):
                         item['department'] = value
-                    elif 'employment type' in name:
-                        item['employment_type'] = value
                     elif 'skills' in name or 'requirements' in name:
                         item['skills_list'] = [s.strip() for s in value.split(',') if s.strip()]
+
+            # Employment type: a literal "Employment Type" custom field if
+            # the company configured one, else a curated set of adjacent
+            # fields ("Time Type", etc.) that other companies use instead.
+            emp_type = greenhouse_employment_type(metadata)
+            if emp_type:
+                item['employment_type'] = emp_type
 
             self.logger.info(f"Yielding job item: {item['job_title']} for {comp_token}")
             yield item

@@ -53,7 +53,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from huntloop.db_models import JobMetadata, JobPosting, JobSource
-from huntloop.employment_type import normalize_employment_type
+from huntloop.employment_type import (
+    greenhouse_employment_type,
+    normalize_employment_type,
+)
 from huntloop.settings import DATABASE_URL
 
 logger = logging.getLogger(__name__)
@@ -75,18 +78,15 @@ def _decode_metadata(metadata_json):
 
 
 def _raw_from_greenhouse_metadata(metadata_json) -> str | None:
+    # Picks a literal "Employment Type" custom field, or - when the
+    # company didn't configure one - a curated set of adjacent fields
+    # ("Time Type", "Full-time/ Part-time", "Employment Status", ...) that
+    # some Greenhouse companies use instead. See
+    # huntloop.employment_type.greenhouse_employment_type and
+    # CLAUDE.md/SESSIONS.md for which adjacent fields were folded in vs.
+    # rejected and why.
     entries = _decode_metadata(metadata_json)
-    if not isinstance(entries, list):
-        return None
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        name = (entry.get("name") or "").lower()
-        if "employment type" in name:
-            value = entry.get("value")
-            if value:
-                return str(value)
-    return None
+    return greenhouse_employment_type(entries)
 
 
 def _raw_from_lever_metadata(metadata_json) -> str | None:
@@ -157,6 +157,16 @@ def _backfill_source(session, source_name: str, extractor) -> tuple[int, int]:
 
 
 def main():
+    # Optional positional args restrict the run to specific source names
+    # (e.g. `... greenhouse_api` to only re-scan Greenhouse after widening
+    # its adjacent-field logic). No args = all three, same as before.
+    only = set(sys.argv[1:])
+    extractors = (
+        {k: v for k, v in _EXTRACTORS.items() if k in only}
+        if only
+        else dict(_EXTRACTORS)
+    )
+
     engine = create_engine(DATABASE_URL, echo=False)
     Session = sessionmaker(bind=engine)
     session = Session()
@@ -166,7 +176,7 @@ def main():
     grand_filled = 0
 
     try:
-        for source_name, extractor in _EXTRACTORS.items():
+        for source_name, extractor in extractors.items():
             scanned, filled = _backfill_source(session, source_name, extractor)
             grand_scanned += scanned
             grand_filled += filled

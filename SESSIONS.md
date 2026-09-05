@@ -9876,3 +9876,89 @@ passing**. `tsc --noEmit` clean.
 `frontend/src/app/jobs/page.tsx`,
 `frontend/src/hooks/useApplicationStatus.test.tsx`, `CLAUDE.md`,
 `SESSIONS.md`.
+
+---
+
+## 2026-09-05 — Widen the Greenhouse employment_type backfill to adjacent metadata fields
+
+**Did:** Greenhouse `employment_type` coverage was stuck at ~19.5%
+because most companies never configure the literal "Employment Type"
+custom field. Investigated the real stored `job_metadata.metadata_json`
+for every Greenhouse row, folded in the adjacent field names whose real
+values genuinely describe employment type, and left out the ones that
+don't.
+
+### Investigation — real distinct values per candidate field
+
+Scanned all ~32.5k stored Greenhouse metadata arrays (23,419 have a
+list-shaped `metadata`). Distinct field names and their real values:
+
+| Field | Rows | Real distinct values (non-null) | Verdict |
+|---|---|---|---|
+| **Time Type** | 4,481 | `Full-time` 2038 · `Full time` 1079 · `Full Time` 932 · `Full-Time` 243 · `Part-time` 141 · `Part Time` 12 | **FOLD IN** — exclusively Full/Part-time; identical concept to Workday's `timeType`, which is already trusted |
+| **Full-time/ Part-time** | 471 | `Full-time` 421 (rest null) | **FOLD IN** — the field name is the concept |
+| **Full-Time/Part-Time Status** | 55 | `Full-Time` 45 · `Part-Time` 10 | **FOLD IN** |
+| **Employment Status** | 193 | `Regular Full-time` 131 · `regular full-time` 41 · `peo` 18 (rest null) | **FOLD IN** — `peo` ignored (see rule below) |
+| **Work Type** | 71 | `Full-time` 66 · `Contract, Full-time` 3 · `Intern, Full-time` 2 | **FOLD IN** |
+| **WORKER_CATEGORY** | 10 | `Full Time` 8 · `Contract` 2 | **FOLD IN** |
+| **Worker Type** | 424 | `Employee` 414 · `Contractor` 3 · `Contingent worker` 2 | **REJECT** — legal worker classification, not hours/duration; `Employee` (98%) isn't an employment-type bucket, folding it in would stamp 414 rows "Other" |
+| **Pay Rate Type** | 164 | `Salary` 157 · `Hourly` 1 | **REJECT** — compensation basis; neither value maps onto the set |
+| **Employee Type** | 583 | `Regular` 534 · `Intern` 4 · `Contractor` 2 · `Fixed Term` 1 | **REJECT** — dominated by `Regular`, a job-category value → "Other" |
+| **Job Type** | 807 | `Standard` 319 · `Regular` 196 · `Pipeline` 139 · `Hybrid`/`Onsite` 94 · `Physical Therapist (PT)` 16 · … | **REJECT** — job category, not employment type; and `(PT)` in a role name false-triggers the normalizer's `\bPT\b` → Part-time |
+| Early Career Time Type / Type / Work Shift / Exemption Status / FLSA / Salary Type | — | mostly null, or FLSA/comp/category values | **REJECT** — not employment type |
+
+### Judgment call, per the task
+
+The literal `Employment Type` field keeps full normalization (an
+unrecognized value there is a real answer and legitimately becomes
+"Other"). The 6 folded-in adjacent fields are **secondary** signals —
+they contribute a value only when it resolves to one of the four
+SPECIFIC buckets (Full-time/Part-time/Contract/Internship). If a
+secondary field normalizes to "Other" that's a sign it isn't really
+describing employment type for that row, so it's ignored (row stays
+NULL), not stored as "Other". This is also what stops `Job Type` /
+`Employee Type` style values leaking in even if a field name were
+mis-added later.
+
+### Implementation
+
+- `huntloop.employment_type.greenhouse_employment_type(metadata_entries)`
+  — new shared helper: literal `Employment Type` wins outright (returned
+  raw for the caller to normalize); else the 6 curated fallback fields
+  are tried in priority order, first specific-bucket result wins
+  (returned already normalized — re-normalizing is idempotent).
+- `greenhouse_spider.py` and
+  `scripts/backfill_employment_type_from_metadata.py` both call it, so
+  the insert-time path and the backfill can't drift. The backfill script
+  also gained an optional positional source-name filter
+  (`... greenhouse_api`) to re-scan just Greenhouse without re-walking
+  Lever/Workday.
+
+### Real before → after (live query, Greenhouse only)
+
+| | rows | % |
+|---|---|---|
+| before: `employment_type` populated | 6,340 / 32,489 | 19.5% |
+| after | 8,953 / 32,489 | 27.6% |
+
+**+2,613 rows, +8.0 percentage points.** New values added:
+Full-time 2,590 · Part-time 16 · Contract 5 · Internship 2. The
+remaining ~72% NULL is a genuine source-data ceiling — those companies
+expose no employment-type signal in any metadata field.
+
+### Tests
+
+Backend **315 → 324 passing** (+6 `test_employment_type.py` covering
+literal-field priority, each folded-in field, the ignore-non-specific
+rule, and each rejected field staying out; +3 `test_greenhouse_spider.py`
+exercising the spider's insert-time path). 3 pre-existing
+`test_backfill_lock.py` failures are environmental — today's scheduled
+skills-matching backfill was holding the advisory lock during this
+session (checked `ps aux` + `pg_locks` first, waited for it to release
+before running the employment_type backfill).
+
+**Files changed:** `src/huntloop/employment_type.py`,
+`src/huntloop/spiders/greenhouse_spider.py`,
+`scripts/backfill_employment_type_from_metadata.py`,
+`tests/test_employment_type.py`, `tests/test_greenhouse_spider.py`,
+`CLAUDE.md`, `SESSIONS.md`.
