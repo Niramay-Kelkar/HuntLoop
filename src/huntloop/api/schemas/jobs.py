@@ -21,6 +21,14 @@ class JobSummary(BaseModel):
     company_name: str
     job_url: str
     department: str | None = None
+    employment_type: str | None = Field(
+        default=None,
+        description=(
+            "Normalized employment type (Full-time/Part-time/Contract/Internship/Other) - "
+            "see huntloop.employment_type. null when the source genuinely exposes no "
+            "employment-type signal for this posting."
+        ),
+    )
     date_posted: datetime | None = None
     match_score: float | None = Field(
         default=None,

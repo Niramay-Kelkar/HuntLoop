@@ -44,6 +44,7 @@ export function getHealth(): Promise<HealthResponse> {
 export interface ListJobsParams {
   company?: string;
   department?: string;
+  employment_type?: string;
   min_score?: number;
   sort?: "score" | "-score";
   limit?: number;
@@ -64,6 +65,12 @@ export function getJobs(params: ListJobsParams = {}): Promise<JobListResponse> {
 // from real data instead of a hardcoded list.
 export function getDepartments(): Promise<string[]> {
   return apiFetch<string[]>("/jobs/departments");
+}
+
+// The real, distinct employment_type values currently in use (GET
+// /jobs/employment-types) - same reasoning/pattern as getDepartments().
+export function getEmploymentTypes(): Promise<string[]> {
+  return apiFetch<string[]>("/jobs/employment-types");
 }
 
 export function getJob(id: number): Promise<JobDetail> {

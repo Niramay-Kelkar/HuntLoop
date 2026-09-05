@@ -98,6 +98,62 @@ def test_repost_does_not_overwrite_existing_department(pipeline, db_session):
     assert row.department == "Engineering"
 
 
+def test_process_item_stores_normalized_employment_type(pipeline, db_session):
+    # The item carries a source's real raw label (Greenhouse's messy
+    # per-company free text, here) - the pipeline normalizes it via
+    # huntloop.employment_type before storing, not the raw string.
+    item = make_item(job_id="emp-1", job_url="https://boards.greenhouse.io/testco/jobs/emp-1")
+    item["employment_type"] = "Full-Time: Experienced"
+
+    pipeline.process_item(item, spider=None)
+
+    row = db_session.query(JobPosting).filter_by(job_url=item["job_url"]).one()
+    assert row.employment_type == "Full-time"
+
+
+def test_process_item_leaves_employment_type_null_when_source_gives_none(pipeline, db_session):
+    item = make_item(job_id="emp-2", job_url="https://boards.greenhouse.io/testco/jobs/emp-2")
+    # No item["employment_type"] set at all - the source genuinely gave no signal.
+
+    pipeline.process_item(item, spider=None)
+
+    row = db_session.query(JobPosting).filter_by(job_url=item["job_url"]).one()
+    assert row.employment_type is None
+
+
+def test_repost_backfills_null_employment_type_only(pipeline, db_session):
+    item1 = make_item(job_id="repost-3", job_url="https://boards.greenhouse.io/testco/jobs/repost-3")
+    pipeline.process_item(item1, spider=None)
+
+    row = db_session.query(JobPosting).filter_by(job_url=item1["job_url"]).one()
+    assert row.employment_type is None
+
+    item2 = make_item(job_id="repost-3", job_url="https://boards.greenhouse.io/testco/jobs/repost-3")
+    item2["employment_type"] = "Contractor"
+    pipeline.process_item(item2, spider=None)
+
+    db_session.expire_all()
+    row = db_session.query(JobPosting).filter_by(job_url=item1["job_url"]).one()
+    assert row.employment_type == "Contract"
+
+    count = db_session.query(JobPosting).filter_by(job_url=item1["job_url"]).count()
+    assert count == 1
+
+
+def test_repost_does_not_overwrite_existing_employment_type(pipeline, db_session):
+    item1 = make_item(job_id="repost-4", job_url="https://boards.greenhouse.io/testco/jobs/repost-4")
+    item1["employment_type"] = "Full-time"
+    pipeline.process_item(item1, spider=None)
+
+    item2 = make_item(job_id="repost-4", job_url="https://boards.greenhouse.io/testco/jobs/repost-4")
+    item2["employment_type"] = "Part-time"
+    pipeline.process_item(item2, spider=None)
+
+    db_session.expire_all()
+    row = db_session.query(JobPosting).filter_by(job_url=item1["job_url"]).one()
+    assert row.employment_type == "Full-time"
+
+
 def test_duplicate_job_url_hits_integrity_error_handler(pipeline, db_session, caplog):
     dup_url = "https://boards.greenhouse.io/testco/jobs/dup"
     item1 = make_item(job_id="1", job_url=dup_url)

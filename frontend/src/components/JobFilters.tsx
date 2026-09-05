@@ -2,12 +2,13 @@
 
 import { useQuery } from "@tanstack/react-query";
 
-import { getDepartments, type ListJobsParams } from "@/lib/api";
-import { UNSPECIFIED_DEPARTMENT } from "@/types/api";
+import { getDepartments, getEmploymentTypes, type ListJobsParams } from "@/lib/api";
+import { UNSPECIFIED_DEPARTMENT, UNSPECIFIED_EMPLOYMENT_TYPE } from "@/types/api";
 
 export interface JobFiltersValue {
   company: string;
   department: string; // "" = unset (no filter); UNSPECIFIED_DEPARTMENT = "no department set"; otherwise a real value
+  employmentType: string; // "" = unset (no filter); UNSPECIFIED_EMPLOYMENT_TYPE = "none set"; otherwise a real value
   minScore: string; // kept as a raw string while editing; parsed by the caller
   sort: NonNullable<ListJobsParams["sort"]>;
 }
@@ -37,6 +38,7 @@ export function JobFilters({
 }) {
   const minScorePercent = value.minScore === "" ? 0 : Math.round(Number(value.minScore) * 100);
   const departments = useQuery({ queryKey: ["departments"], queryFn: getDepartments });
+  const employmentTypes = useQuery({ queryKey: ["employment-types"], queryFn: getEmploymentTypes });
 
   return (
     <div className="rounded-xl border border-border bg-surface p-4">
@@ -64,6 +66,24 @@ export function JobFilters({
               </option>
             ))}
             <option value={UNSPECIFIED_DEPARTMENT}>Not specified</option>
+          </select>
+          <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-faintest">
+            ▼
+          </span>
+        </div>
+        <div className="relative">
+          <select
+            value={value.employmentType}
+            onChange={(e) => onChange({ ...value, employmentType: e.target.value })}
+            className="appearance-none rounded-lg border border-border-strong bg-surface py-2 pl-3 pr-7 text-[13px] text-text"
+          >
+            <option value="">All employment types</option>
+            {employmentTypes.data?.map((type) => (
+              <option key={type} value={type}>
+                {type}
+              </option>
+            ))}
+            <option value={UNSPECIFIED_EMPLOYMENT_TYPE}>Not specified</option>
           </select>
           <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-faintest">
             ▼
@@ -101,10 +121,12 @@ export function JobFilters({
           <span className="w-9 text-right font-mono text-[13px] font-semibold">{minScorePercent}%</span>
         </div>
         <div className="flex-1" />
-        {(value.company || value.department || value.minScore) && (
+        {(value.company || value.department || value.employmentType || value.minScore) && (
           <button
             type="button"
-            onClick={() => onChange({ company: "", department: "", minScore: "", sort: value.sort })}
+            onClick={() =>
+              onChange({ company: "", department: "", employmentType: "", minScore: "", sort: value.sort })
+            }
             className="font-mono text-[11px] text-accent hover:text-accent-hover"
           >
             Clear filters ✕

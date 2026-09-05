@@ -22,6 +22,7 @@ from .db_models import (
 from sqlalchemy import create_engine
 
 from . import metrics
+from .employment_type import normalize_employment_type
 from .relevance_filter import REFERENCE_TEXT, classify_relevance, cosine_similarity
 
 logger = logging.getLogger(__name__)
@@ -184,17 +185,27 @@ class JobDataPipeline:
             existing_job = session.query(JobPosting).filter_by(gh_job_id=str(item["job_id"])).first()
             if existing_job:
                 # Narrow, additive backfill only: if this repost carries a
-                # real department value and the existing row doesn't have
-                # one yet, fill it in. Every other already-populated column
-                # (is_relevant, embedding, matched_skills, ...) is left
-                # completely untouched on a repost match - this is not a
-                # general reprocess-on-repost path.
+                # real department/employment_type value and the existing
+                # row doesn't have one yet, fill it in. Every other
+                # already-populated column (is_relevant, embedding,
+                # matched_skills, ...) is left completely untouched on a
+                # repost match - this is not a general reprocess-on-repost
+                # path.
+                backfilled_fields = []
                 new_department = item.get("department")
                 if existing_job.department is None and new_department:
                     existing_job.department = new_department
+                    backfilled_fields.append("department")
+
+                new_employment_type = normalize_employment_type(item.get("employment_type"))
+                if existing_job.employment_type is None and new_employment_type:
+                    existing_job.employment_type = new_employment_type
+                    backfilled_fields.append("employment_type")
+
+                if backfilled_fields:
                     session.commit()
                     logger.info(
-                        f"Backfilled department for reposted job {item['job_id']}"
+                        f"Backfilled {', '.join(backfilled_fields)} for reposted job {item['job_id']}"
                     )
                 else:
                     logger.info(f"Skipping reposted job {item['job_id']}")
@@ -211,6 +222,7 @@ class JobDataPipeline:
                 job_url=item.get("job_url"),
                 gh_job_id=item.get("job_id"),
                 department=item.get("department"),
+                employment_type=normalize_employment_type(item.get("employment_type")),
                 job_description=item.get("job_description"),
                 date_posted=item.get("date_posted"),
                 company_id=company.id,

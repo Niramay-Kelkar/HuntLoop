@@ -42,6 +42,12 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 # department name.
 UNSPECIFIED_DEPARTMENT = "__unspecified__"
 
+# Same idea for `employment_type` - even though its values are normalized
+# into a small fixed set (see huntloop.employment_type), not every source/
+# posting has one at all, so "unset filter" and "filter to NULL" still
+# need to be distinguishable the same way they are for department.
+UNSPECIFIED_EMPLOYMENT_TYPE = "__unspecified__"
+
 
 def _active_resume_embedding(db: Session):
     """The active resume's embedding, or None if there's no active resume
@@ -71,6 +77,7 @@ def _row_to_summary(row) -> JobSummary:
         company_name=row.company_name,
         job_url=job.job_url,
         department=job.department,
+        employment_type=job.employment_type,
         date_posted=job.date_posted,
         match_score=row.match_score,
         matched_skills=job.matched_skills,
@@ -94,6 +101,23 @@ def list_departments(db: Session = Depends(get_db)) -> list[str]:
     return [row[0] for row in rows]
 
 
+@router.get("/employment-types", response_model=list[str])
+def list_employment_types(db: Session = Depends(get_db)) -> list[str]:
+    """The real, distinct employment_type values currently in use across
+    job_postings (non-null only) - same reasoning as list_departments:
+    populate the frontend filter from real data, not a hardcoded list,
+    even though the values are already normalized into a small fixed set
+    (see huntloop.employment_type) - not every one of those 5 values is
+    necessarily present in the live data at any given time."""
+    rows = db.execute(
+        select(JobPosting.employment_type)
+        .where(JobPosting.employment_type.isnot(None))
+        .distinct()
+        .order_by(JobPosting.employment_type)
+    )
+    return [row[0] for row in rows]
+
+
 @router.get("", response_model=JobListResponse)
 def list_jobs(
     company: str | None = Query(None, description="Filter by company name (case-insensitive)."),
@@ -103,6 +127,14 @@ def list_jobs(
             "Filter by exact department value, or "
             f"'{UNSPECIFIED_DEPARTMENT}' to return only postings with no department set. "
             "Unset (default) returns postings regardless of department, including those with none."
+        ),
+    ),
+    employment_type: str | None = Query(
+        None,
+        description=(
+            "Filter by exact normalized employment type (Full-time/Part-time/Contract/"
+            f"Internship/Other), or '{UNSPECIFIED_EMPLOYMENT_TYPE}' to return only postings "
+            "with none set. Unset (default) returns postings regardless of employment type."
         ),
     ),
     min_score: float | None = Query(
@@ -144,6 +176,11 @@ def list_jobs(
             query = query.where(JobPosting.department.is_(None))
         else:
             query = query.where(JobPosting.department == department)
+    if employment_type is not None:
+        if employment_type == UNSPECIFIED_EMPLOYMENT_TYPE:
+            query = query.where(JobPosting.employment_type.is_(None))
+        else:
+            query = query.where(JobPosting.employment_type == employment_type)
     if min_score is not None:
         query = query.where(score_expr >= min_score)
 
@@ -195,6 +232,7 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
         company_name=company.name,
         job_url=job.job_url,
         department=job.department,
+        employment_type=job.employment_type,
         date_posted=job.date_posted,
         match_score=row.match_score,
         matched_skills=job.matched_skills,

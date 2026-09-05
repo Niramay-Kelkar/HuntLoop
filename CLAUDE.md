@@ -54,6 +54,17 @@ conventions" and SESSIONS.md for the real current state).
   router file — registering it after would let `{job_id}`'s int-typed
   path param intercept `/jobs/departments` and 422 before this handler
   ever runs.**
+  **`GET /jobs` also gained an `employment_type` query param, and `GET
+  /jobs/employment-types` (added 2026-09-05, see SESSIONS.md's "Add
+  employment_type end-to-end" entry) alongside it — same exact-match/
+  `UNSPECIFIED_EMPLOYMENT_TYPE = "__unspecified__"` shape as the
+  department filter, and registered before `/jobs/{job_id}` for the
+  same routing-order reason.** Unlike `department`, the values behind
+  this filter are already normalized into a small fixed set (see the
+  `employment_type` column bullet below) - `/jobs/employment-types`
+  still queries real distinct values rather than hardcoding that set,
+  since not all 5 are guaranteed present in the live data at any given
+  moment (all 5 happen to be present as of this entry).
   Runs as its own `api` service in
   `docker-compose.yml` (own container, port 8000 — deliberately not
   merged into `app`, a separate concern). **`api`'s `DATABASE_URL`
@@ -163,6 +174,14 @@ conventions" and SESSIONS.md for the real current state).
   only). No URL query-param sync for any filter, department included —
   matches the existing `company`/`min_score` pattern, not a gap
   introduced here.
+  **`JobFilters.tsx` gained a matching `employment_type` `<select>`,
+  added 2026-09-05 (see SESSIONS.md's "Add employment_type end-to-end"
+  entry) — same shape as the department select: "All employment types"
+  (unset), each real distinct value from `GET /jobs/employment-types`,
+  and "Not specified" (sends `UNSPECIFIED_EMPLOYMENT_TYPE`, filters to
+  NULL-`employment_type` postings). `JobFiltersValue` gained an
+  `employmentType` field threaded through `frontend/src/app/jobs/
+  page.tsx`'s query key/params the same way `department` already was.**
 - **Frontend test suite: Vitest + React Testing Library, added
   2026-09-04 (see SESSIONS.md's "Frontend test suite (Vitest + RTL) + CI
   wiring" entry) — the frontend had zero test tooling before this.**
@@ -1830,6 +1849,94 @@ conventions" and SESSIONS.md for the real current state).
   for any of their postings) or closed/expired postings, not a fix
   failure. Full suite 221/221 passing (219 + 2 new pipeline tests). Not
   touched: Workday, Lever, `companies`/onboarding/discovery scripts.
+- **`job_postings.employment_type` added end-to-end 2026-09-05 (see
+  SESSIONS.md "Add employment_type support end-to-end") — same bug
+  class as the department NULL issue above, plus a column that never
+  existed in `db_models.py`/Alembic.** Investigation confirmed against
+  real live data (raw API responses + DB `job_metadata` for all 7
+  sources) that every spider was ALREADY extracting a raw
+  employment-type signal into `item["employment_type"]` where its source
+  exposes one — `JobDataPipeline.process_item()` just never persisted
+  it. Per source, what's actually there:
+  - **Workday** `jobPostingInfo.timeType` — clean, `"Full time"`/`"Part
+    time"`/`""` only.
+  - **Ashby** `employmentType` — clean enum (`FullTime`/`PartTime`/
+    `Contract`/`Temporary`/`Intern`).
+  - **Gem** `job.employmentType` — clean `SCREAMING_SNAKE_CASE` enum
+    (`FULL_TIME`…), and it's on the list response, so no per-job detail
+    fetch needed to read it.
+  - **iCIMS** JSON-LD `employmentType` — schema.org enum, real per-tenant
+    variation (`FULL_TIME` vs `OTHER` seen across tenants; `OTHER` is a
+    valid value the tenant configured, not a gap).
+  - **SmartRecruiters** `typeOfEmployment.label` — mostly clean, but
+    company-selectable; present on the list endpoint too (not just
+    detail).
+  - **Lever** `categories.commitment` and **Greenhouse** a free-form
+    `"Employment Type"`/`"LEGACY - Employment Type"` entry in the
+    per-company `metadata` array — both genuinely messy per-company free
+    text (`"Regular"`, `"Fulltime Employee"`, `"Full-Time: Experienced"`,
+    `"正社員"`, `"Modified Full-Time"`, …), and Greenhouse only has it at
+    all when a company configured that custom field (~20% do).
+  **Normalization**: `huntloop.employment_type.normalize_employment_type()`
+  maps any raw label to one of `Full-time`/`Part-time`/`Contract`/
+  `Internship`/`Other`, or `None`. Done centrally in the pipeline (item
+  carries the raw label, pipeline normalizes at insert), NOT per-spider.
+  Key rule, per the task: a real-but-unrecognized/ambiguous label
+  (`"Regular"`, `"Employee"`, iCIMS `"OTHER"`, non-English) normalizes
+  to `"Other"` — NEVER guessed into a specific bucket; `None`/`""` (the
+  source gave no signal at all) stays NULL. Regex is word-boundary-based
+  (so `"International"` ≠ internship) with a `(?![a-zA-Z])` trailing
+  guard (real Greenhouse data appends `_exempt`/`_non-exempt` with an
+  underscore, which a bare `\b` misses); Contract/Internship signals
+  beat Full-time/Part-time when a label names both (`"Temporary
+  Full-Time"` → Contract). `tests/test_employment_type.py` (6 tests) +
+  4 new `tests/test_pipeline.py` tests.
+  **Migration** `f3a7c9d21b44` — during which a real pre-existing schema
+  drift was found: this dev machine's `job_postings` ALREADY had an
+  untracked `employment_type VARCHAR(100)` column (a pre-Alembic
+  `create_all()` leftover, always empty — 0/96,409 rows, no code ever
+  wrote to it), so the migration is guarded (`inspect()` — narrows the
+  existing column to `VARCHAR(50)` if present, adds it fresh on a clean
+  DB like CI) exactly the way `37f5b1de06fe` guarded its drifted
+  `location` column.
+  **API**: `GET /jobs?employment_type=…` + `GET /jobs/employment-types`
+  (see the FastAPI bullet above). **Frontend**: `JobFilters.tsx`
+  employment-type `<select>` (see the `JobFilters.tsx` bullet above).
+  **Backfill** — 5 one-off scripts under `scripts/backfill_employment_type_*`,
+  mechanism per source's real data shape:
+  - `…_from_metadata.py` — Greenhouse/Lever/Workday, purely from
+    already-stored `job_metadata.metadata_json` (double-decode), ZERO
+    network. Greenhouse's full raw `metadata` array, Lever's whole
+    `categories` dict, and Workday's `timeType` are all already stored —
+    unlike the department backfill, where only Lever was.
+  - `…_smartrecruiters.py` — list-only re-fetch (label is inline on the
+    list endpoint), mirrors `backfill_department_smartrecruiters.py`.
+  - `…_ashby.py` / `…_gem.py` — one API/GraphQL-list call per company.
+  - `…_icims.py` — the one source needing a per-job re-fetch (JSON-LD is
+    only on each detail page); re-fetches each existing row's stored
+    `job_url` directly rather than re-walking listing pages, tenants run
+    concurrently (different hosts) with per-host politeness + robots
+    re-check.
+  **Real before → after `employment_type` NULL, live query** (before:
+  0 populated across all 7 sources — the column existed but nothing ever
+  wrote it):
+  - workday_api: 0 → 28,403 / 28,773 filled (370 NULL = genuinely-empty
+    `timeType`)
+  - lever_api: 0 → 3,923 / 4,056 (96.7%)
+  - smartrecruiters_api: 0 → 18,401 / 21,322 (86.3%)
+  - ashby_api: 0 → 3,357 / 3,515 (95.5%)
+  - icims_portal: 0 → 5,726 / 6,374 (89.8%; the 648 NULL are mostly
+    HTTP 410 expired postings + a few with no JSON-LD `employmentType`)
+  - gem_api: 0 → 498 / 521 (95.6%)
+  - greenhouse_api: 0 → 6,326 / 32,319 (19.6% — most Greenhouse
+    companies never configure an "Employment Type" custom field; this is
+    a true source-data ceiling, not a backfill miss)
+  - **whole table: 0 → 66,634 / 96,910 (68.8%)**. The scheduled daily
+    scrape fired mid-backfill (2026-09-05) and its ~480 new rows all got
+    `employment_type` populated at insert via the fixed pipeline, with
+    no manual step — the real end-to-end confirmation. Distinct stored
+    values: Full-time 53,438 · Other 5,580 · Part-time 4,501 · Contract
+    2,510 · Internship 605.
 - **iCIMS spider BUILT + onboarded + first scrape 2026-09-01 (see
   SESSIONS.md "Build the iCIMS spider + gated onboarding + first
   scrape"). Recommendation was GO — but a step grayer on ToS/risk than
