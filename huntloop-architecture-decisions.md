@@ -1066,3 +1066,609 @@ noted).
   skills backlog — that's gated entirely by Groq/Gemini free-tier daily
   quotas (see the routing entries above). Stated here so the migration
   isn't expected to help with it.
+
+---
+
+## Hosted DB, part 2: Oracle Cloud Always Free + a full free-tier survey (researched 2026-09-05, RESEARCH ONLY — nothing created, nothing deployed, no `DATABASE_URL` / `docker-compose.yml` / workflow change)
+
+Extends the Supabase-vs-Neon section above. Two questions the first pass
+didn't cover: (1) is Oracle Cloud's Always Free tier a credible *self-hosted*
+$0-forever alternative, and (2) does *any* other genuinely-permanent (not
+trial-credit) free option — including a different database engine — beat the
+already-recommended Neon Launch plan? Every provider number below was read
+from official docs / pricing pages or primary news reporting in September
+2026 (sources inline); where sources disagree that is called out rather than
+resolved by guessing.
+
+### Project numbers this is measured against (re-confirmed 2026-09-05, local system Postgres :5432 / `jobsight`)
+
+Unchanged from the first pass — nothing has grown meaningfully in a day:
+
+| Item | Value |
+|---|---|
+| `pg_database_size` | **1341 MB (~1.31 GiB)** |
+| `job_postings` | **98,167 rows**, **98,167 / 98,167** with a populated `vector(384)` `embedding` |
+| `lca_disclosures` | 1,431,321 rows |
+| `companies` / `resume_versions` | 743 / 3 rows |
+| Server / extensions | PostgreSQL **18.0**, pgvector **0.8.6**; `plpgsql` + `vector` only |
+| pgvector ANN index | none (deliberate — every match query is Seq Scan + top-N heapsort) |
+
+The workload shape that matters for this analysis: **one developer's local
+tool plus a single ~once-daily batch job.** The DB is genuinely idle 22–23 h
+of every day. That single fact drives most of the Oracle verdict below.
+
+---
+
+## Part 1 — Oracle Cloud Infrastructure (OCI) Always Free, real current terms
+
+### 1a. What Oracle's own docs say today (Ampere A1 compute)
+
+From `docs.oracle.com/iaas/Content/FreeTier/` (Always Free Resources /
+`resourceref.htm`), read 2026-09-05:
+
+| Resource | Current Always Free allowance |
+|---|---|
+| **Ampere A1 (Arm) compute** | **1,500 OCPU-hours/month + 9,000 GB-hours/month** → sustained **2 OCPU / 12 GB RAM** (one instance, or split across two) |
+| AMD micro compute | 2× `VM.Standard.E2.1.Micro` (1/8 OCPU, 1 GB RAM each) — too small to matter here |
+| **Block storage** | **200 GB total** across all boot + block volumes in the home region; **5 volume backups**; min boot volume 47 GB (default 50 GB) |
+| **Object Storage** (Always-Free-only accounts) | **20 GB combined** across Standard + Infrequent Access + Archive; **50,000 API requests/month** |
+| Outbound data transfer | 10 TB/month |
+| Autonomous DB (Oracle DB, not Postgres) | 2 instances × 20 GB — irrelevant, not Postgres/pgvector |
+
+### 1b. The mid-2026 cut — official docs vs. third-party reporting
+
+**This is real and the sources broadly agree on the facts, disagree on the edges:**
+
+- **The cut itself (agreed):** On **June 15, 2026** Oracle halved the Always
+  Free Ampere A1 allowance from **4 OCPU / 24 GB** to **2 OCPU / 12 GB**
+  (3,000→1,500 OCPU-hours, 18,000→9,000 GB-hours). Reported by InfoQ
+  (`infoq.com/news/2026/07/oracle-cloud-free-tier-limits/`), Linuxiac, heise
+  online, TerminalBytes. Oracle **published no blog post, sent no
+  notification** — the docs were edited silently and users found out when
+  instances were shut down or when the numbers on the pricing page changed.
+- **Enforcement (agreed):** Oracle emailed Always Free users that instances
+  exceeding the new limits would be **terminated on or after August 18,
+  2026**. Multiple reports note that **a terminated instance may not be
+  recreatable** above the new cap (and OCI's chronic ARM capacity shortages
+  in popular regions make *any* A1 launch non-trivial).
+- **Does it hit Pay-As-You-Go accounts? (sources disagree, unresolved as of
+  today):** Oracle's docs now say "all tenancies get the first 1,500 OCPU
+  hours and 9,000 GB hours per month for free" — reads as *everyone*. But
+  Oracle **support agents told some users** (June 22) that PAYG accounts keep
+  the old 4/24 for free; **other users report support confirming PAYG is also
+  capped** (and would be *billed* for overage). There is no official written
+  clarification. Treat the PAYG "keeps 4/24 free" claim as **unconfirmed
+  folklore**, not a plan you can rely on.
+- **Idle-instance reclamation (official, and the decisive point for HuntLoop):**
+  `resourceref.htm` states Oracle **may reclaim Always Free VM/bare-metal
+  compute instances** that, over any **7-day window**, have **all** of: CPU
+  utilisation (95th percentile) < 20%, network utilisation < 20%, and (A1
+  only) memory utilisation < 20%. **Paid instances are explicitly exempt.**
+  A Postgres box serving one small daily batch will sit far below all three
+  thresholds essentially every week — it is close to the *textbook* profile
+  this policy targets. The well-known escape hatch is to **upgrade the tenancy
+  to PAYG** (stays $0 as long as you remain within the Always Free
+  allowances) — but that puts a payment card on file and walks straight into
+  the unresolved PAYG-limits ambiguity above.
+
+### 1c. Storage fit
+
+Not a concern. 200 GB block storage, minus a ~50 GB boot volume, leaves
+~150 GB for a dedicated data volume. The DB is **1.31 GiB**. Postgres 18 +
+pgvector 0.8.6 on Ubuntu/Oracle-Linux ARM64 (both ship in the PGDG apt repo
+for `aarch64`; pgvector has no `-march=native`/universal-build problem here —
+that was a macOS/EDB-installer quirk, not an ARM one) would fit with ~100×
+growth headroom. 12 GB RAM is ample — the entire DB fits in page cache with
+room for `shared_buffers`, work_mem, and the daily Scrapy/embedding load.
+**On raw capacity, Oracle Always Free is wildly oversized for this project.**
+Capacity was never the question.
+
+### 1d. The real operational burden (this is self-hosted — none of it is managed)
+
+Everything Neon/Supabase do invisibly becomes the developer's standing job:
+
+- **OS patching:** `unattended-upgrades` for security patches + periodic
+  manual kernel-reboot windows. ~monthly attention, forever.
+- **Postgres upgrades:** minor versions via apt; **major versions
+  (18→19→…) are a manual `pg_upgrade` or dump/restore** you schedule and
+  babysit. Neon/Supabase roll these for you.
+- **Backups — there is no managed/automated/PITR backup at all.** A real
+  strategy would be: nightly `pg_dump -Fc` via cron → gzip (~300–400 MB
+  compressed from 1.31 GiB) → `oci os object put` to Object Storage (20 GB
+  free tier easily holds ~2 weeks of dailies) → a retention-prune script →
+  **and monitoring that the upload actually succeeded**, plus periodic
+  **test restores** (an untested backup is not a backup). OCI's 5 free
+  block-volume backups can supplement this but are volume snapshots, not
+  logical/PITR. This is the single biggest ongoing chore and the easiest to
+  quietly get wrong.
+- **Security surface (all hand-managed):**
+  - **Double firewall.** OCI security lists / NSGs *and* the stock image's
+    own `iptables`/`firewalld` rules both must allow 5432 — the most common
+    first-timer trip on OCI.
+  - **SSH hardening:** key-only auth, root login disabled, `fail2ban`, NSG
+    restricting SSH to the dev's IP.
+  - **Postgres hardening:** `scram-sha-256`, TLS (self-signed or Let's
+    Encrypt via DNS-01), a tight `pg_hba.conf`, `listen_addresses` limited,
+    strong role passwords.
+  - No managed "IP allowlist" feature — you edit security-list CIDRs by hand.
+- **Monitoring / uptime — no SLA, no status page, no alerting.** You own
+  detection of: disk-full (WAL can fill the data volume and wedge the DB),
+  connection exhaustion, OOM kills, and the instance simply **disappearing**
+  (reclamation, or a region capacity event). Realistically that means
+  standing up `node_exporter`/netdata + a dead-man's-switch (e.g.
+  healthchecks.io pinged by the daily job). Neon/Supabase include all of
+  this at $0 on their *free* tiers, let alone paid.
+
+### 1e. Does an OCI public IP satisfy "GitHub Actions must reach the hosted DB"?
+
+**Basic reachability: yes.** An OCI VM gets a routable public IPv4 (use the
+**1 free reserved public IP** so it survives stop/start), and 5432 on it is a
+perfectly good endpoint for a GitHub-hosted runner (which is IPv4-only —
+fine here; no IPv6/pooler dance like Supabase's direct endpoint would force).
+
+**But the security story has an Oracle-flavoured complication:**
+GitHub-hosted runners have **no stable egress IP range** you can practically
+allowlist (the published ranges are huge and churn). So locking 5432 down to
+"just GitHub Actions" is not feasible with OCI's hand-edited security lists.
+The realistic options are (a) expose 5432 to `0.0.0.0/0` and lean entirely on
+strong auth + TLS + `fail2ban` (workable, but a world-open Postgres port is
+exactly the kind of thing a portfolio reviewer frowns at), or (b) put a
+**Tailscale / WireGuard / Cloudflare Tunnel** layer in front and join the GH
+Action to it (Tailscale's free tier + `tailscale/github-action` is the usual
+answer) — which is *another* moving part to run and monitor. Neon hands you a
+TLS connection string that is simply reachable, with the allowlisting
+concern handled provider-side.
+
+### 1f. Verdict on Part 1 — **not a credible option for this project. Pay Neon.**
+
+Taking a real position, backed by what's above:
+
+1. **The idle-reclamation policy is aimed squarely at this exact workload.**
+   A DB idle 22–23 h/day will trip the <20% CPU/network/memory 7-day test
+   almost every week. The only escape is converting to PAYG (card on file) —
+   at which point the "free forever" guarantee is already conditional, and
+   **Oracle just demonstrated in June 2026 that it will cut terms with zero
+   notice and terminate non-compliant instances.** That is the opposite of
+   what "low ongoing maintenance" and "don't want to babysit infra" asks for.
+2. **The operational surface is precisely the burden this project wants to
+   avoid** — self-managed `pg_dump`→Object-Storage backups with restore
+   tests, double-firewall config, no monitoring/alerting, manual major-version
+   upgrades, OS patching, and standing capacity/reclamation risk — *forever*,
+   not once.
+3. **GitHub Actions reachability works but needs a VPN/tunnel layer** to be
+   defensible, adding another component to run.
+4. **Portfolio value is a wash at best, arguably negative.** "I hardened my
+   own OCI Postgres with off-box backups" is a fine sentence; "the DB vanished
+   because Oracle reclaimed my idle free instance and I lost a day of scrapes"
+   is the more probable one. Choosing a managed provider and writing up *why*
+   (the section above this one) reads as better engineering judgment than
+   running a pet server to save $7.
+5. **~$7–15/mo for Neon Launch buys** zero patching, automated PITR backups,
+   monitoring, an effective SLA, PG18 already, pgvector, scale-to-zero, and
+   branch-based migration testing. For a project whose stated priorities are
+   *low maintenance* and *portfolio value*, that is not a close call.
+
+Oracle Always Free would only make sense here if $7/mo were genuinely
+unaffordable **and** the sysadmin work were wanted as a hobby in itself.
+Neither is true for HuntLoop.
+
+---
+
+## Part 2 — broader survey: any other genuinely-free option, incl. a different engine?
+
+### 2a. Every managed Postgres-compatible free tier, checked Sept 2026
+
+"Permanent" below means an ongoing free tier, **not** a trial or trial credit.
+"Fits?" is against the hard number: **1.31 GiB of data.**
+
+| Provider | Free storage | Permanent? | pgvector | Fits 1.31 GiB? | Notes / source |
+|---|---|---|---|---|---|
+| **Neon** Free | 0.5 GB / project | yes | yes (every plan) | **No** (storage) | PG **18 is now the default** since June 2026 (`neon.com` changelog) — see "version-gap update" below. Forced scale-to-zero after 5 min. |
+| **Supabase** Free | 500 MB | yes | yes (0.8.0) | **No** (storage) | 7-day inactivity pause. PG 17 max (no 18 yet). |
+| **Aiven** for PostgreSQL Free | **1 GB** disk, 1 GB RAM, 1 vCPU, `max_connections=20` | yes ("no time limitation") | not listed among free extensions — unverified | **No** (1 GB < 1.31 GiB, and no HA) | One free service per type per org; **powered off after prolonged inactivity** (notice given, manual restart). `aiven.io/docs/products/postgresql/concepts/pg-free-tier` |
+| **Tiger Data** (ex-Timescale) | sources disagree: PricingSaaS/Koyeb say **30-day trial only**; other write-ups cite a **10 GB** "free tier" | **disputed** | yes (built for vector) | disputed / moot | Flagged as a source conflict; treat as trial-grade until confirmed on their pricing page. Paid starts $29/mo. |
+| **CockroachDB Basic** (ex-Serverless) | **10 GiB** + 50M RUs/month | yes | **pgvector-compatible `VECTOR` type + `<=>`/`<->`/`<#>` operators since v25.1, distributed vector index v25.2** | size: **yes** | **Not Postgres** — wire-compatible distributed SQL. Engine switch, not a migration (see 2b). RU-metered: a 98k-row Seq Scan per match query burns RUs. |
+| **Render** Free Postgres | 1 GB | **no** — **expires 30 days after creation**, then 14-day grace then deleted | n/a | **No** (size + expiry) | `render.com/changelog` |
+| **Railway** | — | **no** free tier | n/a | n/a | $5 trial credit, then $1/mo minimum; removed prepaid credits early 2026. |
+| **Fly.io** | — | **no** free tier in 2026 (7-day / 2-VM-hour trial) | n/a | n/a | Postgres is unmanaged Machines anyway. |
+| **Koyeb** Postgres | ~1 GB-class, 1 GB RAM / 0.25 vCPU | yes | yes (40+ extensions incl. pgvector) | **No** (size) | Auto-sleep after 5 min. |
+| **Prisma Postgres** Free | 500 MB | yes | yes | **No** (size) | |
+| **Nile** (`thenile.dev`) | not published in this pass — marketing cites scale-to-zero + pgvector; a real storage number wasn't found on an official page | yes (claimed) | **yes** (real Postgres + pgvector) | unverified | Small serverless-Postgres startup. **Same category as Tembo and Xata** — both killed their free tiers / shut down managed Postgres in 2025–2026. Longevity risk is the concern, not the tech. |
+| **Tembo** | — | **gone** — shut down managed Postgres May 2025 | — | — | |
+| **Xata** | — | **gone** — "Xata Lite" free tier retired Feb 28 2026; new Xata Postgres is usage-based, no free tier | — | — | |
+| **ElephantSQL** | — | **gone** — shut down Jan 27 2025 | — | — | |
+| **MongoDB Atlas M0** | **512 MB** | yes | yes (Atlas Vector Search, HNSW, ≤8192 dims) | **No** (size) | Not Postgres — full document-DB rewrite (see 2b). |
+
+**Result of 2a:** *no* genuinely-permanent free tier both **fits 1.31 GiB**
+**and** keeps the Postgres + pgvector architecture. The ones that fit on size
+are either a different engine (CockroachDB Basic 10 GiB; MongoDB M0 is too
+small anyway) or a shutdown-risk startup (Nile — and the Tembo/Xata/
+ElephantSQL graveyard makes that risk concrete). Everything that *is*
+managed Postgres with pgvector (Neon, Supabase, Aiven, Koyeb, Prisma) caps
+free storage at 0.5–1 GB, below this dataset. This is the same conclusion the
+first pass reached for Neon/Supabase specifically, now confirmed across the
+whole market.
+
+### 2b. Would switching database engines entirely be sensible?
+
+**Short answer: no — it's a large rewrite that still doesn't yield a
+free tier that fits, so it is pure cost.**
+
+What HuntLoop actually leans on Postgres/pgvector for:
+- `job_postings.embedding` / `resume_versions.embedding` as `vector(384)`
+  columns (98,167 populated vectors, ~150 MB raw).
+- Query-time cosine similarity via `embedding <=> :resume_vec` (schema-
+  qualified `OPERATOR(public.<=>)`), used by `huntloop.match_scoring`
+  (`match_score_expr` / `match_score_order_by`), `GET /jobs?sort=-score`,
+  the skills-matching selection order, and several ad-hoc scripts.
+- `pg_try_advisory_lock` (backfill single-instance lock, key 1,751,937,901).
+- Postgres-schema-based test isolation (`tests/conftest.py` CREATE/DROP
+  SCHEMA per session).
+- SQLAlchemy + Alembic (12+ migrations), `pgvector.sqlalchemy.Vector`
+  subclass, `JSON` columns, standard FKs/indexes.
+
+**Path A — free-tier MySQL (e.g. MySQL 9.x `VECTOR`).** MySQL 9 has a
+`VECTOR` column type and a `DISTANCE()` function, but:
+- Rewrite the vector DDL (`vector(384)` → `VECTOR(384)`), drop the
+  `pgvector.sqlalchemy.Vector` subclass and the `OPERATOR(public.<=>)`
+  schema-qualification hack entirely.
+- Rewrite every similarity query: `ORDER BY embedding <=> :v` →
+  `ORDER BY DISTANCE(embedding, :v, 'COSINE')`; re-derive `match_score_expr`
+  in the new dialect. Robust similarity indexing is largely a HeatWave
+  (paid) feature — but HuntLoop uses no ANN index today, so a seq-scan
+  approach ports.
+- `pg_try_advisory_lock` → MySQL `GET_LOCK()` / `RELEASE_LOCK()` (different
+  semantics — session-scoped, named).
+- Test isolation: MySQL has no schema-namespace equivalent (schema == database)
+  — `conftest.py`'s whole mechanism is rebuilt.
+- SQLAlchemy dialect → `mysql+pymysql`; regenerate the **entire Alembic
+  history** for MySQL (types, autoincrement, `JSON`, index syntax all differ);
+  `pg_dump` → `mysqldump` for the one-time data move.
+- **And after all that**: free managed MySQL tiers (Aiven 1 GB; PlanetScale
+  killed its free tier) have the *same* 0.5–1 GB ceilings — **1.31 GiB still
+  doesn't fit.** Zero payoff.
+
+**Path B — MongoDB Atlas M0 (document DB + Atlas Vector Search).**
+- **M0 is 512 MB. The dataset is 1.31 GiB. It does not fit — full stop**,
+  before considering the rewrite.
+- The rewrite is total: relational → document model; **SQLAlchemy and Alembic
+  are removed entirely** (replace with PyMongo/Beanie); every join re-modeled
+  (companies ↔ job_postings ↔ job_locations ↔ job_metadata, and the fuzzy
+  `lca_disclosures` matching); pgvector `ORDER BY <=>` → a `$vectorSearch`
+  aggregation stage against an Atlas Vector Search index; every FastAPI router
+  query, every test, and the migration history all rewritten. This is a
+  **rewrite of the whole data layer — weeks of work** — on a part of the
+  project that currently works and is essentially done.
+
+**Verdict 2b:** switching engines trades a finished, working data layer for
+weeks of rewrite and **still** lands on a free tier too small for the data
+(MySQL, Mongo M0) or a non-Postgres engine with RU-metered billing
+(CockroachDB). Not sensible.
+
+### 2c. Version-gap update to the first section
+
+The first pass flagged a **PG 18 → 17 downgrade-on-restore** step for both
+Neon and Supabase. **For Neon this is now resolved:** Neon made **Postgres 18
+the default for new projects in June 2026** (`neon.com` changelog). A
+migration to Neon today is a same-major `pg_dump`/restore — the plain-SQL
+downgrade dance in step 3 of the migration checklist is **no longer needed
+for Neon** (it still applies to Supabase, which was PG17-max as of this
+research). One more point in Neon's favour.
+
+### 2d. Final recommendation — **the research reinforces Neon (Launch plan). Nothing found beats it.**
+
+1. **No genuinely-permanent free tier fits 1.31 GiB while staying on
+   Postgres + pgvector.** Every managed Postgres free tier caps at 0.5–1 GB.
+   The only permanent free tiers large enough are a different engine
+   (CockroachDB Basic) or a document DB that's *still too small* (Mongo M0),
+   or a startup with a demonstrated peer-group pattern of killing free tiers
+   (Nile — cf. Tembo, Xata, ElephantSQL, all gone in 2025–2026).
+2. **Oracle Cloud Always Free technically fits but fails on fit-for-purpose:**
+   it converts a managed, near-zero-maintenance need into a self-run server
+   with hand-rolled backups, double-firewall config, no monitoring, manual
+   upgrades, and an idle-reclamation policy that targets this precise
+   workload — on a provider that silently halved the tier and terminated
+   instances in mid-2026.
+3. **Switching database engines is a multi-week data-layer rewrite that
+   doesn't even deliver a free tier that fits** — cost with no benefit.
+4. **Neon Launch (~$7–15/mo, usage-based, no minimum)** keeps the entire
+   Postgres/pgvector/SQLAlchemy/Alembic stack byte-for-byte, is now on PG18
+   (removing the only real migration wrinkle for Neon), includes pgvector,
+   PITR backups, monitoring, scale-to-zero, and branch-based migration
+   testing, and matches the "idle most of the day, one daily batch" shape far
+   better than any flat-rate plan. For a one-developer portfolio project that
+   explicitly values low maintenance burden and keeping the architecture
+   intact, it remains the right call — this survey strengthens that
+   conclusion rather than complicating it.
+
+### Sources (all read 2026-09-05)
+
+- Oracle: `docs.oracle.com/iaas/Content/FreeTier/freetier.htm`,
+  `.../freetier_topic-Always_Free_Resources.htm`, `.../resourceref.htm`
+  (idle-reclamation thresholds).
+- Oracle free-tier cut: `infoq.com/news/2026/07/oracle-cloud-free-tier-limits/`,
+  `linuxiac.com/oracle-quietly-cuts-free-tier-ampere-a1-resources-in-half/`,
+  `heise.de/en/news/Oracle-halves-free-cloud-resources-11334516.html`,
+  `terminalbytes.com/oracle-cloud-free-tier-changes-2026/`; PAYG-vs-Always-Free
+  ambiguity: Oracle Cloud Customer Connect discussion 964620.
+- Neon: `neon.com/pricing`, `neon.com/faqs/free-plan-limits-and-quotas`,
+  `neon.com/blog/new-usage-based-pricing`, `neon.com` June 2026 changelog
+  (PG18 default).
+- Supabase: `supabase.com/pricing`; PG18 status: supabase GitHub discussion 42681.
+- Aiven: `aiven.io/docs/products/postgresql/concepts/pg-free-tier`, `aiven.io/free-tier`.
+- Tiger Data / Timescale: `pricingsaas.com/companies/timescale`,
+  `koyeb.com/blog/top-postgresql-database-free-tiers-in-2026` (source conflict noted).
+- CockroachDB: `cockroachlabs.com/blog/vector-search-pgvector-cockroachdb/`,
+  `cockroachlabs.com/docs/.../vector`, `cockroachlabs.com/blog/serverless-free/`,
+  `cockroachlabs.com/docs/releases/cloud` (Serverless→Basic rename).
+- Render: `render.com/changelog/free-postgresql-instances-now-expire-after-30-days-previously-90`.
+- Railway / Fly.io: `devtoolpicks.com/blog/railway-vs-render-vs-fly-io-solo-developers-2026`,
+  `saaspricepulse.com/blog/flyio-free-tier-2026`.
+- Tembo shutdown: Hacker News 44038896; `rywalker.com/research/tembo`.
+- Xata free-tier retirement: `xata.io/blog/changes-free-tier`.
+- ElephantSQL shutdown: `elephantsql.com/blog/end-of-life-announcement.html`.
+- MongoDB Atlas M0: `mongodb.com/docs/atlas/reference/free-shared-limitations/`, `mongodb.com/pricing`.
+- Cross-provider free-tier surveys: `koyeb.com/blog/top-postgresql-database-free-tiers-in-2026`,
+  `github.com/freebase-cloud/free-postgres-hosting` (used only to cross-check, not as a primary number).
+
+---
+
+## Hosted DB, part 3: Oracle idle-reclamation mechanics + Object Storage for log archiving (researched 2026-09-05, RESEARCH ONLY — no Oracle account or resources created, no infra / `DATABASE_URL` / `docker-compose.yml` / `run_orchestrator_cron.sh` / workflow change)
+
+Two follow-ups to "Hosted DB, part 2" above. Part 1 here goes deeper on the
+idle-reclamation policy that part 2 flagged as the decisive risk — exact
+mechanics from Oracle's own docs, then the real utilization math for running
+HuntLoop's actual daily pipeline (not the DB alone) on the Always Free A1.
+Part 2 here is a separate, lower-stakes question: using Oracle's Always Free
+Object Storage as an offsite home for the gzipped cron-log archives.
+
+### Part 1 — idle-reclamation mechanics, in detail
+
+#### 1.1 Exact wording (Oracle official docs, `docs.oracle.com/en-us/iaas/Content/FreeTier/resourceref.htm`, read 2026-09-05)
+
+Verbatim, the entire relevant section:
+
+> **Reclamation of Idle Compute Instances**
+>
+> Idle Always Free compute instances may be reclaimed by Oracle. Oracle will
+> deem virtual machine and bare metal compute instances as idle if, during a
+> 7-day period, the following are true:
+>
+> - CPU utilization for the 95th percentile is less than 20%
+> - Network utilization is less than 20%
+> - Memory utilization is less than 20% *(applies to A1 shapes only)*
+
+**Which metrics / AND vs OR:** Three metrics — CPU, network, and (A1 only)
+memory. The phrasing is **"the following are true"** — a conjunction. **All
+three must be below threshold for the instance to be deemed idle.** Keeping
+**any single metric at or above 20%** for the window is enough to *not* be
+flagged. For a non-A1 shape only CPU + network are checked; for the A1 Flex
+shape HuntLoop would use, memory is the third gate.
+
+**How the 20% is computed — this is where the official docs are thin:**
+- **CPU** is explicitly *"for the 95th percentile"* over the 7-day period —
+  i.e. the value that 95% of samples fall below. Concretely: the 95th-pct CPU
+  is ≥ 20% only if CPU is ≥ 20% for **more than 5% of the window**. 5% of
+  7 days = **8.4 hours/week ≈ 72 minutes/day** (cumulative). So to stay
+  non-idle *on CPU alone*, the box needs CPU ≥ 20% for **> ~8.4 cumulative
+  hours per week**.
+- **Network** and **memory** say only *"is less than 20%"* — **Oracle does
+  not state the aggregation** (average? 95th pct? peak? % of time above?).
+  Secondary write-ups generally assume "same as CPU, 95th percentile," but
+  **that is inference, not a quoted source.** Flagged as a real
+  documentation gap.
+- **The base of each percentage is also undefined:** CPU % of how many
+  cores; network % of what bandwidth ceiling; memory % of total RAM vs. of
+  "available" (i.e. whether Linux page cache / Postgres `shared_buffers`
+  count as "used"). None of this is in the docs.
+
+**Threshold value — a real source conflict:** the *current*
+`resourceref.htm` says **20%** for all three. But multiple older/secondary
+sources (Oracle Forums threads, community blog posts, 2023–2024) quote
+**10%**. Either the threshold was relaxed 10 → 20 at some point, or the
+secondary sources are stale. **Both figures are used below** (10% = the
+conservative case).
+
+**Process before reclamation (from community reports — NOT in the
+reclamation doc itself, flagged as such):** Oracle emails the account when an
+instance has been idle 7 days; if it stays idle, the instance is **stopped
+(not deleted)** roughly a week after that email; termination comes later if
+it's still idle. So in practice there's a warning + ~1 week to react —
+*but* there are also documented reports of genuinely-active instances being
+flagged (detection false positives), and of flagged instances being
+terminated on the reclamation date. No SLA covers a wrong call.
+
+Sources: `docs.oracle.com/en-us/iaas/Content/FreeTier/resourceref.htm`
+(primary); `community.oracle.com/customerconnect/discussion/671904` and
+`/680560`; `forums.oracle.com/ords/apexds/post/keep-always-free-instance-running-9889`;
+`blog.51sec.org/2023/02/oracle-cloud-cleaning-up-idle-compute.html`
+(10% figure + stop-then-terminate process).
+
+#### 1.2 The real utilization math — full daily pipeline on a 2 OCPU / 12 GB A1
+
+The question: if **both** pipeline stages (scraper + skills-matching
+backfill) ran on the Always Free A1 instead of only the database, would the
+real workload's utilization clear the reclamation formula on its own merits?
+
+**Inputs — MEASURED (from `logs/cron.log` / the existing research table / direct inspection 2026-09-05):**
+
+| Input | Value | Source |
+|---|---|---|
+| Stage 1 (scraper) wall-clock, good day | **45–56 min** end-to-end | `logs/cron.log` (part 2 table) |
+| Stage 1 wall-clock, bad day | **4–8.5 h** | same — driven by per-run `docker compose run --rm --build` (image rebuild) + host disk pressure, **not** DB/compute |
+| Stage 2 (skills-matching) "processed in" | **40–240 min** | `logs/cron.log` |
+| Stage 2 wall-clock composition | **mostly `TokenPacer` `time.sleep()`** against Groq/Gemini free-tier rate limits — near-zero CPU during the sleeps | `backfill_skills_matching.py` design (part 2 + routing sections) |
+| One gzipped cron-log archive | **996 MB compressed** (`logs/archive/cron-20260905T110948.log.gz`) | `ls -la` 2026-09-05 — evidence stage 2 emits huge log volume on failure-heavy days |
+| A1 Flex shape | 1 OCPU = 1 Arm core (no SMT); 2 OCPU ≈ 2 vCPU; ~1 Gbps network per OCPU → **~2 Gbps** | Oracle A1 Flex docs |
+
+**Inputs — ESTIMATED (never measured on an A1, or on any Linux host for this workload):**
+
+| Input | Best guess | Why uncertain |
+|---|---|---|
+| CPU % Scrapy drives during a crawl | low, with bursts | Scrapy is network-I/O-bound (`DOWNLOAD_DELAY` + AutoThrottle); CPU spikes only for parsing + the per-row `_classify_and_embed` MiniLM/torch inference |
+| CPU-minutes for a day's embedding + `is_relevant` inference | minutes, not tens of minutes | all-MiniLM-L6-v2 on ARM64 CPU, a few hundred short texts/day; torch can peg a core *while it runs* |
+| Resident memory: Postgres + loaded `sentence-transformers` + Scrapy | ~4–6 GB during a run; ~2–3 GB between runs | depends heavily on `shared_buffers` config and whether OCI counts page cache as "used" |
+| Whether `--build` even applies on the VM | probably not | on a real Linux host you'd run `main.py` directly / from a prebuilt image (part 2 migration checklist) — which *removes* the single biggest CPU consumer from bad days |
+
+**Metric-by-metric against the formula:**
+
+- **Network — clears "idle" comfortably (solid).** 2 Gbps ceiling; 20% =
+  400 Mbps sustained. The daily crawl pulls maybe a few hundred MB of API/
+  HTML responses over ~1 h — peak a few Mbps, 7-day average ≈ 0.01–0.1% of
+  the ceiling. Even a 10× traffic underestimate doesn't get near 20%.
+  **Network will read "idle" essentially always.**
+
+- **CPU (95th percentile) — borderline, probably UNDER 20% on a typical
+  day (estimated).** The bar is CPU ≥ 20%-of-2-OCPU (≈ 0.4 of one core) for
+  **> ~72 cumulative min/day**.
+  - *Good day:* stage 1 ≈ 50 min of mostly-I/O work with short embedding
+    bursts; stage 2 mostly sleeping. Plausible CPU-≥-20% time ≈ **10–40
+    min/day** → **under the 72-min bar.**
+  - *Bad day with `--build` on the VM:* the rebuild alone can peg both cores
+    20–60+ min → likely **clears** the bar those days. But bad days are the
+    minority, and a sane Linux setup deletes the `--build` step, removing
+    exactly the thing that would have helped.
+  - *If the real threshold is 10% (older sources):* CPU more plausibly
+    clears it; at 20% it likely doesn't on a normal day.
+  - **Net: CPU 95th-pct is not a reliable non-idle signal for this
+    workload.**
+
+- **Memory (A1 only) — the wildcard, and the one metric that might hold
+  ≥ 20% on its own (genuinely uncertain).** 12 GB box; 20% = 2.4 GB.
+  - If OCI counts page cache + `shared_buffers` as "used": a warm box
+    (1.31 GiB DB hot in cache + Postgres backends + a loaded ML process
+    during runs) plausibly sits **> 2.4 GB continuously** → **defeats
+    reclamation by itself**, regardless of CPU/network.
+  - If OCI counts only non-reclaimable application memory: between runs the
+    box might be **~1.5–2.5 GB ≈ 12–21%** — right on the line, possibly
+    under 20% for the ~22 h/day nothing is running.
+  - Oracle **does not document how memory utilization is measured**, and
+    this has not been observed on an A1. This is the best candidate for a
+    metric that stays non-idle — but the whole outcome then rests on an
+    **undocumented, unmeasured** definition.
+
+#### 1.3 Honest verdict — Part 1
+
+**Running the real daily pipeline on the Always Free A1 does not reliably
+clear the reclamation threshold on its own merits, and the outcome is
+genuinely uncertain rather than safe.**
+
+- **Network** is nowhere near 20% — it will always read idle.
+- **CPU 95th-percentile** is borderline and, on a normally-configured Linux
+  host (no per-run image build), **probably sits under 20%** on a typical
+  day — the pipeline's wall-clock is dominated by network I/O and deliberate
+  rate-limit sleeping, not compute.
+- **Memory (A1-only)** *might* stay ≥ 20% purely from a resident Postgres +
+  ML-model footprint on a 12 GB box — but Oracle doesn't define how it's
+  measured, it's unverified on this shape, and since the rule is AND-logic
+  the entire question reduces to "does this one undocumented metric hold?"
+
+Add the documented false-positive reports (active instances flagged anyway),
+the no-SLA-if-wrong reality, and the fact that the *only* reliable
+mitigation is converting to PAYG (which reintroduces the billing-ambiguity
+risk from part 2), and **the reclamation risk stays a real, unresolved
+strike against Oracle even when the box is doing genuine daily work.** It is
+not something the real workload clearly earns its way out of.
+
+Also worth stating plainly: moving the **pipeline** (not just the DB) onto
+the VM is a materially bigger change than "host the database" — it means
+rebuilding the entire scheduled-execution setup (currently stage 1 in Docker
+on the Mac, stage 2 in `.venv` via launchd) on a Linux host. That's scope
+well beyond the migration part 2 was scoping.
+
+**Per the task's own constraint: no artificial-load / keepalive workaround
+was explored or is recommended.** If the real workload doesn't clearly clear
+the threshold, that is the finding — not a problem to engineer around with
+fake CPU/network activity.
+
+### Part 2 — Oracle Always Free Object Storage for cron-log archiving
+
+#### 2.1 Current terms (reconfirmed 2026-09-05, `freetier_topic-Always_Free_Resources.htm`)
+
+- **20 GB total**, combined across Standard + Infrequent Access + Archive
+  tiers (for Always-Free-only accounts — a Free Trial with credits gets
+  10 GB in *each* of the three tiers instead).
+- **50,000 API requests/month** free.
+- **10 TB/month outbound transfer** (shared account-wide allowance).
+- **No idle-reclamation or inactivity policy on Object Storage.** The 7-day
+  idle-reclamation rule is **compute-only** (VM / bare-metal instances). The
+  only other inactivity rule anywhere in the Always Free docs is the
+  **Autonomous Database 90-day inactivity stop** — also not Object Storage.
+  Stored objects persist regardless of how often they're read or written.
+- **Account-level caveat only:** an Always Free *tenancy* with no activity at
+  all for a long stretch can be flagged for account reclamation — but a
+  daily cron `PUT` is activity, so this is minor.
+- Source: `docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm`,
+  `oracle.com/cloud/storage/object-storage/faq/`.
+
+#### 2.2 Real integration path for the gzipped archives
+
+The existing stopgap accumulates `logs/archive/cron-*.log.gz` locally
+(`logs/` is gitignored). Pushing them to Object Storage:
+
+- **S3 Compatibility API — no Oracle SDK needed.** Endpoint:
+  `https://<namespace>.compat.objectstorage.<region>.oraclecloud.com`
+  (path-style or virtual-host style). Works with **`boto3` / `aws-cli` / any
+  standard S3 client** — a `scripts/` uploader could be a ~10-line `boto3`
+  `put_object` loop, not an `oci`-SDK integration.
+  Source: `docs.oracle.com/en-us/iaas/Content/Object/Tasks/s3compatibleapi.htm`.
+- **Auth:** create an IAM user → generate a **Customer Secret Key** for it
+  (an `aws_access_key_id` / `aws_secret_access_key` pair) → scope an IAM
+  policy to one bucket. Put the pair + namespace + region in the cron
+  environment (one more credential to protect/rotate).
+- **Documented gotcha:** recent `boto3` / `aws-cli` (≥ ~2.23.5) send
+  checksum headers OCI's S3 API rejects — set
+  `AWS_REQUEST_CHECKSUM_CALCULATION=when_required` and
+  `AWS_RESPONSE_CHECKSUM_VALIDATION=when_required` (or pin an older client).
+- **Alternative:** the `oci` CLI (`oci os object put`) with an API signing
+  key — heavier setup (config file + PEM key), Oracle-specific, no reason to
+  prefer it here.
+- **Independence from the DB decision: YES, fully independent — flagged
+  explicitly per the task.** Object Storage is a separate product with its
+  own free allowance. Archiving logs to OCI Object Storage requires an
+  Oracle *account* but touches neither the compute nor the database tiers —
+  you could do this with the database on Neon and nothing else on Oracle.
+
+#### 2.3 Honest assessment — Part 2
+
+**Low-risk technically, but not clearly worth doing — and if offsite
+archival is wanted, OCI is probably not the right destination.**
+
+- **The real numbers reframe it:** the one existing archive is **996 MB
+  gzipped**. At ~1 GB/archive, 20 GB free ≈ **~20 archives** — months, not
+  "forever." A ~1 GB *compressed* log is itself a symptom (stage 2 logging
+  thousands of retried API calls on failure-heavy days). **Trimming stage-2
+  log verbosity is the better first move** than shipping giant logs offsite.
+- **Complexity added:** a new Oracle account (if the DB isn't going there),
+  a Customer Secret Key in the cron env, the checksum-header gotcha, a
+  retention-prune to stay under 20 GB, and monitoring that the upload
+  actually worked.
+- **Value is modest:** `logs/` is gitignored; the disk-full incident in
+  SESSIONS.md (2026-09-05) was Docker build cache, not logs. A local
+  "keep the last N gzipped archives, delete the rest" prune is simpler and
+  free.
+- **If offsite archival is genuinely wanted:** prefer a provider that
+  doesn't require standing up an Oracle account solely for this —
+  **Backblaze B2 (10 GB free) or Cloudflare R2 (10 GB free)** are both
+  S3-compatible, need no compute account, and have no inactivity policy.
+  Only pick OCI Object Storage for this if the database *also* ends up on
+  Oracle (which part 2 recommends against).
+
+**Verdict:** do the cheap things first — cap local archive retention and
+reduce stage-2 log verbosity. Reach for object storage (B2/R2 over OCI)
+only if logs need long-term retention for audit/debugging.
+
+### Sources (all read 2026-09-05)
+
+- Oracle idle reclamation (primary): `docs.oracle.com/en-us/iaas/Content/FreeTier/resourceref.htm`.
+- Reclamation process / 10%-vs-20% conflict / false-positive reports:
+  `community.oracle.com/customerconnect/discussion/671904`,
+  `.../discussion/680560`,
+  `forums.oracle.com/ords/apexds/post/keep-always-free-instance-running-9889`,
+  `blog.51sec.org/2023/02/oracle-cloud-cleaning-up-idle-compute.html`.
+- Object Storage terms: `docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm`,
+  `oracle.com/cloud/storage/object-storage/faq/`.
+- S3 Compatibility API: `docs.oracle.com/en-us/iaas/Content/Object/Tasks/s3compatibleapi.htm`,
+  `blogs.oracle.com/cloud-infrastructure/s3-compat-objectstorage-post-virthost`.
+- HuntLoop pipeline numbers: `logs/cron.log` archive (part 2 table),
+  `logs/archive/cron-20260905T110948.log.gz` size, `scripts/run_orchestrator_cron.sh`.
