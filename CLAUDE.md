@@ -608,6 +608,57 @@ conventions" and SESSIONS.md for the real current state).
   automation; GitHub Actions scheduling against a hosted Postgres
   (Supabase/Neon) remains a deliberately separate, later deployment step —
   don't build it unprompted.
+- **A boot/login catch-up job was added 2026-09-06 (see SESSIONS.md's
+  "Boot-time catch-up for a missed scheduled run" entry).** The
+  `launchd` `StartCalendarInterval` catch-up-on-wake behavior above
+  covers a machine that was *asleep* at 3am, but NOT one that was fully
+  *off / rebooted* through 3am — confirmed on 2026-09-06, when the
+  machine cold-booted at 07:46 and `launchd` did not replay the 03:00
+  firing (`com.huntloop.scraper` `runs = 0`, `logs/cron.log` untouched,
+  the whole day's run silently skipped). Fix:
+  **`~/Library/LaunchAgents/com.huntloop.scraper-catchup.plist`** — a
+  SECOND, separate LaunchAgent with `RunAtLoad` and **no**
+  `StartCalendarInterval` (so it never competes with the 3am schedule),
+  reference copy tracked at
+  `scripts/com.huntloop.scraper-catchup.plist`. It runs
+  **`scripts/catchup_orchestrator_boot.sh`** shortly after every
+  boot/login, which: (1) reads `logs/last_scheduled_run.txt` — a dated
+  marker `run_orchestrator_cron.sh` now writes the moment it takes its
+  lock — and no-ops if it is dated today (a 3am run, a sleep-wake
+  catch-up, or an earlier login catch-up already happened); (2)
+  otherwise, if the current local time is in `[00:00, 03:30]`, defers to
+  the imminent 3am firing; (3) otherwise triggers one run of the *same*
+  `scripts/run_orchestrator_cron.sh`. **The real anti-double-run
+  guarantee is a lock, not the time window:** `run_orchestrator_cron.sh`
+  now re-execs itself under `lockf(1)` (exclusive `flock(2)` on
+  `logs/.orchestrator.lock`, `-t 0` → exit 75 if held → log one line +
+  exit 0). Both LaunchAgents land in that script, so a catch-up run and
+  a 3am run physically cannot execute the orchestrator concurrently —
+  whichever gets the `flock` first runs, the other is a clean no-op.
+  `flock(2)` locks are released by the kernel on process exit/kill/
+  reboot, so there is never a stale lock file to clear. Stage 2's
+  Postgres advisory lock (`pg_try_advisory_lock`, key 1751937901) is
+  unchanged and still separate — it guards `backfill_skills_matching.py`
+  specifically; the new `lockf` guard is the wrapper-level one that
+  covers stage 1 (which previously relied *solely* on launchd's
+  "don't start a job that's already running", which only applies to
+  repeat firings of one job, not two different jobs invoking one
+  script). Both jobs run `/bin/bash`, so the existing Full-Disk-Access
+  grant covers the catch-up job too — no new TCC prompt.
+  `logs/last_scheduled_run.txt`, `logs/.orchestrator.lock`,
+  `logs/catchup.log`, `logs/launchd-catchup.log` are all runtime state
+  under the gitignored `logs/`. **Tested** (see SESSIONS.md): decision
+  logic (no-op when marker is today, defer inside the window, trigger
+  otherwise) via direct runs with test-hook env overrides; the `lockf`
+  guard via 4 concurrent invocations of a stubbed copy (exactly one ran,
+  three logged the bail line); and both no-op and trigger paths under a
+  real `launchctl bootstrap` with `RunAtLoad`. **Not exercised: an
+  actual reboot** — the true first-real-reboot catch-up is still to be
+  observed in the wild, same standing caveat as the Docker-autostart
+  gap. The installed real plist was bootstrapped with a same-day marker
+  seeded, so its first `RunAtLoad` was a verified no-op rather than an
+  unattended catch-up scrape mid-task; the next boot/login with 3am
+  missed is the first genuine trigger.
 - **Resume ingestion exists (`resume_versions` table + `scripts/
   ingest_resume.py`), added 2026-08-22.** `data/resumes/` holds the
   actual PDF(s) and is gitignored + dockerignored (personal data, same

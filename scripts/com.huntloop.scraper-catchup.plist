@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Reference copy of the boot/login catch-up LaunchAgent. The live copy is
+  installed (machine-local, not tracked) at
+  ~/Library/LaunchAgents/com.huntloop.scraper-catchup.plist - same
+  convention as com.huntloop.scraper.plist. Keep the two in sync by hand.
+
+  This is a SECOND job, separate from com.huntloop.scraper: it has
+  RunAtLoad and deliberately NO StartCalendarInterval, so it never
+  competes with the 3am schedule. All the "did today already run / is
+  3am imminent / take the lock" logic lives in
+  scripts/catchup_orchestrator_boot.sh, not here.
+
+  Install:
+    cp scripts/com.huntloop.scraper-catchup.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.huntloop.scraper-catchup.plist
+  Remove:
+    launchctl bootout gui/$(id -u)/com.huntloop.scraper-catchup
+    rm ~/Library/LaunchAgents/com.huntloop.scraper-catchup.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.huntloop.scraper-catchup</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Users/niramaykelkar/Desktop/HuntLoop/scripts/catchup_orchestrator_boot.sh</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/niramaykelkar/Desktop/HuntLoop</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/Users/niramaykelkar/Desktop/HuntLoop/logs/launchd-catchup.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/niramaykelkar/Desktop/HuntLoop/logs/launchd-catchup.log</string>
+</dict>
+</plist>
