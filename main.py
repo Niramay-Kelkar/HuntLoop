@@ -90,6 +90,23 @@ def run_multi_ats_scrape():
             )
 
         process = CrawlerProcess(get_project_settings())
+        # CrawlerProcess.__init__ calls Scrapy's configure_logging(), which
+        # unconditionally runs dictConfig(DEFAULT_LOGGING) and pins the
+        # "scrapy" logger to DEBUG - regardless of settings.py's
+        # LOG_ENABLED = False (that only swaps Scrapy's own root handler for
+        # a NullHandler, it doesn't lower the logger level). At DEBUG,
+        # scrapy.core.scraper logs a full pprint dump of every scraped item
+        # - including the entire job_description HTML - through
+        # huntloop.logging_config's root handlers: ~164 lines per posting,
+        # ~85k postings per scheduled run, which is what made cron.log grow
+        # to multiple GB per run (see the 2026-09-06 log-verbosity
+        # investigation - the item-echo DEBUG dump was the cause, not the
+        # skills-matching stage). Raising it to INFO here - AFTER the
+        # constructor, since configure_logging() has already run by now -
+        # drops the per-item dump and the per-request "Crawled (200)" trace
+        # while keeping every Scrapy WARNING/ERROR, the end-of-crawl stats
+        # block, and huntloop.pipelines' own per-posting INFO lines.
+        logging.getLogger("scrapy").setLevel(logging.INFO)
         scheduled_any = False
 
         for platform in sorted(by_platform):

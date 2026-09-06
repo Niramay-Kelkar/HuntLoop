@@ -566,13 +566,21 @@ conventions" and SESSIONS.md for the real current state).
   and truncates `cron.log` for the fresh run (it had grown to ~4.85 GB —
   it captures every run's full stdout/stderr including stage 1's
   `--build` output, and nothing trimmed it). `logs/archive/` is
-  gitignored. Deliberately NO retention/deletion cap (archives kept
-  indefinitely) and NO mid-run rotation — the script only emits a
+  gitignored. NO mid-run rotation — the script only emits a
   `WARNING` line if the just-rotated log exceeded `CRON_LOG_MAX_BYTES`
   (500 MB), as a "something is spamming the log" signal. `huntloop.log`'s
   separate `RotatingFileHandler` is untouched. Expected to be superseded
   once scraping moves to GitHub Actions (which captures its own workflow
-  logs). **Verified end-to-end
+  logs). **`logs/archive/` gained a retention cap 2026-09-06 (see
+  SESSIONS.md's "cron.log rotation stopgap" entry, updated that day, and
+  the 2026-09-06 log-verbosity investigation): right after the rotation
+  block, `run_orchestrator_cron.sh` prunes `cron-*.log.gz` oldest-first
+  until BOTH `CRON_LOG_ARCHIVE_KEEP` (14 files ≈ two weeks at the
+  one-rotation-per-run cadence) AND `CRON_LOG_ARCHIVE_MAX_BYTES` (3 GiB
+  total) hold — the file count is the normal bound, the size cap is the
+  backstop if a single run's log ever balloons again. Plain bash-3.2
+  while-read loops (no `mapfile`), only touches the `cron-*.log.gz`
+  files this script creates.** **Verified end-to-end
   for real, not just "job loaded"**: `launchctl kickstart -p
   gui/<uid>/com.huntloop.scraper` force-fired the job immediately
   (evidence given `StartCalendarInterval` doesn't need to be awaited
@@ -1413,6 +1421,31 @@ conventions" and SESSIONS.md for the real current state).
   has its own separate `logging.basicConfig()` + emoji-prefixed messages —
   intentionally left alone (it's a manual smoke-test script, not part of
   the shared-logging migration).
+  **`main.py` raises the `scrapy` logger to `INFO` (one
+  `logging.getLogger("scrapy").setLevel(logging.INFO)` line, right after
+  the `CrawlerProcess(get_project_settings())` constructor — it MUST be
+  after, since that constructor runs Scrapy's `configure_logging()`,
+  which unconditionally `dictConfig`s the `scrapy` logger back to DEBUG
+  regardless of `LOG_ENABLED = False`), added 2026-09-06.** Reason: the
+  2026-09-06 log-verbosity investigation traced `cron.log`'s
+  multi-GB-per-run growth to `scrapy.core.scraper` logging a full
+  `pprint` dump of every scraped `JobPostingItem` — including the entire
+  `job_description` HTML — at DEBUG, ~164 lines per posting × ~85k
+  postings per run, i.e. ~14M lines / ~1 GB per scheduled run, ~99.98%
+  of `cron.log`. **It was NEVER the skills-matching stage** (that
+  stage's whole per-run output is a few thousand one-line records,
+  <0.5 MB, capped by provider quotas). The `setLevel` line drops that
+  per-item DEBUG dump and the per-request `Crawled (200)` DEBUG trace
+  while keeping every Scrapy `WARNING`/`ERROR`, the end-of-crawl stats
+  block, and `huntloop.pipelines`' own per-posting `INFO` lines
+  (inserted / reposted / skipped). Verified on a real scoped Gem
+  re-scrape: the `Scraped from` blocks disappear entirely, the
+  per-posting pipeline `INFO` and a real spider `WARNING` still appear.
+  The scoped `scripts/scrape_*.py` entrypoints do NOT carry this line
+  (they're for ad hoc proving runs, where the DEBUG echo is useful) —
+  only `main.py`, the scheduled path, does. Don't "fix" this by
+  touching `settings.py`'s `LOG_ENABLED` or `logging_config.py` — the
+  targeted one-liner is deliberate.
 
 - **`detect_ats()` (`src/huntloop/ats_detection.py`) is static-fetch-first,
   render-as-fallback — it renders with Playwright only when the plain HTTP

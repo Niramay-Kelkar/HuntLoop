@@ -10078,8 +10078,16 @@ top of the Docker build artifacts). Also added `logs/archive/` to
 `.gitignore` (already covered by the existing `logs/` rule; added
 explicitly for clarity).
 
-**Deliberately NOT done:** no retention cap / deletion logic — archives
-are kept indefinitely for now. No mid-run rotation. The script emits a
+**Retention cap added 2026-09-06** (see that day's session entry below):
+right after the rotation block, `run_orchestrator_cron.sh` now prunes
+`logs/archive/cron-*.log.gz` oldest-first until BOTH hold — at most
+`CRON_LOG_ARCHIVE_KEEP` = 14 files (≈ two weeks at one rotation per
+scheduled run) AND `CRON_LOG_ARCHIVE_MAX_BYTES` = 3 GiB total (the
+backstop if a single run's log balloons again). Both conditions enforced
+together, oldest evicted first. The "kept indefinitely" note below is
+superseded.
+
+**Deliberately NOT done:** no mid-run rotation. The script emits a
 `WARNING` line if the just-rotated `cron.log` exceeded
 `CRON_LOG_MAX_BYTES` (500 MB), as a signal that something is spamming
 the log, but does not act on it beyond that — pointing here is the
@@ -10104,3 +10112,87 @@ rotation against the actual ~4.85 GB `cron.log`. Still needs tomorrow's
 real 3am launchd firing to confirm end-to-end that the block runs
 correctly as the first thing in a genuine scheduled invocation (the
 harness spliced the exact block but did not run the full wrapper).
+
+---
+
+## 2026-09-06 — Implement the log-verbosity fixes (Scrapy DEBUG echo + archive retention cap)
+
+**Context:** the 2026-09-06 log-verbosity investigation (findings-only,
+prior session) established with real evidence that `cron.log`'s
+multi-GB-per-run growth is `scrapy.core.scraper` logging a full `pprint`
+dump of every scraped `JobPostingItem` — including the entire
+`job_description` HTML — at DEBUG (~164 lines per posting, ~85k postings
+per run, ~99.98% of a scheduled run's `cron.log`). The skills-matching
+stage was NOT the cause — its whole per-run output is a few thousand
+one-line records, well under 0.5 MB, capped by provider quotas. This
+session implements exactly the two fixes that investigation proposed.
+
+**Checked first:** `ps aux` clean for the scraper/backfill/orchestrator;
+`pg_locks` showed zero advisory locks on `jobsight` (stage-2 lock
+1751937901 free); `launchctl list` showed `com.huntloop.scraper` last
+exit 0, not running.
+
+**Did:**
+1. **`main.py`** — one line, `logging.getLogger("scrapy").setLevel(logging.INFO)`,
+   immediately after `process = CrawlerProcess(get_project_settings())`
+   (with a comment). It MUST be after the constructor: `CrawlerProcess`
+   runs Scrapy's `configure_logging()`, which unconditionally
+   `dictConfig`s the `scrapy` logger back to DEBUG regardless of
+   `settings.py`'s `LOG_ENABLED = False` (that only swaps Scrapy's own
+   root handler for a `NullHandler`, it doesn't lower the logger level).
+   `settings.py` and `logging_config.py` untouched — targeted one-liner,
+   not a logging refactor. The scoped `scripts/scrape_*.py` entrypoints
+   deliberately don't carry the line (ad hoc proving runs, where the
+   echo is useful) — only `main.py`, the scheduled path.
+2. **`scripts/run_orchestrator_cron.sh`** — new retention block right
+   after the existing rotation block. Prunes `logs/archive/cron-*.log.gz`
+   oldest-first (by mtime) until BOTH `CRON_LOG_ARCHIVE_KEEP` = 14 files
+   AND `CRON_LOG_ARCHIVE_MAX_BYTES` = 3 GiB total are satisfied; both
+   conditions checked together each iteration, loop breaks as soon as
+   both hold. Plain bash-3.2 while-read loops fed by a here-doc (the
+   system bash here is 3.2 — no `mapfile`); only touches the
+   `cron-*.log.gz` files this script creates; logs each prune into the
+   fresh `cron.log`. Updated the rotation block's comment (was "NO
+   retention/deletion cap") and the CLAUDE.md / SESSIONS.md rotation
+   notes accordingly.
+
+**Verified — Scrapy fix (real scoped scrape, local `.venv`):** replicated
+`main.py`'s exact `CrawlerProcess` sequence against the real Gem `ntop`
+board plus one bogus slug, run both with and without the new line.
+Baseline (no fix): 924 log lines, each scraped posting a ~189-line
+`[DEBUG] scrapy.core.scraper: Scraped from <...>` block with the full
+item dict + JD HTML. With the fix: 145 lines, zero `Scraped from` events,
+zero `Crawled (2xx)` DEBUG lines — while the real spider `WARNING`
+(`Gem: zzz-nonexistent-slug-xyz-000 is not a real board ... skipping`)
+and every per-posting `[INFO] huntloop.pipelines: Skipping reposted job
+...` line still appear, unchanged (9 WARNING lines both runs, 4
+per-posting pipeline INFO both runs). The 6.4x line reduction on a 4-item
+run scales with posting count; the full ~40–100x / sub-10-MB-per-run
+size drop can only be confirmed against tomorrow's real full-scale
+scheduled run. `job_postings` for `ntop` unchanged (6 rows, 0 NULL
+`is_relevant`/`embedding`) — the re-scrape only exercised the
+reposted-job path, same as the nightly cron.
+
+**Verified — retention cap (real temp-dir tests + real archive):**
+- empty dir → no-op, exit 0;
+- 10 small files under both caps → all kept, nothing pruned;
+- 20 small files → pruned oldest-first down to exactly 14, correct files
+  removed (oldest six), correct file left as new oldest;
+- 5 files of 1 GiB each (count under 14, size over 3 GiB) → pruned
+  oldest-first until total ≤ 3 GiB;
+- combined: 18 files, two of them 2 GiB → count-prune the tiny oldest
+  ones to 14, then size-prune the oldest 2-GiB file, stop once BOTH hold
+  (the newer 2-GiB file survives because both caps are already met by
+  then);
+- run against the real `logs/archive/` (1 file, 951 MiB) → no-op, file
+  byte-identical (same md5), nothing pruned — as expected under 14 / 3 GiB.
+
+**Tests:** full `pytest` — 327 passed before, 327 passed after. Neither
+change is imported by any test (`main.py` is an entrypoint; the wrapper
+is shell).
+
+**Still needs tomorrow's real 3am launchd run** to confirm end-to-end:
+(1) the scheduled `cron.log` for a full ~85k-posting scrape is now in
+the single-digit-MB range, and (2) the retention block runs cleanly as
+part of a genuine wrapper invocation (only the second `.gz` will exist
+then, so it stays a no-op for a while yet).
