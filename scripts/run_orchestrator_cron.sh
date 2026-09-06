@@ -81,6 +81,46 @@ cd "$REPO_ROOT"
 mkdir -p "$REPO_ROOT/logs"
 CRON_LOG="$REPO_ROOT/logs/cron.log"
 
+# --- single-instance guard --------------------------------------------------
+# Two launchd jobs land in this script: com.huntloop.scraper (the 3am
+# StartCalendarInterval firing) and com.huntloop.scraper-catchup (a
+# RunAtLoad boot/login catch-up that runs this once if today's 3am
+# firing was missed because the machine was off - see
+# scripts/catchup_orchestrator_boot.sh and the 2026-09-06 missed-run
+# finding in SESSIONS.md). launchd's own "don't start a job that's
+# already running" only covers repeat firings of ONE job, not two
+# different jobs invoking the same script, so this is the real guard
+# that a catch-up run and a 3am run can never execute concurrently.
+#
+# Mechanism: re-exec ourselves under lockf(1) holding an exclusive
+# flock(2) on logs/.orchestrator.lock. lockf -t 0 fails immediately
+# (exit 75, EX_TEMPFAIL) if the lock is already held; we then log one
+# line and exit 0 (a collision is expected and harmless, not a failure).
+# flock(2) locks are released by the kernel when the holder exits -
+# including a kill or a reboot mid-run - so there is never a stale lock
+# file to clean up. -k keeps the (empty) lock file between runs, which
+# lockf(1) recommends for lock-ordering/perf.
+ORCH_LOCK_FILE="$REPO_ROOT/logs/.orchestrator.lock"
+if [ -z "${HUNTLOOP_ORCH_LOCKED:-}" ]; then
+  export HUNTLOOP_ORCH_LOCKED=1
+  SELF="$REPO_ROOT/scripts/$(basename "${BASH_SOURCE[0]}")"
+  /usr/bin/lockf -s -t 0 -k "$ORCH_LOCK_FILE" "$SELF" "$@"
+  rc=$?
+  if [ "$rc" -eq 75 ]; then
+    echo "$(date '+%Y-%m-%d %H:%M:%S %Z'): orchestrator already running (lock held) - this invocation exits without running." >> "$CRON_LOG"
+    exit 0
+  fi
+  exit "$rc"
+fi
+
+# Holding the lock now. Record that a scheduled run started today, for
+# the boot catch-up job to detect. Written here - right after the lock,
+# before any real work or log rotation - so a run that later crashes in
+# stage 1 still counts as "today's run happened" and does not get
+# re-triggered by a later login the same day.
+LAST_RUN_MARKER="$REPO_ROOT/logs/last_scheduled_run.txt"
+date '+%Y-%m-%d %H:%M:%S %Z' > "$LAST_RUN_MARKER"
+
 # --- cron.log rotation (STOPGAP) -----------------------------------------
 # logs/cron.log captures the full stdout/stderr of every scheduled run
 # (stage 1's Docker build output + stage 2's per-job lines), so it grows

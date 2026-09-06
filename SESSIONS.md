@@ -10281,3 +10281,88 @@ metrics flow still unverified.**
 regressed, but because the run meant to exercise them didn't occur.
 Nothing here needs a code change; the next naturally-occurring scheduled
 run (machine booted + awake at 3am) is the retest for both.
+
+---
+
+## 2026-09-06 — Boot-time catch-up for a missed scheduled run
+
+**Why:** the 2026-09-06 investigation above found the day's 3am run was
+silently skipped because the machine cold-booted at 07:46 and launchd
+only replays a missed `StartCalendarInterval` across *sleep/wake*, not
+across a full power-off. This adds a catch-up so an off-through-3am day
+runs once soon after boot instead of being lost.
+
+**Checked first:** `ps aux` clean, zero Postgres advisory locks, only
+`com.huntloop.scraper` loaded.
+
+**Part 1 — existing protections, as found:**
+- `~/Library/LaunchAgents/com.huntloop.scraper.plist`:
+  `StartCalendarInterval` `Hour=3 Minute=0`, `ProgramArguments` =
+  `/bin/bash …/run_orchestrator_cron.sh`, `WorkingDirectory` set,
+  std{out,err} → `logs/launchd.log`. **No `RunAtLoad`, no
+  `AbandonProcessGroup`, no keep-alive.** Not tracked in the repo
+  (machine-local).
+- **Stage 1 (the scraper) had NO single-instance protection of its own** —
+  no lock file, no PID check, no `flock`. The only thing preventing two
+  overlapping stage-1 executions was launchd's own "don't start a job
+  that is already running" (confirmed in `man launchd.plist`: *"If the
+  job is running during an interval firing, that interval firing will
+  likewise be missed"*). That only covers repeat firings of the **one**
+  `com.huntloop.scraper` job — it does nothing about a *second* job
+  invoking the same wrapper. Stage 2's `pg_try_advisory_lock` (key
+  1751937901) is separate and specific to `backfill_skills_matching.py`.
+- **`RunAtLoad` + `StartCalendarInterval` on the same job** would risk a
+  near-3am double-fire (RunAtLoad instant + the calendar firing), only
+  partly masked by the "already running" rule. `man launchd.plist`
+  confirms the two triggers *"are evaluated completely independently"*.
+  Hence the fix is a **separate** job, plus a real lock.
+
+**Part 2 — what was built:**
+- `scripts/run_orchestrator_cron.sh`: added a re-exec guard at the top —
+  `lockf -s -t 0 -k logs/.orchestrator.lock "$SELF" "$@"`; on exit 75
+  (`EX_TEMPFAIL`, lock held) it logs one line to `cron.log` and exits 0.
+  `flock(2)`-based, so kill/reboot releases it — no stale lock. Right
+  after acquiring the lock (before rotation / any work) it writes
+  `logs/last_scheduled_run.txt` with the current timestamp, so a run
+  that later crashes still counts as "today happened".
+- `scripts/catchup_orchestrator_boot.sh` (new): marker check → skip if
+  dated today; else time-window check → defer if `[00:00, 03:30]` local;
+  else invoke `run_orchestrator_cron.sh` (which self-locks). Its own log
+  is `logs/catchup.log`. Test-hook env overrides
+  (`HUNTLOOP_CATCHUP_WRAPPER` / `_MARKER` / `_LOG` / `_NOW_HM` / `_TODAY`
+  / `_SKIP_START` / `_SKIP_END`) exist for testing, unset in normal use.
+- `scripts/com.huntloop.scraper-catchup.plist` (new, tracked reference)
+  + installed copy at
+  `~/Library/LaunchAgents/com.huntloop.scraper-catchup.plist`:
+  `RunAtLoad` = true, **no** `StartCalendarInterval`.
+
+**Tested (real evidence):**
+- Decision logic, direct runs w/ env hooks: marker=today → no-op, stub
+  wrapper not called; marker=yesterday & now inside window → defer;
+  marker=yesterday/absent & now outside window → trigger, stub called.
+  Window boundaries: `0000`–`0330` defer, `0331`+ trigger.
+- `lockf` guard on the real `run_orchestrator_cron.sh`: with the lock
+  pre-held it logged `orchestrator already running (lock held)` and
+  exited 0 without writing the marker or rotating. A stubbed copy run 4×
+  concurrently → **exactly one** ran the payload, the other three
+  logged the bail line. Catch-up → real wrapper while the lock was held
+  → no scrape, exit 0.
+- Real `launchctl bootstrap` of a `RunAtLoad` plist (stub wrapper via
+  `EnvironmentVariables`): marker=today → no-op under launchd;
+  marker=yesterday → triggered the stub under launchd. Then the real
+  plist installed and bootstrapped with a same-day marker seeded first,
+  so its `RunAtLoad` was a verified no-op (no unattended scrape mid-task).
+  Both jobs now show loaded in `launchctl list`.
+- `pytest`: 327 passed before, 327 passed after (no Python touched).
+
+**Limitations / not done:** an actual reboot was not performed — the
+first real off-through-3am catch-up is still to be seen in the wild
+(same standing caveat as Docker-Desktop autostart). The `[00:00,
+03:30]` window means a boot in `[03:00, 03:30]` on a genuinely-missed
+day defers and waits for the next boot/login or the next 3am; the lock,
+not the window, is the anti-double-run guarantee. 2026-09-06's own
+missed run was left for tomorrow's 3am (skills-matching is interrupt-
+safe and catches up over days; one staler scrape day is minor) — the
+seeded marker will be overwritten by that run. README's "Scheduled
+runs" section is still stale re: cron/`.venv` (pre-dates the launchd +
+Docker moves) and was left alone — out of scope here.
