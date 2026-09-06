@@ -10196,3 +10196,88 @@ is shell).
 the single-digit-MB range, and (2) the retention block runs cleanly as
 part of a genuine wrapper invocation (only the second `.gz` will exist
 then, so it stays a no-op for a while yet).
+
+---
+
+## 2026-09-06 — Deferred verification: observability continuity + groq_120b backlog throughput (against the 3am run)
+
+**Purpose:** close out the two items the 2026-09-04/05 observability and
+backlog work deferred to "tomorrow's real scheduled run" — (a) the
+Prometheus/Grafana/Pushgateway continuity + container-network fix, (b)
+the skills-matching backlog's real throughput on the `groq_120b`
+rotation. Verification/reporting only — no code, router, or script
+changes.
+
+**Checked first:** `ps aux` clean (no scraper/backfill/orchestrator);
+`pg_locks` zero advisory locks on `jobsight`; `launchctl list` shows the
+job loaded, `runs = 0`, `last exit code = (never exited)`.
+
+**The headline finding: there was no scheduled run on 2026-09-06.**
+`kern.boottime` shows the machine did a full **reboot at 07:46:57 PDT**
+on 2026-09-06 (it was in Clamshell Sleep from 2026-09-05 18:55 and came
+back via a cold boot, not a wake). launchd only coalesces a missed
+`StartCalendarInterval` across sleep/wake, **not across a reboot** — so
+the 03:00 firing was silently skipped, not caught up. Evidence, all
+consistent: `logs/cron.log` untouched since the 2026-09-05 11:12 manual
+rotation; `logs/archive/` still holds only the one 2026-09-05 file; the
+archive's last run marker is `2026-09-05 06:36:04`; `com.huntloop.scraper`
+`runs = 0`. Next firing is 2026-09-07 03:00.
+
+**Part 1 — observability. Infrastructure confirmed healthy; end-to-end
+metrics flow still unverified.**
+- Containers `huntloop-prometheus-1` / `-pushgateway-1` / `-grafana-1`
+  all **Up, healthy, `RestartCount=0`, `StartedAt` 2026-09-06 07:50:50
+  PDT** — i.e. Docker Desktop autostarted on login after the cold boot
+  and `restart: unless-stopped` brought all three back on its own. This
+  is genuine new evidence for the previously-untested "full OS reboot"
+  gap: after a real reboot the stack recovered without intervention
+  (`settings-store.json` `AutoStart = true`). But they came up at 07:50,
+  ~5h after the 03:00 schedule — they were **not** running at 3am.
+- Prometheus → Pushgateway wiring is live now: target `pushgateway`
+  `health=up`, last scrape seconds-fresh, no error; `docker exec
+  prometheus wget http://pushgateway:9091/metrics` succeeds (container
+  hostname resolution works).
+- **But there is no data.** Pushgateway `/metrics` is empty (nothing
+  pushed since it started). Prometheus has **zero `huntloop_*` samples
+  in the last 30 days** — the metric names still linger in the
+  `__name__` index but the only real block (the 2026-08-22 manual
+  verification) has aged past the 15-day retention. No
+  `huntloop_skills_matching_*` series have ever existed in this
+  Prometheus. Grafana `/api/health` is `ok`; its datasource proxy
+  answers queries with `{"status":"success","result":[]}` (empty, not an
+  error) — both provisioned dashboards would render "No data".
+- **Verdict: NOT confirmed end-to-end.** The restart-policy / autostart /
+  container-DNS pieces are all working, but the actual chain (scheduled
+  run pushes real metrics → Prometheus scrapes → Grafana renders) has
+  still never carried a real production data point, because no scheduled
+  run has coincided with the stack being up. Re-check after the
+  2026-09-07 run (if the machine is booted and awake at 3am).
+
+**Part 2 — skills-matching backlog throughput.**
+- **Real current backlog: 83,575** relevant rows (`matched_skills IS
+  NULL AND is_relevant IS TRUE`); 11,200 rows now have a result. This is
+  **unchanged from the 2026-09-05 run's end count** — no progress since,
+  consistent with 2026-09-06 not running.
+- Real runs on the `groq_120b`-in-chain rotation: **exactly one**, the
+  2026-09-05 run (the 2026-09-04 run predates the promotion taking
+  effect — its routing summary has no `groq_120b`). That run:
+  2,314 succeeded / 69 failed / 2,383 processed in 135 min; routing
+  `groq_120b: 101 jobs (39 batches); groq: 15 (7); gemini: 2,198 (493)`;
+  all three providers hit their daily quota; backlog 84,951 → 83,575.
+- Prior runs for context (pre-`groq_120b`): 2026-09-01 ≈ 2,069 stored,
+  2026-09-03 ≈ 2,011, 2026-09-04 ≈ 656 (a bad day — Gemini per-minute
+  429 storms). So `groq_120b` adds roughly its own ~100 jobs/run on top
+  of Gemini's ~2,000; Gemini's ~500-RPD wall is still the real ceiling.
+- **Honest clearance estimate:** one real data point only. On the day a
+  run happens: ~2,300 stored gross, ~1,376/day net of new inflow →
+  83,575 ÷ 1,376 ≈ **~60 days** at face value. But this is not a stable
+  rate: runs are unreliable (2026-09-06 produced zero; 2026-09-05 fired
+  at 06:36 not 03:00), and the one prior-week sample varied 656–2,069.
+  Treat "~2 months if a run lands most days, longer with missed days" as
+  the working estimate, not a firm number, until several consecutive
+  real runs exist.
+
+**Both deferred items remain formally open** — not because a fix
+regressed, but because the run meant to exercise them didn't occur.
+Nothing here needs a code change; the next naturally-occurring scheduled
+run (machine booted + awake at 3am) is the retest for both.
