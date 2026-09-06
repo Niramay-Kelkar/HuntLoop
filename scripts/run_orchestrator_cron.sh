@@ -86,12 +86,19 @@ CRON_LOG="$REPO_ROOT/logs/cron.log"
 # (stage 1's Docker build output + stage 2's per-job lines), so it grows
 # without bound. Before this run starts, gzip the previous run's log into
 # logs/archive/ with a timestamped name and truncate cron.log for a fresh
-# start. Date-based rotation at the start of each run is the primary (and
-# only) mechanism - there is deliberately NO mid-run rotation and NO
-# retention/deletion cap (archives are kept indefinitely for now). If a
-# single run's cron.log ever exceeds CRON_LOG_MAX_BYTES, something is
-# spamming it - that's flagged as a warning here and noted as a known
-# limitation in SESSIONS.md, not handled with mid-run rotation logic.
+# start. Date-based rotation at the start of each run is the primary
+# mechanism - there is deliberately NO mid-run rotation. If a single
+# run's cron.log ever exceeds CRON_LOG_MAX_BYTES, something is spamming
+# it - that's flagged as a warning here and noted as a known limitation
+# in SESSIONS.md, not handled with mid-run rotation logic.
+#
+# After rotating, a retention cap prunes logs/archive/ oldest-first
+# until BOTH: at most CRON_LOG_ARCHIVE_KEEP files remain AND the
+# directory is under CRON_LOG_ARCHIVE_MAX_BYTES total (see the
+# 2026-09-06 log-verbosity investigation for the 14-file / 3 GiB
+# reasoning). Rotation runs once per scheduled run, so 14 files is
+# roughly two weeks of history; the size cap is the real backstop if a
+# single run's log ever balloons again.
 #
 # This is an explicit stopgap, not a considered logging architecture: it
 # is expected to be superseded once scraping moves to GitHub Actions,
@@ -99,6 +106,8 @@ CRON_LOG="$REPO_ROOT/logs/cron.log"
 # RotatingFileHandler is unrelated and untouched.
 CRON_LOG_ARCHIVE_DIR="$REPO_ROOT/logs/archive"
 CRON_LOG_MAX_BYTES=$((500 * 1024 * 1024))  # 500 MB
+CRON_LOG_ARCHIVE_KEEP=14                          # keep at most this many archives
+CRON_LOG_ARCHIVE_MAX_BYTES=$((3 * 1024 * 1024 * 1024))  # and cap the dir at 3 GiB total
 
 if [ -s "$CRON_LOG" ]; then
   mkdir -p "$CRON_LOG_ARCHIVE_DIR"
@@ -111,6 +120,42 @@ if [ -s "$CRON_LOG" ]; then
       echo "WARNING: previous cron.log exceeded $CRON_LOG_MAX_BYTES bytes before rotation - something is likely spamming it (see SESSIONS.md 'cron.log rotation stopgap')." >> "$CRON_LOG"
     fi
   fi
+fi
+
+# --- logs/archive/ retention cap ----------------------------------------
+# Prune oldest-first until BOTH limits hold: at most
+# CRON_LOG_ARCHIVE_KEEP files remain, and the directory total is under
+# CRON_LOG_ARCHIVE_MAX_BYTES. Enforced every run, right after the
+# rotation above. Only touches the cron-*.log.gz files this script
+# created. (Plain while-read loops, no bash-4 mapfile - the system bash
+# here is 3.2; archive names are cron-<timestamp>.log.gz, no spaces.)
+if [ -d "$CRON_LOG_ARCHIVE_DIR" ]; then
+  archive_list=$(ls -1tr "$CRON_LOG_ARCHIVE_DIR"/cron-*.log.gz 2>/dev/null)  # oldest first
+  archive_count=0
+  archive_bytes=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    archive_count=$((archive_count + 1))
+    archive_bytes=$((archive_bytes + $(wc -c < "$f" | tr -d ' ')))
+  done <<EOF
+$archive_list
+EOF
+
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if [ "$archive_count" -le "$CRON_LOG_ARCHIVE_KEEP" ] \
+       && [ "$archive_bytes" -le "$CRON_LOG_ARCHIVE_MAX_BYTES" ]; then
+      break
+    fi
+    f_bytes=$(wc -c < "$f" | tr -d ' ')
+    if rm -f "$f"; then
+      archive_bytes=$((archive_bytes - f_bytes))
+      archive_count=$((archive_count - 1))
+      echo "retention: pruned old archive $f ($f_bytes bytes)" >> "$CRON_LOG"
+    fi
+  done <<EOF
+$archive_list
+EOF
 fi
 
 # See the PATH comment above - launchd's own environment doesn't include
