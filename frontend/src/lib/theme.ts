@@ -102,20 +102,3 @@ export function timeAgo(dateString: string | null): string | null {
 export function formatWage(amount: number): string {
   return `$${Math.round(amount / 1000)}k`;
 }
-
-/** Scraped job descriptions may contain raw or entity-escaped HTML (see
- * CLAUDE.md's text_cleaning note) - strip tags for safe plain-text display
- * rather than rendering untrusted external HTML. */
-export function stripHtml(html: string): string {
-  return html
-    .replace(/<[^>]*>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&#39;/g, "'")
-    .replace(/&quot;/g, '"')
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}

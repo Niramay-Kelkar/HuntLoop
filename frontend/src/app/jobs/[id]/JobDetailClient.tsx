@@ -8,7 +8,8 @@ import { ErrorState } from "@/components/ErrorState";
 import { NotesEditor } from "@/components/NotesEditor";
 import { ScoreIndicator } from "@/components/ScoreIndicator";
 import { StatusControl } from "@/components/StatusControl";
-import { avatarColors, formatDate, formatWage, initials, stripHtml, timeAgo } from "@/lib/theme";
+import { avatarColors, formatDate, formatWage, initials, timeAgo } from "@/lib/theme";
+import { sanitizeJobDescription } from "@/lib/sanitizeHtml";
 
 export function JobDetailClient({ jobId }: { jobId: number }) {
   const job = useQuery({
@@ -41,7 +42,7 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
   const postedDate = formatDate(detail.date_posted);
   const matched = detail.matched_skills ?? [];
   const missing = detail.missing_skills ?? [];
-  const description = detail.job_description ? stripHtml(detail.job_description) : null;
+  const description = sanitizeJobDescription(detail.job_description);
   const sponsor = detail.sponsor;
   const statusChanged =
     detail.application_status !== "not_applied" ? timeAgo(detail.status_updated_at) : null;
@@ -161,7 +162,10 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
           {description && (
             <div className="rounded-2xl border border-border bg-surface p-6">
               <h2 className="mb-3 text-base font-semibold text-text">About the role</h2>
-              <p className="whitespace-pre-line text-sm leading-relaxed text-text-secondary">{description}</p>
+              <div
+                className="rich-text text-sm leading-relaxed text-text-secondary"
+                dangerouslySetInnerHTML={{ __html: description }}
+              />
             </div>
           )}
         </div>

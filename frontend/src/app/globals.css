@@ -90,3 +90,78 @@
     border: 2px solid var(--color-bg);
   }
 }
+
+/*
+ * Rendered job-description HTML (sanitized third-party content from the
+ * ATS scrapers - see src/lib/sanitizeHtml.ts). Kept out of @layer base
+ * so these element rules reliably style the injected markup.
+ */
+.rich-text > :first-child {
+  margin-top: 0;
+}
+.rich-text > :last-child {
+  margin-bottom: 0;
+}
+.rich-text p,
+.rich-text div {
+  margin: 0 0 0.85em;
+}
+.rich-text p:empty,
+.rich-text div:empty {
+  margin: 0;
+}
+.rich-text ul,
+.rich-text ol {
+  margin: 0 0 0.85em;
+  padding-left: 1.4em;
+}
+.rich-text ul {
+  list-style: disc;
+}
+.rich-text ol {
+  list-style: decimal;
+}
+.rich-text li {
+  margin: 0.25em 0;
+}
+.rich-text h1,
+.rich-text h2,
+.rich-text h3,
+.rich-text h4,
+.rich-text h5,
+.rich-text h6 {
+  margin: 1.4em 0 0.5em;
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: var(--color-text);
+}
+.rich-text a {
+  color: var(--color-accent);
+  text-decoration: underline;
+}
+.rich-text strong,
+.rich-text b {
+  font-weight: 600;
+  color: var(--color-text);
+}
+.rich-text blockquote {
+  margin: 0 0 0.85em;
+  padding-left: 0.9em;
+  border-left: 2px solid var(--color-border-strong);
+  color: var(--color-text-muted);
+}
+.rich-text hr {
+  margin: 1.2em 0;
+  border: 0;
+  border-top: 1px solid var(--color-border);
+}
+.rich-text table {
+  margin: 0 0 0.85em;
+  border-collapse: collapse;
+}
+.rich-text th,
+.rich-text td {
+  padding: 0.35em 0.6em;
+  border: 1px solid var(--color-border);
+  text-align: left;
+}

@@ -11061,3 +11061,81 @@ chip removal; added a `getJobs` repeated-param test). `tsc` clean;
 **Did not touch:** sort behavior, other filters' semantics, the
 `location_canonical` normalization itself, skills-matching, embeddings,
 `huntloop-claude-code-prompts.md`.
+
+---
+
+## 2026-09-07 — Render job descriptions as real HTML instead of flattened text
+
+**Investigated (real evidence, all 7 sources):** sampled every source's
+stored `job_description` and classified HTML structure after unescaping
+the Greenhouse case. **Result: this is a pure rendering bug — every
+source stores real semantic HTML, none needs LLM extraction.**
+- **greenhouse_api** — 100% entity-escaped HTML (`&lt;p&gt;&lt;strong&gt;…`,
+  full `<ul>/<li>/<p>/<strong>` structure). After unescape: ~98% rich
+  structure. Stored raw regex found "no tags" only because `<` is `&lt;`.
+- **workday_api** — ~84% rich structure, ~16% paragraphs+headings, raw
+  HTML.
+- **smartrecruiters_api** — ~76% rich, ~18% paragraphs+headings, ~4%
+  minimal markup; raw HTML.
+- **ashby_api** — ~98% rich structure; raw HTML with inline
+  `descriptionHtml`.
+- **icims_portal** — ~68% rich, ~32% paragraphs+headings; JSON-LD HTML.
+- **gem_api** — ~98% lists + rich structure; raw HTML with empty-`<p>`
+  spacers.
+- **lever_api** — div-per-paragraph (`<div>…</div>` + `<div>&nbsp;</div>`
+  spacers) with `<strong>` headers and `<ul>/<li>` lists; a minority are
+  a single `<div>` intro paragraph (genuinely short, nothing to
+  extract). Raw HTML.
+- Edge cases (single-block, minimal markup) still carry `<div>/<p>/<br>`
+  block structure — rendering as HTML preserves whatever exists. No
+  source has a meaningful share of genuinely flat text.
+
+**Current rendering (before):** `JobDetailClient.tsx` ran
+`stripHtml()` — removed all tags and rendered the result in one
+`whitespace-pre-line` `<p>`. For raw-HTML sources this flattened lists
+and headers into a wall of text; for Greenhouse (stripped tags *before*
+unescaping entities) it showed literal `<p>`, `<strong>`, `<ul>`,
+`&amp;`, `&nbsp;` as visible text. Screenshots taken of Greenhouse and
+Lever confirming both failure modes.
+
+**LLM-based extraction — assessed and NOT justified.** The data has the
+structure already; the cost math is also against it (per-posting, not
+per-distinct-value like department — tens of thousands of unique
+descriptions, one call each). No extraction built, by design, not
+partially.
+
+**Built (rendering fix, frontend only):**
+- Added `dompurify` (nothing suitable was already in `frontend/`).
+- `frontend/src/lib/sanitizeHtml.ts` — `sanitizeJobDescription()`:
+  unescapes the Greenhouse entity case (via a `<textarea>` in the
+  browser, a small entity map elsewhere), then DOMPurify with a narrow
+  allow-list (block/inline text tags + `a`/tables, no `style`/`class`/
+  `id` — Lever's inline `font-size` on every node is dropped so the
+  app's own typography stays consistent), links forced to
+  `target="_blank" rel="noopener noreferrer nofollow"`, and a
+  post-pass that removes empty `<p>`/`<div>` spacer nodes. Returns `""`
+  for nullish/blank input and under SSR (the detail view renders this
+  client-side only).
+- `JobDetailClient.tsx` renders the sanitized HTML via
+  `dangerouslySetInnerHTML` inside a `.rich-text` container.
+- `globals.css` — `.rich-text` element styles (list markers, heading
+  weight/size, paragraph spacing, links, blockquote, tables), kept out
+  of `@layer base` so they reliably style the injected markup.
+- Removed the now-unused `stripHtml()` from `theme.ts`.
+
+**Verified:** Playwright screenshots of all 7 sources after the change —
+Greenhouse, Lever, Workday, SmartRecruiters, Ashby, iCIMS, Gem all now
+render real headings, bullet/numbered lists, paragraph spacing, and
+safe links. Production `npm run build` clean; `tsc` clean.
+
+**Tests:** frontend `55 → 63` passing (new
+`src/lib/sanitizeHtml.test.ts`: entity-unescape, structure
+preservation, `<script>`/event-handler/`javascript:` stripping,
+`style`/`class` removal, link hardening, empty-spacer removal).
+Backend `449 → 449` unchanged (no backend touched). `eslint` still has
+the one pre-existing unrelated error in `JobDetailClient.tsx` (present
+on `master`, now shifted a few lines).
+
+**Did not touch:** the raw `job_description` column (unchanged — the fix
+is render-time only), any scraper/pipeline/backend code, skills-matching,
+`huntloop-claude-code-prompts.md`.
