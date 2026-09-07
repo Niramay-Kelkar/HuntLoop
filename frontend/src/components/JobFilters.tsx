@@ -5,12 +5,13 @@ import { useQuery } from "@tanstack/react-query";
 
 import { getDepartments, getEmploymentTypes, getLocations, type ListJobsParams } from "@/lib/api";
 import { UNSPECIFIED_DEPARTMENT, UNSPECIFIED_EMPLOYMENT_TYPE, UNSPECIFIED_LOCATION } from "@/types/api";
+import { LocationMultiSelect } from "@/components/LocationMultiSelect";
 
 export interface JobFiltersValue {
   company: string;
   department: string; // "" = unset (no filter); UNSPECIFIED_DEPARTMENT = "no category"; otherwise a canonical category
   employmentType: string; // "" = unset (no filter); UNSPECIFIED_EMPLOYMENT_TYPE = "none set"; otherwise a real value
-  location: string; // "" = unset; UNSPECIFIED_LOCATION = "no location scraped"; otherwise a canonical location group (exact match, see GET /jobs/locations)
+  location: string[]; // [] = unset; UNSPECIFIED_LOCATION = "no location scraped"; otherwise canonical location groups (exact match, OR'd, see GET /jobs/locations)
   minScore: string; // kept as a raw string while editing; parsed by the caller
   salaryMin: string; // raw string while editing; parsed by the caller
   salaryMax: string; // raw string while editing; parsed by the caller
@@ -22,7 +23,7 @@ const EMPTY_FILTERS: JobFiltersValue = {
   company: "",
   department: "",
   employmentType: "",
-  location: "",
+  location: [],
   minScore: "",
   salaryMin: "",
   salaryMax: "",
@@ -66,11 +67,11 @@ function activeChips(value: JobFiltersValue): { key: string; label: string; next
       next: { ...value, employmentType: "" },
     });
   }
-  if (value.location) {
+  for (const loc of value.location) {
     chips.push({
-      key: "location",
-      label: `Location: ${labelFor(value.location, UNSPECIFIED_LOCATION)}`,
-      next: { ...value, location: "" },
+      key: `location:${loc}`,
+      label: `Location: ${labelFor(loc, UNSPECIFIED_LOCATION)}`,
+      next: { ...value, location: value.location.filter((l) => l !== loc) },
     });
   }
   if (value.minScore) {
@@ -248,24 +249,11 @@ export function JobFilters({
                 ▼
               </span>
             </div>
-            <div className="relative w-full sm:w-auto">
-              <select
-                value={value.location}
-                onChange={(e) => onChange({ ...value, location: e.target.value })}
-                className="w-full appearance-none rounded-lg border border-border-strong bg-surface py-2 pl-3 pr-7 text-[13px] text-text"
-              >
-                <option value="">All locations</option>
-                {locations.data?.map((loc) => (
-                  <option key={loc} value={loc}>
-                    {loc}
-                  </option>
-                ))}
-                <option value={UNSPECIFIED_LOCATION}>Not specified</option>
-              </select>
-              <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-faintest">
-                ▼
-              </span>
-            </div>
+            <LocationMultiSelect
+              groups={locations.data}
+              selected={value.location}
+              onChange={(next) => onChange({ ...value, location: next })}
+            />
             <div className="relative w-full sm:w-auto">
               <select
                 value={value.sort}

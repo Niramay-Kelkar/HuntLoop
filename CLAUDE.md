@@ -45,7 +45,9 @@ conventions" and SESSIONS.md for the real current state).
   2026-09-07 (see SESSIONS.md "Canonical department categorization")
   both operate on the canonical `department_category` column, NOT the
   raw `department` free text:** `GET /jobs/departments` returns the ~18
-  canonical categories present in the data (most-common-first), and
+  canonical categories present in the data (**alphabetical as of
+  2026-09-07, see SESSIONS.md "Alphabetize and group the department and
+  location filters"** — was most-common-first), and
   `GET /jobs?department=` matches `JobPosting.department_category`
   exactly, or `UNSPECIFIED_DEPARTMENT = "__unspecified__"` to filter to
   rows with no category (no raw department, or not yet categorized).
@@ -80,13 +82,26 @@ conventions" and SESSIONS.md for the real current state).
   EXACT match on `job_locations.location_canonical` (EXISTS subquery),
   or `UNSPECIFIED_LOCATION = "__unspecified__"` for postings with no
   `job_locations` row; `GET /jobs/locations` returns the canonical
-  labels present on ≥ `_LOCATION_MIN_POSTINGS` (100) distinct postings,
-  most-frequent first — a clean grouped dropdown ("San Francisco, CA,
-  United States" covers every "San Francisco" / "San Francisco, CA" /
-  "SF Bay Area" variant; "Remote - United States"; "London, United
-  Kingdom"), with the unresolved long-tail excluded. The raw
-  `location_name`(s) are still returned per-posting on `GET /jobs` and
-  `GET /jobs/{id}` for transparency.
+  labels present on ≥ `_LOCATION_MIN_POSTINGS` (100) distinct postings
+  ("San Francisco, CA, United States" covers every "San Francisco" /
+  "San Francisco, CA" / "SF Bay Area" variant; "Remote - United States";
+  "London, United Kingdom"), with the unresolved long-tail excluded. The
+  raw `location_name`(s) are still returned per-posting on `GET /jobs`
+  and `GET /jobs/{id}` for transparency.
+  **As of 2026-09-07 (see SESSIONS.md "Alphabetize and group the
+  department and location filters") `GET /jobs/locations` returns a
+  `list[LocationGroup]` — `{country, locations}` grouped by country,
+  countries alphabetical with "Other" (labels carrying no resolved
+  country, e.g. a bare "Remote") last, `locations` alphabetized within
+  each — replacing the old flat most-frequent-first `list[str]`. The
+  country grouping is real, not cosmetic: the data spans ~40 countries
+  over the 100-posting floor (~119 US groups, ~116 non-US — India, UK,
+  Germany, Canada, Poland, China, … — see SESSIONS.md for the full
+  distribution). AND `GET /jobs?location=` is now MULTI-VALUE: repeat
+  the param (`?location=X&location=Y`) and a posting matches if it is in
+  ANY of them (OR within the location filter, still AND'd with the other
+  filter types); empty values are ignored; `__unspecified__` still works
+  and can be combined with real values.**
   Normalization is `huntloop.location_normalization` — rules + an
   OFFLINE gazetteer (`geonamescache`: ~34k cities pop > 15k, US states,
   ~250 countries), **no network geocoding, no LLM**: place names resolve
@@ -239,11 +254,9 @@ conventions" and SESSIONS.md for the real current state).
   NULL-`employment_type` postings). `JobFiltersValue` gained an
   `employmentType` field threaded through `frontend/src/app/jobs/
   page.tsx`'s query key/params the same way `department` already was.**
-  **`JobFilters.tsx` gained a `location` `<select>` (same shape as the
-  department/employment-type selects, populated from `GET
-  /jobs/locations` — as of 2026-09-07 these are the canonical location
-  groups, not raw substrings; see the `location_canonical` bullet above
-  — plus "Not specified" → `UNSPECIFIED_LOCATION`), an
+  **`JobFilters.tsx` gained a `location` filter (canonical location
+  groups from `GET /jobs/locations`; see the `location_canonical`
+  bullet above — plus "Not specified" → `UNSPECIFIED_LOCATION`), an
   estimated-salary min/max number-input pair with a "No estimate"
   checkbox (→ `salary_unspecified`, which disables the range inputs),
   and a visible caption stating the salary figure is an employer-level
@@ -253,6 +266,21 @@ conventions" and SESSIONS.md for the real current state).
   `salaryMax`, `salaryUnspecified`, threaded through `jobs/page.tsx`'s
   query key/params like `department` already was. The match-score
   slider (`minScore` → `min_score`) already existed.**
+  **As of 2026-09-07 (see SESSIONS.md "Alphabetize and group the
+  department and location filters") the location `<select>` was
+  replaced by a real multi-select — `frontend/src/components/
+  LocationMultiSelect.tsx`, a no-dependency checkbox dropdown (trigger
+  button + positioned panel, type-to-filter box, `<optgroup>`-style
+  country section headings from the new `LocationGroup[]` response,
+  closed on outside-click / Escape). `JobFiltersValue.location` is now
+  `string[]` (`[]` = unset; `UNSPECIFIED_LOCATION` is just another entry
+  in the list); `EMPTY_FILTERS`/`jobs/page.tsx` initial state updated;
+  `jobs/page.tsx` sends `location: filters.location.length ?
+  filters.location : undefined` and `lib/api.ts`'s `getJobs` query
+  builder now `.append()`s array params once per value. Each selected
+  location renders as its OWN removable chip in the existing chips row
+  (not one combined chip), each clearing just itself and never `sort`.
+  The department/employment-type/sort selects are unchanged.**
   **`JobFilters.tsx` was reorganized for usability 2026-09-06 (see
   SESSIONS.md's "Improve the job filter panel usability" entry) — a
   UI/UX-only change: no filter's behavior, sentinel values, or the
@@ -2201,7 +2229,9 @@ conventions" and SESSIONS.md for the real current state).
   torch), so the LLM tail keeps draining and new data never silently
   regresses to permanently-NULL.
   **API:** `GET /jobs/departments` now returns the canonical CATEGORIES
-  present in the data (most-common-first), not the ~4,800 raw strings;
+  present in the data (alphabetical as of 2026-09-07 — see the
+  department/location-filter entry above; was most-common-first), not
+  the ~4,800 raw strings;
   `GET /jobs?department=` filters on `department_category`
   (`__unspecified__` = no category); `GET /jobs` / `GET /jobs/{id}`
   expose both `department` (raw, for transparency) and

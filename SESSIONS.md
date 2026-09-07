@@ -10969,3 +10969,95 @@ branch/PR.
 **Did not touch:** raw `location_name` semantics beyond the split,
 lat-long/radius search (still out of scope), skills-matching, embeddings,
 `huntloop-claude-code-prompts.md`.
+
+## 2026-09-07 — Alphabetize and group the department and location filters; location multi-select (`improve-department-location-filters`)
+
+Three related filter improvements, new branch off `master` (the
+`ui-ux-improvements` work is merged). No scrape/backfill running at
+start — `ps aux` clean, `pg_locks` had no advisory lock, no
+`run_orchestrator_cron.sh` / `backfill_*` process.
+
+**1. `GET /jobs/departments` — alphabetical.** Was ordered by posting
+count (most-common-first). Now `SELECT DISTINCT department_category …
+ORDER BY department_category`. The frontend `<select>` never depended on
+the order (it just renders the list between "All departments" and "Not
+specified"); the only test asserting order was updated. Live: returns
+`["Construction & Skilled Trades", "Consulting & Professional
+Services", "Customer Support", "Data & Analytics", "Design",
+"Engineering", …, "Sales"]`.
+
+**2. `GET /jobs/locations` — alphabetical + real country grouping.**
+
+Country-distribution investigation on the live `job_locations` data
+(canonical labels only): **146 distinct countries overall**; over the
+100-posting dropdown floor, **~235 canonical groups across 40
+countries** — 119 United States, then India 11, Germany 10, United
+Kingdom 9, Canada 9, Poland 7, China 6, Spain/Japan/France/Malaysia/
+Australia/Mexico 3 each, and a long tail of 1–2 each (Colombia,
+Philippines, South Korea, Sweden, Romania, Brazil, Ireland, Singapore,
+Portugal, Israel, Hong Kong, Belgium, Taiwan, Thailand, Netherlands,
+Italy, Argentina, Egypt, Chile, Vietnam, Denmark, Switzerland,
+Austria, Hungary, Czechia, Indonesia). Postings-per-country overall:
+US ~56.6k, India ~8.1k, UK ~4.6k, Canada ~3.5k, Germany ~2.1k, China
+~1.9k, then France/Mexico/Singapore/Japan/Australia/Poland/Ireland/
+Malaysia/South Korea all 900–1,600. **Verdict: genuinely
+multi-country — grouping built.** The US is only ~half the dropdown
+entries and the international list is a real, navigable set, not a
+handful of outliers.
+
+`GET /jobs/locations` now returns `list[LocationGroup]` (`{country,
+locations}`, new Pydantic schema) — grouped by country, countries
+alphabetical with an "Other" bucket (labels with no resolved country,
+i.e. a bare "Remote" — one entry) always last, `locations`
+alphabetized within each country. Same `_LOCATION_MIN_POSTINGS = 100`
+floor and same exclusion of unresolved long-tail labels. Live: first
+groups `Argentina → ["Buenos Aires, Argentina"]`, `Australia →
+["Australia", "Melbourne, Australia", "Sydney, Australia"]`, … through
+`United States` then `Other`.
+
+**3. `location` filter — real multi-select.**
+
+- Backend: `?location=` is now `list[str] | None` (repeated params,
+  `?location=X&location=Y`). A posting matches if it is in ANY selected
+  group — `or_()` of per-value EXISTS subqueries — still AND'd with
+  every other filter type. Empty strings are dropped;
+  `__unspecified__` contributes the `~EXISTS` (no `job_locations`
+  row) condition and combines with real values. Live checks:
+  `?location=SF` 6,255; `?location=NYC` 6,388; `?location=SF&location=NYC`
+  **10,354** (< 12,643 sum → overlap dedup works);
+  `?location=SF&location=London&department=Engineering` 1,632;
+  `?location=Remote-US&location=Austin&employment_type=Full-time&sort=-date`
+  2,261 with correct rows.
+- Frontend: new `LocationMultiSelect.tsx` — a no-dependency checkbox
+  dropdown (trigger button showing "All locations" / the single name /
+  "N locations"; positioned panel with a type-to-filter box, a "Not
+  specified" checkbox, and `<optgroup>`-style country section headings
+  driven by the grouped response; closed on outside-click / Escape;
+  `w-[min(320px,calc(100vw-2rem))]` so it never overflows at narrow
+  widths). `JobFiltersValue.location` is now `string[]`; each selected
+  location is its own removable chip in the existing chips row (not one
+  combined chip); `lib/api.ts`'s `getJobs` `.append()`s array params;
+  `jobs/page.tsx` sends the array only when non-empty. Other selects
+  (department, employment type, sort) untouched.
+
+**Mobile (Playwright, 390×844):** trigger renders full-width stacked
+with the other filters; opening it shows the panel contained within the
+viewport (no horizontal page scroll), scrollable checkbox list with
+country headers; type-to-filter ("york" → only "New York City, NY,
+United States" under a "UNITED STATES" heading) works. Desktop: checked
+two locations → FILTERS badge "2", two individual chips, trigger reads
+"2 locations", results filter to the OR; removing the "Australia" chip
+→ badge "1", one chip, results narrow further.
+
+**Tests:** backend `446 → 449` passing (added 3 multi-location tests —
+OR, real+`__unspecified__`, combined with department; rewrote the
+departments-order and locations-grouping tests). Frontend `52 → 55`
+passing (rewrote the two location-`<select>` tests into 5 multi-select
+tests — sentinel add, multi-pick append, type-filter, per-location
+chip removal; added a `getJobs` repeated-param test). `tsc` clean;
+`eslint` clean except one pre-existing unrelated error in
+`JobDetailClient.tsx:256` (present on `master`).
+
+**Did not touch:** sort behavior, other filters' semantics, the
+`location_canonical` normalization itself, skills-matching, embeddings,
+`huntloop-claude-code-prompts.md`.
