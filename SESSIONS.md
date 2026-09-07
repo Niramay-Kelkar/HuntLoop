@@ -10435,3 +10435,64 @@ each filter individually and all five combined (`min_score` + `location`
 18-row result set). Backend suite 327 → 337 passing; frontend 15 → 21
 passing. `tsc --noEmit` shows only the pre-existing generated-types
 `PageProps`/`LayoutProps` errors, none in touched files.
+
+---
+
+## 2026-09-06 — Improve the job filter panel usability
+
+**Did:** Reorganized `frontend/src/components/JobFilters.tsx` for
+usability now that it carries six filter types (company, department,
+employment type, location, min match score, estimated-salary
+range/unspecified) plus sort. UI/UX layer only — no filter behavior,
+sentinel, `JobFiltersValue` shape, or `jobs/page.tsx` query-key/param
+wiring was touched.
+
+**Investigation (real "before" state):**
+- One flat, always-visible panel — a rounded card between the page
+  header and the results, not a sidebar, not collapsible. Top row
+  (flex-wrap): company text input + department / employment-type /
+  location / sort `<select>`s. Second row under a divider: min-match
+  range slider, est-salary min/max number inputs + "No estimate"
+  checkbox, a static DOL-estimate caption.
+- Active-filter visibility: none beyond each control showing its own
+  value — you had to scan all eight controls to know what was filtering.
+- Clear-all: existed, but as a small mono-text "Clear filters ✕" button
+  tucked bottom-right of the second row, only rendered when a filter was
+  set; easy to miss.
+- Result count: only in the page `<h1>` subtitle ("N postings · scored
+  against your active resume") above the panel — not adjacent to the
+  filters, phrased as total "postings", label unchanged when filters
+  narrowed it.
+- Selects were fixed-width with no narrow-width handling.
+
+**Built:**
+- Collapsible controls body (`useState` `expanded`, default open) with a
+  persistent header row: a "Filters" toggle carrying an active-count
+  badge, a live result count for the current filter combination (new
+  `resultCount` / `isLoading` props fed from the `jobs` query's `total`
+  / `isPending` in `page.tsx`), and a prominent single "Clear all ✕".
+- A chips row: one removable chip per active filter (`activeChips(value)`
+  helper — company / dept / type / location / min-match / est-salary
+  range as a single chip / "no estimate" as its own chip). Each chip
+  clears exactly its own field(s); `sort` is never touched.
+- `w-full sm:w-auto` on the selects and `flex-wrap` on the header/chip
+  rows so nothing overflows at narrow widths.
+
+**Verified:**
+- Live API + UI on a throwaway port against real local Postgres. Request
+  URLs byte-identical to before — e.g. applying company + a $150k salary
+  floor produced
+  `GET /jobs?company=palantir&salary_min=150000&sort=-score&limit=12&offset=0`,
+  and the panel's "320 results" matched a direct
+  `curl .../jobs?company=palantir&salary_min=150000` (`total` 320).
+  Removing the salary chip dropped only `salary_min`; "Clear all" reset
+  every field and restored the unfiltered count; collapse hid the
+  controls while keeping the header/count visible.
+- Frontend suite 21 → 27 passing (`JobFilters.test.tsx`: chip-per-filter
+  + count badge, chip click clears only that filter, salary range as one
+  chip clearing both bounds, collapse/expand, result-count readout +
+  loading placeholder; the two existing clear-button tests updated to
+  the new "Clear all" label). `tsc --noEmit` clean on touched files.
+- Chrome could not shrink its window below ~1560px, so true 390px
+  rendering was not screenshot-verified; the responsive changes are
+  flex-wrap + `w-full sm:w-auto`, consistent with the rest of the app.

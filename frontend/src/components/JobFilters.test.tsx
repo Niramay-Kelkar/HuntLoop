@@ -9,18 +9,24 @@ import { UNSPECIFIED_DEPARTMENT, UNSPECIFIED_EMPLOYMENT_TYPE, UNSPECIFIED_LOCATI
 /**
  * Covers the filter component's real logic: the min-score slider's
  * fraction<->percent conversion (0-1 stored, 0-95% displayed/edited), the
- * "Clear filters" button only appearing once a filter is actually set, and
- * the department/employment-type sentinel values - not those <select>s'
+ * "Clear all" button and active-filter chips only appearing once a filter
+ * is actually set, removing an individual filter via its chip, the
+ * collapsible body, the result-count readout, and the
+ * department/employment-type sentinel values - not those <select>s'
  * options themselves, which are just a query result rendered as <option>s.
  */
-function renderFilters(value: JobFiltersValue, onChange = vi.fn()) {
+function renderFilters(
+  value: JobFiltersValue,
+  onChange = vi.fn(),
+  extraProps: { resultCount?: number; isLoading?: boolean } = {},
+) {
   const queryClient = new QueryClient();
   vi.spyOn(api, "getDepartments").mockResolvedValue(["Engineering", "Sales"]);
   vi.spyOn(api, "getEmploymentTypes").mockResolvedValue(["Contract", "Full-time"]);
   vi.spyOn(api, "getLocations").mockResolvedValue(["New York, NY", "Remote - US"]);
   render(
     <QueryClientProvider client={queryClient}>
-      <JobFilters value={value} onChange={onChange} />
+      <JobFilters value={value} onChange={onChange} {...extraProps} />
     </QueryClientProvider>,
   );
   return onChange;
@@ -43,15 +49,16 @@ describe("JobFilters", () => {
     vi.restoreAllMocks();
   });
 
-  it("does not show a clear-filters button when nothing is set", () => {
+  it("does not show a clear-all button or any chips when nothing is set", () => {
     renderFilters(emptyValue);
-    expect(screen.queryByText(/Clear filters/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Clear all/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Remove filter/ })).not.toBeInTheDocument();
   });
 
-  it("shows a clear-filters button once a filter is set, and clearing preserves sort", () => {
+  it("shows a clear-all button once a filter is set, and clearing preserves sort", () => {
     const onChange = renderFilters({ ...emptyValue, company: "checkr" });
 
-    const clearButton = screen.getByText(/Clear filters/);
+    const clearButton = screen.getByText(/Clear all/);
     fireEvent.click(clearButton);
 
     expect(onChange).toHaveBeenCalledWith({
@@ -130,5 +137,51 @@ describe("JobFilters", () => {
 
     expect(screen.getByPlaceholderText("min")).toBeDisabled();
     expect(screen.getByPlaceholderText("max")).toBeDisabled();
+  });
+
+  it("renders a chip per active filter and an active-count badge", () => {
+    renderFilters({ ...emptyValue, company: "checkr", department: "Engineering", minScore: "0.5" });
+
+    expect(screen.getByRole("button", { name: "Remove filter Company: checkr" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove filter Dept: Engineering" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Remove filter Min match: 50%" })).toBeInTheDocument();
+    expect(screen.getByText("3")).toBeInTheDocument();
+  });
+
+  it("clicking a filter chip clears only that filter", () => {
+    const onChange = renderFilters({ ...emptyValue, company: "checkr", department: "Engineering" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove filter Company: checkr" }));
+
+    expect(onChange).toHaveBeenCalledWith({ ...emptyValue, company: "", department: "Engineering" });
+  });
+
+  it("shows the salary range as a single chip that clears both bounds", () => {
+    const onChange = renderFilters({ ...emptyValue, salaryMin: "150000", salaryMax: "200000" });
+
+    const chip = screen.getByRole("button", { name: "Remove filter Est. salary: $150k–$200k" });
+    fireEvent.click(chip);
+
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ salaryMin: "", salaryMax: "" }));
+  });
+
+  it("collapses and expands the filter controls body", () => {
+    renderFilters(emptyValue);
+
+    expect(screen.getByRole("slider")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Filters/ }));
+    expect(screen.queryByRole("slider")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Filters/ }));
+    expect(screen.getByRole("slider")).toBeInTheDocument();
+  });
+
+  it("shows the result count for the current filter combination", () => {
+    renderFilters(emptyValue, vi.fn(), { resultCount: 1234 });
+    expect(screen.getByText("1,234 results")).toBeInTheDocument();
+  });
+
+  it("shows a placeholder for the result count while loading", () => {
+    renderFilters(emptyValue, vi.fn(), { isLoading: true });
+    expect(screen.getByText("…")).toBeInTheDocument();
   });
 });

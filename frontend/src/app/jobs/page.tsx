@@ -97,7 +97,12 @@ export default function JobsPage() {
         />
       </div>
 
-      <JobFilters value={filters} onChange={handleFiltersChange} />
+      <JobFilters
+        value={filters}
+        onChange={handleFiltersChange}
+        resultCount={jobs.data?.total}
+        isLoading={jobs.isPending}
+      />
 
       {jobs.isPending && (
         <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3">

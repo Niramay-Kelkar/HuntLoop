@@ -218,6 +218,28 @@ conventions" and SESSIONS.md for the real current state).
   `salaryMax`, `salaryUnspecified`, threaded through `jobs/page.tsx`'s
   query key/params like `department` already was. The match-score
   slider (`minScore` → `min_score`) already existed.**
+  **`JobFilters.tsx` was reorganized for usability 2026-09-06 (see
+  SESSIONS.md's "Improve the job filter panel usability" entry) — a
+  UI/UX-only change: no filter's behavior, sentinel values, or the
+  `JobFiltersValue` shape / `jobs/page.tsx` query-key/param wiring
+  changed at all (verified against the real API — request URLs are
+  byte-identical, e.g. `?company=palantir&salary_min=150000&sort=-score&limit=12&offset=0`).
+  Before: a flat always-visible two-row panel of ~8 controls with no
+  summary of what was active (you scanned every control) and a small
+  easy-to-miss "Clear filters ✕" text button as the only affordance;
+  the result count lived only in the page `<h1>` subtitle above the
+  panel. After: the controls sit in a collapsible body (`useState`
+  `expanded`, default open); a persistent header row shows a "Filters"
+  toggle with an active-count badge, the live result count for the
+  current combination (`resultCount`/`isLoading` props fed from the
+  `jobs` query's `total`/`isPending` in `page.tsx`), and a single
+  "Clear all ✕" button; and a chips row renders one removable chip per
+  active filter (`activeChips(value)` — company / dept / type / location
+  / min-match / est-salary-range-as-one-chip / no-estimate), each
+  clearing exactly its own field(s) and never `sort`. Selects went
+  `w-full sm:w-auto` so they don't overflow at narrow widths; header and
+  chip rows `flex-wrap`. `EMPTY_FILTERS` and "clear preserves sort" are
+  unchanged.**
 - **Frontend test suite: Vitest + React Testing Library, added
   2026-09-04 (see SESSIONS.md's "Frontend test suite (Vitest + RTL) + CI
   wiring" entry) — the frontend had zero test tooling before this.**
@@ -235,7 +257,7 @@ conventions" and SESSIONS.md for the real current state).
   (`frontend/src/lib/api.test.ts`); `useApplicationStatusMutation`'s
   optimistic-update/rollback cache behavior
   (`frontend/src/hooks/useApplicationStatus.test.tsx`); and
-  `JobFilters`' slider/sentinel/clear-button logic
+  `JobFilters`' slider/sentinel/clear-all/active-chip/collapse/result-count logic
   (`frontend/src/components/JobFilters.test.tsx`). **Not yet covered,
   deliberately**: every page component, `JobCard`/`JobTable`/
   `KanbanBoard`/`ApplicationsList`/`ScoreIndicator`/`SkillChips`/
