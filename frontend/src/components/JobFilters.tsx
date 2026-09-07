@@ -211,11 +211,11 @@ export function JobFilters({
                 className="w-full rounded-lg border border-border-strong bg-surface-alt py-2.5 pl-8 pr-3 text-[13px] text-text focus:border-accent focus:outline-none"
               />
             </div>
-            <div className="relative">
+            <div className="relative w-full sm:w-auto">
               <select
                 value={value.department}
                 onChange={(e) => onChange({ ...value, department: e.target.value })}
-                className="w-full appearance-none rounded-lg border border-border-strong bg-surface py-2 pl-3 pr-7 text-[13px] text-text sm:w-auto"
+                className="w-full appearance-none rounded-lg border border-border-strong bg-surface py-2 pl-3 pr-7 text-[13px] text-text"
               >
                 <option value="">All departments</option>
                 {departments.data?.map((department) => (
@@ -229,11 +229,11 @@ export function JobFilters({
                 ▼
               </span>
             </div>
-            <div className="relative">
+            <div className="relative w-full sm:w-auto">
               <select
                 value={value.employmentType}
                 onChange={(e) => onChange({ ...value, employmentType: e.target.value })}
-                className="w-full appearance-none rounded-lg border border-border-strong bg-surface py-2 pl-3 pr-7 text-[13px] text-text sm:w-auto"
+                className="w-full appearance-none rounded-lg border border-border-strong bg-surface py-2 pl-3 pr-7 text-[13px] text-text"
               >
                 <option value="">All employment types</option>
                 {employmentTypes.data?.map((type) => (
@@ -247,11 +247,11 @@ export function JobFilters({
                 ▼
               </span>
             </div>
-            <div className="relative">
+            <div className="relative w-full sm:w-auto">
               <select
                 value={value.location}
                 onChange={(e) => onChange({ ...value, location: e.target.value })}
-                className="w-full appearance-none rounded-lg border border-border-strong bg-surface py-2 pl-3 pr-7 text-[13px] text-text sm:w-auto"
+                className="w-full appearance-none rounded-lg border border-border-strong bg-surface py-2 pl-3 pr-7 text-[13px] text-text"
               >
                 <option value="">All locations</option>
                 {locations.data?.map((loc) => (
@@ -265,11 +265,11 @@ export function JobFilters({
                 ▼
               </span>
             </div>
-            <div className="relative">
+            <div className="relative w-full sm:w-auto">
               <select
                 value={value.sort}
                 onChange={(e) => onChange({ ...value, sort: e.target.value as JobFiltersValue["sort"] })}
-                className="w-full appearance-none rounded-lg border border-border-strong bg-surface py-2 pl-3 pr-7 text-[13px] text-text sm:w-auto"
+                className="w-full appearance-none rounded-lg border border-border-strong bg-surface py-2 pl-3 pr-7 text-[13px] text-text"
               >
                 <option value="-score">Sort: Best match</option>
                 <option value="score">Sort: Worst match</option>

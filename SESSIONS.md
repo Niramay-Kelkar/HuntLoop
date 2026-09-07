@@ -10496,3 +10496,40 @@ wiring was touched.
 - Chrome could not shrink its window below ~1560px, so true 390px
   rendering was not screenshot-verified; the responsive changes are
   flex-wrap + `w-full sm:w-auto`, consistent with the rest of the app.
+
+---
+
+## 2026-09-06 — Fix two mobile-width layout issues on `ui-ux-improvements`
+
+**Did:** Two CSS/layout-only fixes for real mobile-width problems found in
+the prior verification pass (both confirmed at a 390×844 viewport with
+Playwright against the running app + real local Postgres):
+
+- `NavBar.tsx` — the Dashboard/Jobs/Applications/Resume row did not wrap,
+  forcing horizontal page scroll on narrow viewports. The nav container
+  had a fixed `h-[58px]` and no wrap. Changed to `min-h-[58px]`,
+  `flex-wrap`, `gap-y-1`, `py-2`, and added `flex-wrap` to the inner
+  `<nav>`, so the links wrap onto a second line when they don't fit. No
+  hamburger — a simple wrap matches how the filter panel and other rows
+  already handle narrow widths.
+- `JobFilters.tsx` — `w-full sm:w-auto` was on the `<select>` elements,
+  whose wrapping `<div className="relative">` is content-sized inside the
+  `flex-wrap` row, so the selects never actually went full-width at
+  mobile. Moved `w-full sm:w-auto` to the wrapper `<div>`s and left the
+  `<select>`s as plain `w-full`. Behaviour, sentinel values, query-key
+  wiring, and desktop rendering are all unchanged.
+
+**Verified (Playwright, 390×844, real running app):**
+- Before: `document.documentElement.scrollWidth` = 507 vs `clientWidth`
+  390 on both `/dashboard` and `/jobs` (horizontal overflow). Filter
+  selects rendered at inconsistent widths (308 / 168 / 308 / 148 px).
+- After: `scrollWidth` = `clientWidth` = 390 on both pages, no horizontal
+  overflow anywhere. Nav wraps to a second line ("Resume" drops below).
+  All four filter selects render at a consistent 308 px (full width).
+  Screenshots captured for both states.
+- Desktop (1280×900) before vs after: byte-identical metrics — no
+  overflow, select widths 709 / 168 / 320 / 148 px unchanged, nav on one
+  line. Confirmed visually against a screenshot too.
+- Purely CSS/layout, no new interactive behaviour (no mobile menu
+  toggle), so no new tests were added. Full frontend suite unchanged and
+  green before and after (27 passing).
