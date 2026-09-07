@@ -28,7 +28,18 @@ class JobSummary(BaseModel):
     job_title: str
     company_name: str
     job_url: str
-    department: str | None = None
+    department: str | None = Field(
+        default=None,
+        description="The raw department string as scraped from the source ATS, kept for transparency.",
+    )
+    department_category: str | None = Field(
+        default=None,
+        description=(
+            "Canonical category the raw department is mapped onto (see "
+            "huntloop.department_categorization) - one of ~18 controlled values or 'Other'. "
+            "null when there is no raw department or it isn't categorized yet."
+        ),
+    )
     employment_type: str | None = Field(
         default=None,
         description=(

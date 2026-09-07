@@ -8,7 +8,7 @@ import { UNSPECIFIED_DEPARTMENT, UNSPECIFIED_EMPLOYMENT_TYPE, UNSPECIFIED_LOCATI
 
 export interface JobFiltersValue {
   company: string;
-  department: string; // "" = unset (no filter); UNSPECIFIED_DEPARTMENT = "no department set"; otherwise a real value
+  department: string; // "" = unset (no filter); UNSPECIFIED_DEPARTMENT = "no category"; otherwise a canonical category
   employmentType: string; // "" = unset (no filter); UNSPECIFIED_EMPLOYMENT_TYPE = "none set"; otherwise a real value
   location: string; // "" = unset; UNSPECIFIED_LOCATION = "no location scraped"; otherwise a real value (substring-matched)
   minScore: string; // kept as a raw string while editing; parsed by the caller
@@ -109,14 +109,15 @@ function activeChips(value: JobFiltersValue): { key: string; label: string; next
  * scope, see CLAUDE.md), min match score, estimated-salary range, and
  * sort.
  *
- * Department options are populated from GET /jobs/departments (the real
- * distinct values in the data), not a hardcoded list - department is
- * free text from each ATS source and varies in casing/wording. Leaving
- * the department filter unset returns postings regardless of department,
- * including ones with none set (NULL) - filtering is additive/optional,
- * never silently exclusionary. Selecting "Not specified" explicitly
- * filters down to only the NULL-department postings (see CLAUDE.md for
- * the full reasoning).
+ * Department options are the canonical department CATEGORIES from GET
+ * /jobs/departments (see huntloop.department_categorization) - the raw
+ * scraped department strings (~4,800 messy per-company values) are
+ * mapped onto a controlled set of ~18 categories, and only categories
+ * actually present in the data are listed. Leaving the department filter
+ * unset returns postings regardless of category, including ones with
+ * none (NULL) - filtering is additive/optional, never silently
+ * exclusionary. Selecting "Not specified" explicitly filters down to
+ * only the postings with no category (see CLAUDE.md).
  *
  * This component is purely a UI/UX layer over `value`/`onChange` - it
  * does not query the jobs list or shape API params itself. The controls

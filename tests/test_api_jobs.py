@@ -71,6 +71,7 @@ def _seed(db_session):
         source_id=source.id,
         embedding=HIGH_MATCH_EMBEDDING,
         department="Engineering",
+        department_category="Engineering",
         employment_type="Full-time",
     )
     mid = JobPosting(
@@ -83,6 +84,7 @@ def _seed(db_session):
         matched_skills=["Python", "AWS"],
         missing_skills=["Go"],
         department="Sales",
+        department_category="Sales",
         employment_type="Contract",
     )
     low = JobPosting(
@@ -93,6 +95,7 @@ def _seed(db_session):
         source_id=source.id,
         embedding=LOW_MATCH_EMBEDDING,
         department="Engineering",
+        department_category="Engineering",
         employment_type="Full-time",
     )
     no_embedding = JobPosting(
@@ -103,6 +106,7 @@ def _seed(db_session):
         source_id=source.id,
         embedding=None,
         department=None,
+        department_category=None,
         employment_type=None,
     )
     db_session.add_all([high, mid, low, no_embedding])
@@ -292,9 +296,11 @@ def test_list_jobs_filters_by_company(api_client, db_session):
     assert response.json()["total"] == 2
 
 
-def test_list_jobs_filters_by_department(api_client, db_session):
+def test_list_jobs_filters_by_department_category(api_client, db_session):
     _seed(db_session)
 
+    # The `department` param filters on the canonical category, not the
+    # raw string.
     response = api_client.get("/jobs", params={"department": "Engineering"})
     assert response.status_code == 200
     body = response.json()
@@ -312,6 +318,16 @@ def test_list_jobs_filters_by_unspecified_department(api_client, db_session):
     assert body["items"][0]["job_title"] == "Not Yet Embedded Job"
 
 
+def test_job_summary_exposes_raw_department_and_category(api_client, db_session):
+    _seed(db_session)
+
+    items = {i["job_title"]: i for i in api_client.get("/jobs").json()["items"]}
+    assert items["Mid Match Job"]["department"] == "Sales"
+    assert items["Mid Match Job"]["department_category"] == "Sales"
+    assert items["Not Yet Embedded Job"]["department"] is None
+    assert items["Not Yet Embedded Job"]["department_category"] is None
+
+
 def test_list_jobs_no_department_filter_includes_null_department_jobs(api_client, db_session):
     _seed(db_session)
 
@@ -323,11 +339,13 @@ def test_list_jobs_no_department_filter_includes_null_department_jobs(api_client
     assert body["total"] == 4
 
 
-def test_list_departments_returns_distinct_non_null_values_sorted(api_client, db_session):
+def test_list_departments_returns_distinct_categories_most_common_first(api_client, db_session):
     _seed(db_session)
 
     response = api_client.get("/jobs/departments")
     assert response.status_code == 200
+    # Engineering (2 postings) before Sales (1); NULL-category postings
+    # are never listed.
     assert response.json() == ["Engineering", "Sales"]
 
 

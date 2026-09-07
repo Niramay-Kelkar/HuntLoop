@@ -41,15 +41,21 @@ conventions" and SESSIONS.md for the real current state).
   /resumes/{id}/activate`.**
   **`GET /jobs` gained a `department` query param, and `GET
   /jobs/departments` (added 2026-09-02, see SESSIONS.md's "Add a
-  department filter to job search") was added alongside it — exact
-  match against `JobPosting.department`, or the sentinel
-  `UNSPECIFIED_DEPARTMENT = "__unspecified__"` to filter to
-  `department IS NULL`. Leaving `department` unset returns postings
-  regardless of department, including NULL ones, same as before this
-  change — the filter is additive/optional, never silently
-  exclusionary, since `department` is NULL for ~44% of postings
-  (100% of Workday's, by source-data design — see the department-NULL
-  entries above) and those must stay visible by default.
+  department filter to job search") was added alongside it. **As of
+  2026-09-07 (see SESSIONS.md "Canonical department categorization")
+  both operate on the canonical `department_category` column, NOT the
+  raw `department` free text:** `GET /jobs/departments` returns the ~18
+  canonical categories present in the data (most-common-first), and
+  `GET /jobs?department=` matches `JobPosting.department_category`
+  exactly, or `UNSPECIFIED_DEPARTMENT = "__unspecified__"` to filter to
+  rows with no category (no raw department, or not yet categorized).
+  Leaving `department` unset returns postings regardless of category,
+  including uncategorized ones — the filter is additive/optional, never
+  silently exclusionary, since `department`/`department_category` is
+  NULL for a large share of postings (100% of Workday's, by source-data
+  design) and those must stay visible by default. The raw `department`
+  string is still returned per-posting on `GET /jobs` and `GET
+  /jobs/{id}` for transparency.
   `/jobs/departments` is registered before `/jobs/{job_id}` in the
   router file — registering it after would let `{job_id}`'s int-typed
   path param intercept `/jobs/departments` and 422 before this handler
@@ -189,13 +195,12 @@ conventions" and SESSIONS.md for the real current state).
   needed).
   **`JobFilters.tsx` gained a department `<select>`, added 2026-09-02
   (see SESSIONS.md) — populated via its own `useQuery` against the new
-  `GET /jobs/departments`, real distinct values only, never a hardcoded
-  list.** Options: "All departments" (unset — no filter, matches
-  `frontend/src/app/jobs/page.tsx`'s existing filter-state/query-key
-  wiring for `company`/`min_score`), each real department value, and
-  "Not specified" (sends `UNSPECIFIED_DEPARTMENT` from
-  `frontend/src/types/api.ts`, filters to NULL-department postings
-  only). No URL query-param sync for any filter, department included —
+  `GET /jobs/departments`.** As of 2026-09-07 the options are the
+  canonical department CATEGORIES (see the `department_category` bullet
+  above), not the ~4,800 raw strings: "All departments" (unset), each
+  canonical category actually present in the data, and "Not specified"
+  (sends `UNSPECIFIED_DEPARTMENT` from `frontend/src/types/api.ts`,
+  filters to postings with no category). No URL query-param sync for any filter, department included —
   matches the existing `company`/`min_score` pattern, not a gap
   introduced here.
   **`JobFilters.tsx` gained a matching `employment_type` `<select>`,
@@ -2126,6 +2131,62 @@ conventions" and SESSIONS.md for the real current state).
     no manual step — the real end-to-end confirmation. Distinct stored
     values: Full-time 53,438 · Other 5,580 · Part-time 4,501 · Contract
     2,510 · Internship 605.
+- **`job_postings.department_category` added end-to-end 2026-09-07 (see
+  SESSIONS.md "Canonical department categorization") — an ADDITIVE
+  canonical-category layer over the raw free-text `department`; the raw
+  value is kept unchanged.** Investigation of the real live data: 4,821
+  distinct non-NULL `department` values across 55,621 postings (43.8%
+  of rows NULL, ~all `workday_api` by source design; 0 empty-string) —
+  far cleaner than `location` (~15.6k distinct) but still messy (clean
+  heads, company-specific tails with requisition codes, non-English
+  labels, industry-vertical labels naming no function). **Taxonomy: 18
+  canonical categories + "Other"** (Engineering, Data & Analytics,
+  Product, Design, IT, Sales, Marketing, Customer Support, Operations,
+  Finance & Accounting, Legal & Compliance, People & HR, Healthcare &
+  Clinical, Research & Science, Manufacturing & Production, Construction
+  & Skilled Trades, Consulting & Professional Services, Executive &
+  General Management, Other) — deliberately broader than a generic
+  tech-company list because the ~700-employer set spans hospitals,
+  universities, manufacturers, and construction consultancies. "Other"
+  = a real department string naming no function we categorize; NOT the
+  same as NULL (no raw department at all).
+  `huntloop.department_categorization`: `rule_based_category(raw)` is
+  pure/deterministic (ordered keyword regex, first-match-wins,
+  specific-before-broad — "Sales Engineer" → Sales, "Data Engineering"
+  → Data & Analytics); `categorize_values()` runs rules first then an
+  LLM pass over the residual distinct values reusing the
+  **skills-matching provider chain** (Groq gpt-oss-120b → gpt-oss-20b →
+  Gemini). Cost is bounded by the ~4.8k DISTINCT values, not the ~99k
+  rows. A value the LLM saw but couldn't place → "Other"; a value no
+  provider could answer (daily quota spent) is left NULL for a later
+  run — same drain-over-days model as skills-matching. Migration
+  `a1b2c3d4e5f6` (nullable `VARCHAR(50)`).
+  **Auto-computed at insert** by `JobDataPipeline` (rule-based only on
+  the hot path — no network), and on a repost that backfills a
+  previously-NULL raw department; same pattern as
+  `is_relevant`/`embedding`/`employment_type`.
+  `scripts/backfill_department_category.py` (rule + LLM, one
+  VALUES-joined UPDATE per 500-value chunk) is wired as **stage 3/3 of
+  `scripts/run_orchestrator_cron.sh`** (runs via `.venv`, HTTP only, no
+  torch), so the LLM tail keeps draining and new data never silently
+  regresses to permanently-NULL.
+  **API:** `GET /jobs/departments` now returns the canonical CATEGORIES
+  present in the data (most-common-first), not the ~4,800 raw strings;
+  `GET /jobs?department=` filters on `department_category`
+  (`__unspecified__` = no category); `GET /jobs` / `GET /jobs/{id}`
+  expose both `department` (raw, for transparency) and
+  `department_category`. **Frontend:** the department `<select>` shows
+  the canonical categories; the job detail sidebar shows the category
+  with the raw string beneath it when they differ.
+  **Real before → after (live query):** `department_category` 0 →
+  45,628 / 55,621 non-NULL-department postings (**82.0%**) — rules
+  wrote 43,726, the LLM pass ~1,900 more distinct-value mappings before
+  Groq's and Gemini's free-tier daily quotas (already spent by the
+  day's scheduled skills-matching run) were exhausted; the remaining
+  ~10,100 postings drain via stage 3 over subsequent daily runs. All 18
+  categories populated; Engineering (9,779) and Sales (7,081) lead,
+  Healthcare & Clinical (3,829) and Construction & Skilled Trades
+  (3,505) large due to the hospital/consultancy employers.
 - **iCIMS spider BUILT + onboarded + first scrape 2026-09-01 (see
   SESSIONS.md "Build the iCIMS spider + gated onboarding + first
   scrape"). Recommendation was GO — but a step grayer on ToS/risk than

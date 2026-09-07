@@ -140,6 +140,7 @@ def _row_to_summary(row) -> JobSummary:
         company_name=row.company_name,
         job_url=job.job_url,
         department=job.department,
+        department_category=job.department_category,
         employment_type=job.employment_type,
         date_posted=job.date_posted,
         match_score=row.match_score,
@@ -160,13 +161,19 @@ def _row_to_summary(row) -> JobSummary:
 
 @router.get("/departments", response_model=list[str])
 def list_departments(db: Session = Depends(get_db)) -> list[str]:
-    """The real, distinct department values currently in use across
-    job_postings (non-null only) - lets the frontend populate its
-    department filter from real data instead of a hardcoded list.
-    Department is free text from each ATS source (see CLAUDE.md) and is
-    deliberately not normalized/canonicalized here."""
+    """The canonical department CATEGORIES currently present in the data
+    (see huntloop.department_categorization) - the controlled set the raw
+    free-text `department` strings are mapped onto, so the frontend
+    filter offers ~18 clean choices instead of ~4,800 messy raw values.
+
+    Real distinct values only (a category is listed only if some posting
+    is mapped to it), most-common-first. The raw `department` string is
+    still returned per-posting on `GET /jobs/{id}` for transparency."""
     rows = db.execute(
-        select(JobPosting.department).where(JobPosting.department.isnot(None)).distinct().order_by(JobPosting.department)
+        select(JobPosting.department_category, func.count())
+        .where(JobPosting.department_category.isnot(None))
+        .group_by(JobPosting.department_category)
+        .order_by(func.count().desc())
     )
     return [row[0] for row in rows]
 
@@ -210,9 +217,10 @@ def list_jobs(
     department: str | None = Query(
         None,
         description=(
-            "Filter by exact department value, or "
-            f"'{UNSPECIFIED_DEPARTMENT}' to return only postings with no department set. "
-            "Unset (default) returns postings regardless of department, including those with none."
+            "Filter by canonical department category (see GET /jobs/departments), or "
+            f"'{UNSPECIFIED_DEPARTMENT}' to return only postings with no category "
+            "(no raw department, or not yet categorized). "
+            "Unset (default) returns postings regardless of department category."
         ),
     ),
     employment_type: str | None = Query(
@@ -309,9 +317,9 @@ def list_jobs(
         query = query.where(func.lower(Company.name) == company.lower())
     if department is not None:
         if department == UNSPECIFIED_DEPARTMENT:
-            query = query.where(JobPosting.department.is_(None))
+            query = query.where(JobPosting.department_category.is_(None))
         else:
-            query = query.where(JobPosting.department == department)
+            query = query.where(JobPosting.department_category == department)
     if employment_type is not None:
         if employment_type == UNSPECIFIED_EMPLOYMENT_TYPE:
             query = query.where(JobPosting.employment_type.is_(None))
@@ -396,6 +404,7 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
         company_name=company.name,
         job_url=job.job_url,
         department=job.department,
+        department_category=job.department_category,
         employment_type=job.employment_type,
         date_posted=job.date_posted,
         match_score=row.match_score,

@@ -179,7 +179,12 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
               </div>
               <div className="flex justify-between">
                 <span className="text-text-subtle">Department</span>
-                <span className="font-medium text-text">{detail.department ?? "—"}</span>
+                <span className="flex flex-col items-end">
+                  <span className="font-medium text-text">{detail.department_category ?? "—"}</span>
+                  {detail.department && detail.department !== detail.department_category && (
+                    <span className="text-[11px] text-text-faint">{detail.department}</span>
+                  )}
+                </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-text-subtle">Salary est.</span>

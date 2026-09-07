@@ -55,6 +55,29 @@ def test_process_item_stores_department(pipeline, db_session):
     assert row.department == "Engineering"
 
 
+def test_process_item_categorizes_department_at_insert(pipeline, db_session):
+    # The raw string is kept verbatim; department_category carries the
+    # canonical (rule-based) category computed at insert time.
+    item = make_item(job_id="dept-cat-1", job_url="https://boards.greenhouse.io/testco/jobs/dept-cat-1")
+    item["department"] = "SW Eng - Core Identity"
+    pipeline.process_item(item, spider=None)
+
+    row = db_session.query(JobPosting).filter_by(job_url=item["job_url"]).one()
+    assert row.department == "SW Eng - Core Identity"
+    assert row.department_category == "Engineering"
+
+
+def test_process_item_leaves_department_category_null_when_rules_cannot_place_it(pipeline, db_session):
+    item = make_item(job_id="dept-cat-2", job_url="https://boards.greenhouse.io/testco/jobs/dept-cat-2")
+    item["department"] = "Woven City"
+    pipeline.process_item(item, spider=None)
+
+    row = db_session.query(JobPosting).filter_by(job_url=item["job_url"]).one()
+    assert row.department == "Woven City"
+    # Rules don't guess - the LLM backfill pass handles this tail.
+    assert row.department_category is None
+
+
 def test_repost_backfills_null_department_only(pipeline, db_session):
     """A repost (same gh_job_id) that carries a real department value should
     fill it in when the existing row's department is NULL - and touch
@@ -76,6 +99,7 @@ def test_repost_backfills_null_department_only(pipeline, db_session):
     db_session.expire_all()
     row = db_session.query(JobPosting).filter_by(job_url=item1["job_url"]).one()
     assert row.department == "Engineering"
+    assert row.department_category == "Engineering"  # backfilled alongside the raw value
     assert row.job_title == original_title
     assert row.is_relevant == original_is_relevant
     assert row.embedding == original_embedding

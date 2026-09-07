@@ -10746,3 +10746,114 @@ no-estimate rows all at the tail), plus the removed `score` value now
 visibly re-orders the card list). Backend and frontend suites green
 (the 3 pre-existing `test_backfill_lock` failures are unrelated - the
 daily backfill cron holds the advisory lock).
+
+---
+
+## 2026-09-07 — Canonical department categorization (`ui-ux-improvements`)
+
+**Investigation (real data, before any code):**
+- `job_postings.department` is free text from each ATS source. Real
+  live numbers: 99,043 rows, 55,621 with a non-NULL department (56.2%),
+  43,422 NULL (43.8%, almost all `workday_api` which exposes no
+  per-posting department), **0 empty-string**. **4,821 distinct
+  non-NULL values.**
+- Distribution: only 4 values appear on ≥1,000 postings ("Engineering"
+  3,156, "Sales" 2,642, "Real estate" 2,013, "Testing & Laboratory"
+  1,681); 71 on 100-999; 688 on 10-99; **2,349 on 2-9 and 1,709
+  singletons.** By source: greenhouse 93.6% populated / 4,113 distinct,
+  workday 0%, smartrecruiters 52.1%, icims 92.4%, lever 89.4%, ashby
+  98.2%, gem 99.6%.
+- Much cleaner than `location` (~15.6k distinct there) but still messy:
+  clean heads ("Engineering", "Finance", "IT"), company-specific tails
+  ("R&D - Backend Infra", "SW Eng - Core Identity-670", "20213 S&M -
+  Sales - Square Outside"), ~897 values carrying a 3+-digit
+  requisition code, non-English labels ("Steuerberatung"),
+  industry-vertical labels naming no function ("Real estate", "Energy
+  and natural resources" — both Turner & Townsend construction-
+  consultancy verticals), and genuinely unclassifiable values
+  ("Reconditioning", "Woven City", "zz-Evergreen Requisition", "Ω
+  ARCHIVE - Do not remove").
+- **Feasibility:** a keyword rule pass covers **79.4% of postings** /
+  3,008 of 4,760 distinct values outright. Cost is bounded by the
+  distinct-value count (~4.8k), NOT the row count (~99k) — each string
+  is resolved once. So rules + an LLM pass over the ~1,750 residual
+  distinct values (≈44 batched calls) is cheap and sufficient; no
+  per-row LLM work.
+
+**Taxonomy (18 + "Other"), chosen from the real data — this is not one
+tech company's data, it spans ~700 employers incl. hospitals,
+universities, manufacturers, construction consultancies:** Engineering,
+Data & Analytics, Product, Design, IT (internal/corporate tech, distinct
+from product engineering), Sales, Marketing, Customer Support,
+Operations (incl. admin/logistics/supply-chain/biz-ops), Finance &
+Accounting, Legal & Compliance, People & HR, Healthcare & Clinical,
+Research & Science, Manufacturing & Production, Construction & Skilled
+Trades, Consulting & Professional Services, Executive & General
+Management, Other. "Other" = a real department string that names no
+function we categorize; it is NOT the same as NULL (NULL = no raw
+department at all).
+
+**Implemented:**
+- Migration `a1b2c3d4e5f6` adds nullable `job_postings.department_category
+  VARCHAR(50)`. The raw `department` string is kept **unchanged** —
+  this is an additive layer.
+- `huntloop.department_categorization`: `CANONICAL_CATEGORIES`,
+  `rule_based_category(raw)` (pure, deterministic, ordered keyword regex
+  rules, first-match-wins with specific-before-broad disambiguation —
+  e.g. "Sales Engineer" → Sales, "Data Engineering" → Data & Analytics,
+  "People Operations" → People & HR), and `categorize_values()` (rules
+  first, then an LLM pass over the residual reusing the
+  skills-matching provider chain: Groq gpt-oss-120b → Groq gpt-oss-20b →
+  Gemini). A value the LLM genuinely saw but couldn't place → "Other";
+  a value no provider could answer (quota spent) is left NULL for a
+  later run, exactly like the skills-matching backlog drains over days.
+- `huntloop.pipelines`: new postings get a rule-based
+  `department_category` at insert time (and on a repost that backfills a
+  previously-NULL raw department), same auto-compute-at-insert pattern
+  as `is_relevant`/`embedding`/`employment_type`.
+- `scripts/backfill_department_category.py`: rule + LLM pass over
+  distinct uncategorized values, one VALUES-joined UPDATE per 500-value
+  chunk (a single seq scan, not one per value). Wired as **stage 3/3**
+  of `scripts/run_orchestrator_cron.sh` (runs via `.venv` — no torch,
+  HTTP only), so the LLM tail keeps draining and new data never
+  silently regresses to permanently-NULL.
+- API: `GET /jobs/departments` now returns the canonical **categories**
+  present in the data (most-common-first), not the ~4,800 raw strings;
+  `GET /jobs?department=` filters on `department_category` (`__unspecified__`
+  = no category). `GET /jobs` / `GET /jobs/{id}` expose both `department`
+  (raw, for transparency) and `department_category`.
+- Frontend: the department `<select>` shows the canonical categories;
+  the job detail sidebar shows the category with the raw string beneath
+  it when they differ.
+
+**Real before → after coverage (live query):** `department_category`
+populated **0 → 45,628** of the 55,621 non-NULL-department postings
+(**82.0%**). Rule pass wrote 43,726; the LLM pass ~1,900 more
+distinct-value mappings before Groq's *and* Gemini's daily free-tier
+quotas (already spent by the day's scheduled skills-matching run) were
+exhausted. The remaining ~10,100 postings (~1,650 distinct values) stay
+NULL and drain via stage 3 of the daily orchestrator over the next runs
+— same model as skills-matching. All 18 categories are populated;
+Engineering (9,779) and Sales (7,081) lead, Healthcare & Clinical
+(3,829) and Construction & Skilled Trades (3,505) are large because the
+company set includes many hospitals and Turner & Townsend.
+
+**Verified:** rule mapping spot-checked against real values across the
+whole frequency spectrum (clean head, messy tail, disambiguation,
+unclassifiable → None); LLM pass confirmed working on real residual
+values ("Account Development Representative" → Sales, "Algorithms &
+Data" → Data & Analytics, "Brain Interfaces Hardware" → Engineering);
+filter endpoint returns categories and filters correctly. Backend suite
+409 passed (was 345), frontend 51 passed (was 50). The 3 pre-existing
+`test_backfill_lock` failures are unrelated (daily cron holds the
+advisory lock) — not seen this run because that lock was free.
+
+**Branch note:** committed to `ui-ux-improvements` per the task's
+default-to-the-branch instruction. This is schema/backend/pipeline work
+on a frontend-focused branch — it would sit more naturally in its own
+PR, but there's no technical blocker to stacking it here and the
+instruction was explicit.
+
+**Did not touch:** the raw `department` values, Workday's
+department-NULL-by-design status, skills-matching, embeddings,
+`huntloop-claude-code-prompts.md`.

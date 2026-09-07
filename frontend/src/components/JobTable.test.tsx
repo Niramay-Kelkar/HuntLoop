@@ -13,6 +13,7 @@ function makeJob(overrides: Partial<JobSummary> = {}): JobSummary {
     company_name: "Palantir",
     job_url: "https://example.com/job/1",
     department: null,
+    department_category: null,
     employment_type: null,
     date_posted: null,
     match_score: 0.5,

@@ -1,10 +1,12 @@
 #!/bin/bash
 # launchd/cron wrapper for HuntLoop's daily scheduled work: the multi-ATS
-# scraper orchestrator (main.py) followed by the skills-matching backfill
-# stage (scripts/backfill_skills_matching.py, added as a cron stage
-# 2026-08-22 - see SESSIONS.md). Both stages always run, regardless of
-# whether the other succeeded - a scraping hiccup shouldn't stall
-# skills-matching progress on the existing backlog, and vice versa.
+# scraper orchestrator (main.py), then the skills-matching backfill stage
+# (scripts/backfill_skills_matching.py, added 2026-08-22), then the
+# department-categorization backfill stage
+# (scripts/backfill_department_category.py, added 2026-09-07 - see
+# SESSIONS.md). All stages always run, regardless of whether the others
+# succeeded - a scraping hiccup shouldn't stall skills-matching progress
+# on the existing backlog, and vice versa.
 #
 # Stage 1 (the scraper) runs via `docker compose run` (the `app` image),
 # not the local .venv Python - as of 2026-08-24 (see SESSIONS.md's "Move
@@ -252,16 +254,34 @@ PYTHON="$REPO_ROOT/.venv/bin/python"
   scrape_status=$?
   echo "--- stage 1/2 finished with exit code $scrape_status ---"
 
-  echo "--- stage 2/2: skills-matching backfill (scripts/backfill_skills_matching.py) ---"
+  echo "--- stage 2/3: skills-matching backfill (scripts/backfill_skills_matching.py) ---"
   "$PYTHON" "$REPO_ROOT/scripts/backfill_skills_matching.py"
   skills_status=$?
-  echo "--- stage 2/2 finished with exit code $skills_status ---"
+  echo "--- stage 2/3 finished with exit code $skills_status ---"
+
+  # Stage 3: map each newly-scraped posting's raw free-text department
+  # string onto the canonical taxonomy (huntloop.department_categorization).
+  # New rows already get a rule-based category at insert time
+  # (huntloop.pipelines); this stage runs the LLM pass over the residual
+  # distinct values rules can't place, so the tail never stays
+  # permanently NULL as new data arrives. No torch dependency (rules +
+  # LLM over HTTP only), so it runs via the local .venv like stage 2. It
+  # is bounded by the number of still-uncategorized DISTINCT department
+  # strings, not the row count, and stops cleanly when the LLM providers'
+  # daily quotas are spent (picking up where it left off next run).
+  echo "--- stage 3/3: department categorization backfill (scripts/backfill_department_category.py) ---"
+  "$PYTHON" "$REPO_ROOT/scripts/backfill_department_category.py"
+  dept_cat_status=$?
+  echo "--- stage 3/3 finished with exit code $dept_cat_status ---"
 
   status=$scrape_status
   if [ "$skills_status" -ne 0 ]; then
     status=$skills_status
   fi
+  if [ "$dept_cat_status" -ne 0 ]; then
+    status=$dept_cat_status
+  fi
 
-  echo "=== run finished with exit code $status (scrape=$scrape_status, skills=$skills_status) at $(date '+%Y-%m-%d %H:%M:%S %Z') ==="
+  echo "=== run finished with exit code $status (scrape=$scrape_status, skills=$skills_status, dept_cat=$dept_cat_status) at $(date '+%Y-%m-%d %H:%M:%S %Z') ==="
   exit "$status"
 } >> "$CRON_LOG" 2>&1

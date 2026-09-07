@@ -28,6 +28,11 @@ export interface JobSummary {
   company_name: string;
   job_url: string;
   department: string | null;
+  // Canonical category the raw department is mapped onto (see
+  // huntloop.department_categorization) - one of ~18 controlled values
+  // or "Other". null when there's no raw department or it isn't
+  // categorized yet.
+  department_category: string | null;
   employment_type: string | null;
   date_posted: string | null;
   match_score: number | null;

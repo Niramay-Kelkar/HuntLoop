@@ -98,6 +98,18 @@ describe("JobFilters", () => {
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ department: UNSPECIFIED_DEPARTMENT }));
   });
 
+  it("renders the canonical department categories from the endpoint as options and propagates a pick", async () => {
+    const onChange = renderFilters(emptyValue);
+
+    // Options come straight from getDepartments() (now the canonical
+    // category list, not raw strings).
+    expect(await screen.findByRole("option", { name: "Engineering" })).toBeInTheDocument();
+    expect(screen.getByRole("option", { name: "Sales" })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByDisplayValue("All departments"), { target: { value: "Engineering" } });
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ department: "Engineering" }));
+  });
+
   it("sends the UNSPECIFIED_EMPLOYMENT_TYPE sentinel when 'Not specified' is selected", () => {
     const onChange = renderFilters(emptyValue);
 
