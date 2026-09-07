@@ -17,6 +17,7 @@ import type {
   HealthResponse,
   JobDetail,
   JobListResponse,
+  LocationGroup,
   ResumeVersionSummary,
 } from "@/types/api";
 
@@ -80,7 +81,9 @@ export interface ListJobsParams {
   company?: string;
   department?: string;
   employment_type?: string;
-  location?: string;
+  // Multi-value: matched as an exact canonical location group, OR'd
+  // together when more than one is given (repeated ?location= params).
+  location?: string[];
   min_score?: number;
   salary_min?: number;
   salary_max?: number;
@@ -100,7 +103,12 @@ export interface ListJobsParams {
 export function getJobs(params: ListJobsParams = {}): Promise<JobListResponse> {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined) query.set(key, String(value));
+    if (value === undefined) continue;
+    if (Array.isArray(value)) {
+      for (const item of value) query.append(key, String(item));
+    } else {
+      query.set(key, String(value));
+    }
   }
   const queryString = query.toString();
   return apiFetch<JobListResponse>(`/jobs${queryString ? `?${queryString}` : ""}`);
@@ -119,14 +127,14 @@ export function getEmploymentTypes(): Promise<string[]> {
   return apiFetch<string[]>("/jobs/employment-types");
 }
 
-// The canonical location groups in common use (GET /jobs/locations) -
-// same reasoning/pattern as getDepartments(). The messy free-text
+// The canonical location groups in common use (GET /jobs/locations),
+// grouped by country and alphabetized both ways. The messy free-text
 // location_name variants are collapsed onto these by
 // huntloop.location_normalization; the backend caps the list to groups
 // on many postings, and the `location` filter does an EXACT match on the
 // canonical label.
-export function getLocations(): Promise<string[]> {
-  return apiFetch<string[]>("/jobs/locations");
+export function getLocations(): Promise<LocationGroup[]> {
+  return apiFetch<LocationGroup[]>("/jobs/locations");
 }
 
 export function getJob(id: number): Promise<JobDetail> {

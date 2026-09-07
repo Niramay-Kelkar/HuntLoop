@@ -24,8 +24,11 @@ function renderFilters(
   vi.spyOn(api, "getDepartments").mockResolvedValue(["Engineering", "Sales"]);
   vi.spyOn(api, "getEmploymentTypes").mockResolvedValue(["Contract", "Full-time"]);
   vi.spyOn(api, "getLocations").mockResolvedValue([
-    "San Francisco, CA, United States",
-    "Remote - United States",
+    { country: "United Kingdom", locations: ["London, United Kingdom"] },
+    {
+      country: "United States",
+      locations: ["Remote - United States", "San Francisco, CA, United States"],
+    },
   ]);
   render(
     <QueryClientProvider client={queryClient}>
@@ -39,7 +42,7 @@ const emptyValue: JobFiltersValue = {
   company: "",
   department: "",
   employmentType: "",
-  location: "",
+  location: [],
   minScore: "",
   salaryMin: "",
   salaryMax: "",
@@ -68,7 +71,7 @@ describe("JobFilters", () => {
       company: "",
       department: "",
       employmentType: "",
-      location: "",
+      location: [],
       minScore: "",
       salaryMin: "",
       salaryMax: "",
@@ -122,29 +125,58 @@ describe("JobFilters", () => {
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ employmentType: UNSPECIFIED_EMPLOYMENT_TYPE }));
   });
 
-  it("sends the UNSPECIFIED_LOCATION sentinel when 'Not specified' is selected in the location filter", () => {
+  it("adds the UNSPECIFIED_LOCATION sentinel to the location list when 'Not specified' is checked", async () => {
     const onChange = renderFilters(emptyValue);
 
-    const select = screen.getByDisplayValue("All locations");
-    fireEvent.change(select, { target: { value: UNSPECIFIED_LOCATION } });
+    fireEvent.click(screen.getByRole("button", { name: "Filter by location" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Not specified" }));
 
-    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ location: UNSPECIFIED_LOCATION }));
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ location: [UNSPECIFIED_LOCATION] }),
+    );
   });
 
-  it("populates the location <select> with the canonical groups from GET /jobs/locations", async () => {
-    const onChange = renderFilters(emptyValue);
+  it("checks canonical location groups (country-grouped) and appends each pick to the list", async () => {
+    const onChange = renderFilters({ ...emptyValue, location: ["London, United Kingdom"] });
 
-    const canonical = await screen.findByRole("option", {
-      name: "San Francisco, CA, United States",
-    });
-    expect(canonical).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Filter by location" }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "San Francisco, CA, United States" }));
 
-    const select = screen.getByDisplayValue("All locations");
-    fireEvent.change(select, {
-      target: { value: "San Francisco, CA, United States" },
-    });
     expect(onChange).toHaveBeenCalledWith(
-      expect.objectContaining({ location: "San Francisco, CA, United States" }),
+      expect.objectContaining({
+        location: ["London, United Kingdom", "San Francisco, CA, United States"],
+      }),
+    );
+  });
+
+  it("type-to-filters the location list", async () => {
+    renderFilters(emptyValue);
+
+    fireEvent.click(screen.getByRole("button", { name: "Filter by location" }));
+    // Wait for the (mocked) locations query to resolve before filtering.
+    await screen.findByRole("checkbox", { name: "London, United Kingdom" });
+    fireEvent.change(screen.getByPlaceholderText("Filter locations…"), {
+      target: { value: "london" },
+    });
+
+    expect(screen.getByRole("checkbox", { name: "London, United Kingdom" })).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: "San Francisco, CA, United States" })).not.toBeInTheDocument();
+  });
+
+  it("renders one removable chip per selected location and each chip clears only itself", () => {
+    const onChange = renderFilters({
+      ...emptyValue,
+      location: ["London, United Kingdom", "Remote - United States"],
+    });
+
+    expect(
+      screen.getByRole("button", { name: "Remove filter Location: London, United Kingdom" }),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Remove filter Location: Remote - United States" }),
+    );
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ location: ["London, United Kingdom"] }),
     );
   });
 

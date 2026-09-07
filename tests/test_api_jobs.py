@@ -353,14 +353,18 @@ def test_list_jobs_no_department_filter_includes_null_department_jobs(api_client
     assert body["total"] == 4
 
 
-def test_list_departments_returns_distinct_categories_most_common_first(api_client, db_session):
-    _seed(db_session)
+def test_list_departments_returns_distinct_categories_alphabetically(api_client, db_session):
+    seeded = _seed(db_session)
+    # Add a lower-frequency category that sorts before the others, so
+    # alphabetical vs. frequency ordering are distinguishable.
+    seeded["no_embedding"].department_category = "Analytics"
+    db_session.commit()
 
     response = api_client.get("/jobs/departments")
     assert response.status_code == 200
-    # Engineering (2 postings) before Sales (1); NULL-category postings
-    # are never listed.
-    assert response.json() == ["Engineering", "Sales"]
+    # Alphabetical (not Engineering-first by count); NULL-category
+    # postings are never listed.
+    assert response.json() == ["Analytics", "Engineering", "Sales"]
 
 
 def test_list_jobs_filters_by_employment_type(api_client, db_session):
@@ -696,11 +700,76 @@ def test_list_jobs_no_location_filter_includes_jobs_without_locations(api_client
     assert response.json()["total"] == 4
 
 
-def test_list_locations_returns_common_values_most_frequent_first(api_client, db_session, monkeypatch):
+def test_list_jobs_filters_by_multiple_locations_or(api_client, db_session):
+    seeded = _seed(db_session)
+    from huntloop.location_normalization import normalize_location
+
+    n = normalize_location("SF")
+    db_session.add(
+        JobLocation(
+            job_id=seeded["high"].id,
+            location_name="SF",
+            location_city=n.city,
+            location_region=n.region,
+            location_country=n.country,
+            location_is_remote=n.is_remote,
+            location_canonical=n.canonical,
+        )
+    )
+    db_session.commit()
+
+    # Repeated param -> OR: high (San Francisco) and mid (New York) both match.
+    response = api_client.get(
+        "/jobs",
+        params=[
+            ("location", "San Francisco, CA, United States"),
+            ("location", "New York City, NY, United States"),
+        ],
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert {item["job_title"] for item in body["items"]} == {"High Match Job", "Mid Match Job"}
+
+
+def test_list_jobs_multi_location_combines_real_value_with_unspecified(api_client, db_session):
+    _seed(db_session)
+
+    # mid (New York) plus every posting with no scraped location.
+    response = api_client.get(
+        "/jobs",
+        params=[
+            ("location", "New York City, NY, United States"),
+            ("location", "__unspecified__"),
+        ],
+    )
+    assert response.status_code == 200
+    assert response.json()["total"] == 4
+
+
+def test_list_jobs_multi_location_combines_with_other_filters(api_client, db_session):
+    _seed(db_session)
+    _seed_palantir_lca_rows(db_session)
+
+    # Two locations OR'd, AND'd with a Sales department filter -> only mid.
+    response = api_client.get(
+        "/jobs",
+        params=[
+            ("location", "New York City, NY, United States"),
+            ("location", "San Francisco, CA, United States"),
+            ("department", "Sales"),
+        ],
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["items"][0]["job_title"] == "Mid Match Job"
+
+
+def test_list_locations_returns_country_grouped_alphabetical(api_client, db_session, monkeypatch):
     from huntloop.api.routers import jobs as jobs_router
 
     # The real endpoint only surfaces locations on >=100 postings; drop
-    # that floor to 1 so the four seeded rows are enough to exercise it.
+    # that floor to 1 so the seeded rows are enough to exercise it.
     monkeypatch.setattr(jobs_router, "_LOCATION_MIN_POSTINGS", 1)
     seeded = _seed(db_session)
     from huntloop.location_normalization import normalize_location
@@ -721,6 +790,7 @@ def test_list_locations_returns_common_values_most_frequent_first(api_client, db
         [
             _loc(seeded["high"].id, "SF"),
             _loc(seeded["low"].id, "san francisco, california"),
+            _loc(seeded["high"].id, "London, UK"),
         ]
     )
     db_session.commit()
@@ -728,14 +798,22 @@ def test_list_locations_returns_common_values_most_frequent_first(api_client, db
     response = api_client.get("/jobs/locations")
     assert response.status_code == 200
     body = response.json()
-    # "SF" and "san francisco, california" both canonicalize to the same
-    # group (2 postings); "New York City, ..." + "Remote - ..." 1 each.
-    assert body[0] == "San Francisco, CA, United States"
-    assert set(body) == {
-        "San Francisco, CA, United States",
+
+    # Grouped by country, countries alphabetical, locations alphabetical
+    # within each. mid's "Remote - US" + "New York, NY" and high/low's
+    # two San Francisco variants are all United States; high's "London,
+    # UK" is United Kingdom.
+    countries = [group["country"] for group in body]
+    assert countries == ["United Kingdom", "United States"]
+
+    us = next(g for g in body if g["country"] == "United States")
+    assert us["locations"] == [
         "New York City, NY, United States",
         "Remote - United States",
-    }
+        "San Francisco, CA, United States",
+    ]
+    uk = next(g for g in body if g["country"] == "United Kingdom")
+    assert uk["locations"] == ["London, United Kingdom"]
 
 
 # --- salary-estimate range filter ----------------------------------------

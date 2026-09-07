@@ -53,7 +53,7 @@ describe("api client", () => {
     const fetchMock = mockFetchOnce({ ok: true, json: { items: [], total: 0, limit: 20, offset: 0 } });
 
     await getJobs({
-      location: "New York",
+      location: ["New York"],
       salary_min: 150000,
       salary_max: 200000,
       salary_unspecified: true,
@@ -64,6 +64,19 @@ describe("api client", () => {
     expect(url).toContain("salary_min=150000");
     expect(url).toContain("salary_max=200000");
     expect(url).toContain("salary_unspecified=true");
+  });
+
+  it("getJobs repeats the location param once per selected value", async () => {
+    const fetchMock = mockFetchOnce({ ok: true, json: { items: [], total: 0, limit: 20, offset: 0 } });
+
+    await getJobs({ location: ["New York, NY, United States", "London, United Kingdom"] });
+
+    const url = fetchMock.mock.calls[0][0] as string;
+    const params = new URLSearchParams(url.slice(url.indexOf("?") + 1));
+    expect(params.getAll("location")).toEqual([
+      "New York, NY, United States",
+      "London, United Kingdom",
+    ]);
   });
 
   it("getLocations requests the distinct-locations endpoint", async () => {

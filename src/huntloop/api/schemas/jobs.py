@@ -19,6 +19,17 @@ class SalaryEstimate(BaseModel):
     basis: str = "Estimated from DOL wage filings for this employer, not job-specific"
 
 
+class LocationGroup(BaseModel):
+    """One country's worth of canonical location groups for GET
+    /jobs/locations. `country` is the country every label in `locations`
+    belongs to (or "Other" for the handful of labels with no resolved
+    country, e.g. a bare "Remote"); `locations` is alphabetized. The
+    groups themselves are returned country-alphabetical, "Other" last."""
+
+    country: str
+    locations: list[str]
+
+
 class JobSummary(BaseModel):
     """One row in GET /jobs' paginated list."""
 

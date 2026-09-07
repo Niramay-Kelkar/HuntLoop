@@ -118,10 +118,20 @@ export const UNSPECIFIED_EMPLOYMENT_TYPE = "__unspecified__";
 
 // Same idea for the `location` query param - mirrors
 // huntloop.api.routers.jobs.UNSPECIFIED_LOCATION. Selecting it filters
-// down to postings with no location scraped at all. A real location
-// value sent in this param is matched as a case-insensitive substring
-// on the backend (not exact), and is never radius/geocoding search.
+// down to postings with no location scraped at all. The `location`
+// param is multi-value (repeated params, OR'd together); a real value
+// is an EXACT match on a canonical group from GET /jobs/locations, and
+// is never radius/geocoding search.
 export const UNSPECIFIED_LOCATION = "__unspecified__";
+
+// One country's canonical location groups from GET /jobs/locations.
+// Countries come back alphabetical ("Other" last); `locations` is
+// alphabetized within each country. Mirrors
+// huntloop.api.schemas.jobs.LocationGroup.
+export interface LocationGroup {
+  country: string;
+  locations: string[];
+}
 
 export interface ResumeVersionSummary {
   id: number;
