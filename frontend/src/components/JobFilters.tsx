@@ -2,23 +2,39 @@
 
 import { useQuery } from "@tanstack/react-query";
 
-import { getDepartments, getEmploymentTypes, type ListJobsParams } from "@/lib/api";
-import { UNSPECIFIED_DEPARTMENT, UNSPECIFIED_EMPLOYMENT_TYPE } from "@/types/api";
+import { getDepartments, getEmploymentTypes, getLocations, type ListJobsParams } from "@/lib/api";
+import { UNSPECIFIED_DEPARTMENT, UNSPECIFIED_EMPLOYMENT_TYPE, UNSPECIFIED_LOCATION } from "@/types/api";
 
 export interface JobFiltersValue {
   company: string;
   department: string; // "" = unset (no filter); UNSPECIFIED_DEPARTMENT = "no department set"; otherwise a real value
   employmentType: string; // "" = unset (no filter); UNSPECIFIED_EMPLOYMENT_TYPE = "none set"; otherwise a real value
+  location: string; // "" = unset; UNSPECIFIED_LOCATION = "no location scraped"; otherwise a real value (substring-matched)
   minScore: string; // kept as a raw string while editing; parsed by the caller
+  salaryMin: string; // raw string while editing; parsed by the caller
+  salaryMax: string; // raw string while editing; parsed by the caller
+  salaryUnspecified: boolean; // true = only postings with no salary estimate (overrides salaryMin/salaryMax)
   sort: NonNullable<ListJobsParams["sort"]>;
 }
 
+const EMPTY_FILTERS: JobFiltersValue = {
+  company: "",
+  department: "",
+  employmentType: "",
+  location: "",
+  minScore: "",
+  salaryMin: "",
+  salaryMax: "",
+  salaryUnspecified: false,
+  sort: "-score",
+};
+
 /**
- * Only the filters the real API supports (company text match, department,
- * min score, sort) get built here - the mockup also shows a
- * location/radius select, which is blocked pending backend work (see
- * CLAUDE.md), so it's deliberately left out rather than added as
- * non-functional UI.
+ * Only the filters the real API supports get built here: company text
+ * match, department, employment type, location (a simple case-insensitive
+ * substring match - NOT radius/geocoding search, which stays out of
+ * scope, see CLAUDE.md), min match score, estimated-salary range, and
+ * sort.
  *
  * Department options are populated from GET /jobs/departments (the real
  * distinct values in the data), not a hardcoded list - department is
@@ -39,6 +55,17 @@ export function JobFilters({
   const minScorePercent = value.minScore === "" ? 0 : Math.round(Number(value.minScore) * 100);
   const departments = useQuery({ queryKey: ["departments"], queryFn: getDepartments });
   const employmentTypes = useQuery({ queryKey: ["employment-types"], queryFn: getEmploymentTypes });
+  const locations = useQuery({ queryKey: ["locations"], queryFn: getLocations });
+
+  const anyFilterSet =
+    value.company ||
+    value.department ||
+    value.employmentType ||
+    value.location ||
+    value.minScore ||
+    value.salaryMin ||
+    value.salaryMax ||
+    value.salaryUnspecified;
 
   return (
     <div className="rounded-xl border border-border bg-surface p-4">
@@ -91,6 +118,24 @@ export function JobFilters({
         </div>
         <div className="relative">
           <select
+            value={value.location}
+            onChange={(e) => onChange({ ...value, location: e.target.value })}
+            className="appearance-none rounded-lg border border-border-strong bg-surface py-2 pl-3 pr-7 text-[13px] text-text"
+          >
+            <option value="">All locations</option>
+            {locations.data?.map((loc) => (
+              <option key={loc} value={loc}>
+                {loc}
+              </option>
+            ))}
+            <option value={UNSPECIFIED_LOCATION}>Not specified</option>
+          </select>
+          <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-faintest">
+            ▼
+          </span>
+        </div>
+        <div className="relative">
+          <select
             value={value.sort}
             onChange={(e) => onChange({ ...value, sort: e.target.value as JobFiltersValue["sort"] })}
             className="appearance-none rounded-lg border border-border-strong bg-surface py-2 pl-3 pr-7 text-[13px] text-text"
@@ -120,13 +165,48 @@ export function JobFilters({
           />
           <span className="w-9 text-right font-mono text-[13px] font-semibold">{minScorePercent}%</span>
         </div>
+        <div className="flex items-center gap-2.5">
+          <span className="whitespace-nowrap font-mono text-[11px] uppercase tracking-wide text-text-faintest">
+            Est. salary
+          </span>
+          <input
+            type="number"
+            min={0}
+            step={10000}
+            placeholder="min"
+            value={value.salaryMin}
+            disabled={value.salaryUnspecified}
+            onChange={(e) => onChange({ ...value, salaryMin: e.target.value })}
+            className="w-24 rounded-lg border border-border-strong bg-surface-alt py-1.5 px-2 text-[13px] text-text disabled:opacity-40"
+          />
+          <span className="text-text-faintest">–</span>
+          <input
+            type="number"
+            min={0}
+            step={10000}
+            placeholder="max"
+            value={value.salaryMax}
+            disabled={value.salaryUnspecified}
+            onChange={(e) => onChange({ ...value, salaryMax: e.target.value })}
+            className="w-24 rounded-lg border border-border-strong bg-surface-alt py-1.5 px-2 text-[13px] text-text disabled:opacity-40"
+          />
+          <label className="flex items-center gap-1.5 text-[12px] text-text-subtle">
+            <input
+              type="checkbox"
+              checked={value.salaryUnspecified}
+              onChange={(e) => onChange({ ...value, salaryUnspecified: e.target.checked })}
+            />
+            No estimate
+          </label>
+        </div>
         <div className="flex-1" />
-        {(value.company || value.department || value.employmentType || value.minScore) && (
+        <span className="font-mono text-[10px] text-text-faintest">
+          Salary is an employer-level estimate from DOL filings, not a posted salary
+        </span>
+        {anyFilterSet && (
           <button
             type="button"
-            onClick={() =>
-              onChange({ company: "", department: "", employmentType: "", minScore: "", sort: value.sort })
-            }
+            onClick={() => onChange({ ...EMPTY_FILTERS, sort: value.sort })}
             className="font-mono text-[11px] text-accent hover:text-accent-hover"
           >
             Clear filters ✕

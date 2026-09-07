@@ -65,6 +65,30 @@ conventions" and SESSIONS.md for the real current state).
   still queries real distinct values rather than hardcoding that set,
   since not all 5 are guaranteed present in the live data at any given
   moment (all 5 happen to be present as of this entry).
+  **`GET /jobs` also gained `location`, `salary_min`/`salary_max`, and
+  `salary_unspecified` params, plus `GET /jobs/locations` (added
+  2026-09-06, see SESSIONS.md's "Add match-score, salary-estimate, and
+  location filters" entry).** `location`: case-insensitive **substring**
+  match against `job_locations.location_name` (EXISTS subquery), or the
+  `__unspecified__` sentinel for postings with no `job_locations` row.
+  Substring, not exact, because `location_name` is very messy free text
+  (~15.6k distinct values; "San Francisco" vs "San Francisco, CA" vs
+  "San Francisco, California, United States"; many rows are one joined
+  multi-location string with `;`/` / `/` • ` separators) — so "San
+  Francisco" also matches "San Francisco, CA". `GET /jobs/locations`
+  only surfaces values on ≥ `_LOCATION_MIN_POSTINGS` (100) postings
+  (~233), most-frequent first — a usable dropdown, not the 15.6k
+  distinct set. **Location-radius/geocoding/"near me" search stays out
+  of scope**, same as every prior step. `salary_min`/`salary_max` bound
+  a correlated median-`'Year'`-wage scalar subquery
+  (`_salary_estimate_expr()`, the same employer-level DOL-filing
+  estimate `GET /jobs/{id}` exposes as `salary_estimate.amount` — never
+  a real posted salary; NULL for the ~98% of postings whose company has
+  no resolved sponsor match); postings with no estimate are excluded
+  once a bound is set. `salary_unspecified=true` returns only
+  estimate-less postings and overrides the bounds — the
+  `__unspecified__`-style option for a range filter. `min_score` (match
+  score ≥ X, needs an active resume) already existed and is unchanged.
   Runs as its own `api` service in
   `docker-compose.yml` (own container, port 8000 — deliberately not
   merged into `app`, a separate concern). **`api`'s `DATABASE_URL`
@@ -182,6 +206,18 @@ conventions" and SESSIONS.md for the real current state).
   NULL-`employment_type` postings). `JobFiltersValue` gained an
   `employmentType` field threaded through `frontend/src/app/jobs/
   page.tsx`'s query key/params the same way `department` already was.**
+  **`JobFilters.tsx` gained a `location` `<select>` (same shape as the
+  department/employment-type selects, populated from `GET
+  /jobs/locations`, plus "Not specified" → `UNSPECIFIED_LOCATION`), an
+  estimated-salary min/max number-input pair with a "No estimate"
+  checkbox (→ `salary_unspecified`, which disables the range inputs),
+  and a visible caption stating the salary figure is an employer-level
+  DOL-filing estimate, not a posted salary — added 2026-09-06 (see
+  SESSIONS.md's "Add match-score, salary-estimate, and location
+  filters" entry). `JobFiltersValue` gained `location`, `salaryMin`,
+  `salaryMax`, `salaryUnspecified`, threaded through `jobs/page.tsx`'s
+  query key/params like `department` already was. The match-score
+  slider (`minScore` → `min_score`) already existed.**
 - **Frontend test suite: Vitest + React Testing Library, added
   2026-09-04 (see SESSIONS.md's "Frontend test suite (Vitest + RTL) + CI
   wiring" entry) — the frontend had zero test tooling before this.**

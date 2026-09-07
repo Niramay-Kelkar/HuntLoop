@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { JobFilters, type JobFiltersValue } from "./JobFilters";
 import * as api from "@/lib/api";
-import { UNSPECIFIED_DEPARTMENT, UNSPECIFIED_EMPLOYMENT_TYPE } from "@/types/api";
+import { UNSPECIFIED_DEPARTMENT, UNSPECIFIED_EMPLOYMENT_TYPE, UNSPECIFIED_LOCATION } from "@/types/api";
 
 /**
  * Covers the filter component's real logic: the min-score slider's
@@ -17,6 +17,7 @@ function renderFilters(value: JobFiltersValue, onChange = vi.fn()) {
   const queryClient = new QueryClient();
   vi.spyOn(api, "getDepartments").mockResolvedValue(["Engineering", "Sales"]);
   vi.spyOn(api, "getEmploymentTypes").mockResolvedValue(["Contract", "Full-time"]);
+  vi.spyOn(api, "getLocations").mockResolvedValue(["New York, NY", "Remote - US"]);
   render(
     <QueryClientProvider client={queryClient}>
       <JobFilters value={value} onChange={onChange} />
@@ -29,7 +30,11 @@ const emptyValue: JobFiltersValue = {
   company: "",
   department: "",
   employmentType: "",
+  location: "",
   minScore: "",
+  salaryMin: "",
+  salaryMax: "",
+  salaryUnspecified: false,
   sort: "-score",
 };
 
@@ -53,7 +58,11 @@ describe("JobFilters", () => {
       company: "",
       department: "",
       employmentType: "",
+      location: "",
       minScore: "",
+      salaryMin: "",
+      salaryMax: "",
+      salaryUnspecified: false,
       sort: "-score",
     });
   });
@@ -89,5 +98,37 @@ describe("JobFilters", () => {
     fireEvent.change(select, { target: { value: UNSPECIFIED_EMPLOYMENT_TYPE } });
 
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ employmentType: UNSPECIFIED_EMPLOYMENT_TYPE }));
+  });
+
+  it("sends the UNSPECIFIED_LOCATION sentinel when 'Not specified' is selected in the location filter", () => {
+    const onChange = renderFilters(emptyValue);
+
+    const select = screen.getByDisplayValue("All locations");
+    fireEvent.change(select, { target: { value: UNSPECIFIED_LOCATION } });
+
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ location: UNSPECIFIED_LOCATION }));
+  });
+
+  it("updates salaryMin from the estimated-salary min input", () => {
+    const onChange = renderFilters(emptyValue);
+
+    const minInput = screen.getByPlaceholderText("min");
+    fireEvent.change(minInput, { target: { value: "150000" } });
+
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ salaryMin: "150000" }));
+  });
+
+  it("sets salaryUnspecified and disables the range inputs when 'No estimate' is checked", () => {
+    const onChange = renderFilters(emptyValue);
+
+    fireEvent.click(screen.getByLabelText("No estimate"));
+    expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ salaryUnspecified: true }));
+  });
+
+  it("disables the salary range inputs while salaryUnspecified is set", () => {
+    renderFilters({ ...emptyValue, salaryUnspecified: true });
+
+    expect(screen.getByPlaceholderText("min")).toBeDisabled();
+    expect(screen.getByPlaceholderText("max")).toBeDisabled();
   });
 });

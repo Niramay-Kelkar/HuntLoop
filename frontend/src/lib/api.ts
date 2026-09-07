@@ -45,7 +45,11 @@ export interface ListJobsParams {
   company?: string;
   department?: string;
   employment_type?: string;
+  location?: string;
   min_score?: number;
+  salary_min?: number;
+  salary_max?: number;
+  salary_unspecified?: boolean;
   sort?: "score" | "-score";
   limit?: number;
   offset?: number;
@@ -71,6 +75,15 @@ export function getDepartments(): Promise<string[]> {
 // /jobs/employment-types) - same reasoning/pattern as getDepartments().
 export function getEmploymentTypes(): Promise<string[]> {
   return apiFetch<string[]>("/jobs/employment-types");
+}
+
+// The real, distinct location values in common use (GET /jobs/locations)
+// - same reasoning/pattern as getDepartments(). The backend caps this to
+// locations appearing on many postings (job_locations.location_name is
+// very messy free text), and the `location` filter matches as a
+// substring, so these are options, not an exhaustive exact list.
+export function getLocations(): Promise<string[]> {
+  return apiFetch<string[]>("/jobs/locations");
 }
 
 export function getJob(id: number): Promise<JobDetail> {

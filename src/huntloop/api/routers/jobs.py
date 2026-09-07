@@ -27,8 +27,16 @@ from huntloop.api.schemas.jobs import (
     SalaryEstimate,
     SponsorSummary,
 )
-from huntloop.api.sponsor_summary import get_sponsorship_summary
-from huntloop.db_models import ApplicationStatus, Company, JobApplication, JobPosting, ResumeVersion
+from huntloop.api.sponsor_summary import _ANNUAL_WAGE_UNIT, get_sponsorship_summary
+from huntloop.db_models import (
+    ApplicationStatus,
+    Company,
+    JobApplication,
+    JobLocation,
+    JobPosting,
+    LcaDisclosure,
+    ResumeVersion,
+)
 from huntloop.match_scoring import match_score_expr, match_score_order_by
 
 logger = logging.getLogger(__name__)
@@ -47,6 +55,46 @@ UNSPECIFIED_DEPARTMENT = "__unspecified__"
 # posting has one at all, so "unset filter" and "filter to NULL" still
 # need to be distinguishable the same way they are for department.
 UNSPECIFIED_EMPLOYMENT_TYPE = "__unspecified__"
+
+# Sentinel accepted by the `location` query param to mean "postings with
+# no location scraped at all" (no job_locations rows) - same distinction
+# as the department/employment_type sentinels between "filter unset" and
+# "filter to the absent case".
+UNSPECIFIED_LOCATION = "__unspecified__"
+
+# Frequency floor for GET /jobs/locations. job_locations.location_name is
+# raw text from each ATS source and is extremely messy - ~15.6k distinct
+# values across the table, with the same place written many ways ("San
+# Francisco" / "San Francisco, CA" / "San Francisco, California, United
+# States") and many multi-location postings storing one joined string
+# ("Boston, MA; New York, NY; ..."). An exact-distinct dropdown would be
+# unusable, so this endpoint only offers values that appear on at least
+# this many postings, and the `location` filter does a substring match
+# (see list_jobs) rather than exact equality so "San Francisco" also
+# matches "San Francisco, CA".
+_LOCATION_MIN_POSTINGS = 100
+
+# Location filtering here is a plain case-insensitive substring match. It
+# is deliberately NOT radius / geocoding / "near me" search - that
+# remains out of scope (see CLAUDE.md).
+
+
+def _salary_estimate_expr():
+    """Correlated scalar subquery for a posting's estimated salary: the
+    median 'Year'-unit DOL wage filed by the company's resolved sponsor
+    employer (huntloop.api.sponsor_summary), or NULL when the company has
+    no resolved sponsor match or no annual-wage filings. This is the same
+    number GET /jobs/{id} exposes as `salary_estimate.amount` - an
+    employer-level estimate, never a real posted salary for the job."""
+    return (
+        select(func.percentile_cont(0.5).within_group(LcaDisclosure.wage_rate_of_pay_from))
+        .where(
+            LcaDisclosure.employer_name_normalized == Company.matched_sponsor_employer_name,
+            LcaDisclosure.wage_unit_of_pay == _ANNUAL_WAGE_UNIT,
+        )
+        .correlate(Company)
+        .scalar_subquery()
+    )
 
 
 def _active_resume_embedding(db: Session):
@@ -118,6 +166,22 @@ def list_employment_types(db: Session = Depends(get_db)) -> list[str]:
     return [row[0] for row in rows]
 
 
+@router.get("/locations", response_model=list[str])
+def list_locations(db: Session = Depends(get_db)) -> list[str]:
+    """The real, distinct location values in use across job_postings that
+    appear on at least `_LOCATION_MIN_POSTINGS` postings, most common
+    first. See `_LOCATION_MIN_POSTINGS` for why this is frequency-capped
+    rather than the full distinct set, and `list_jobs` for how the
+    matching `location` filter does a substring (not exact) match."""
+    rows = db.execute(
+        select(JobLocation.location_name)
+        .group_by(JobLocation.location_name)
+        .having(func.count() >= _LOCATION_MIN_POSTINGS)
+        .order_by(func.count().desc(), JobLocation.location_name)
+    )
+    return [row[0] for row in rows]
+
+
 @router.get("", response_model=JobListResponse)
 def list_jobs(
     company: str | None = Query(None, description="Filter by company name (case-insensitive)."),
@@ -139,6 +203,36 @@ def list_jobs(
     ),
     min_score: float | None = Query(
         None, ge=0, le=1, description="Minimum match score (0-1). Requires an active resume."
+    ),
+    location: str | None = Query(
+        None,
+        description=(
+            "Filter to postings with a location matching this text (case-insensitive "
+            "substring, so 'San Francisco' also matches 'San Francisco, CA'), or "
+            f"'{UNSPECIFIED_LOCATION}' to return only postings with no location scraped. "
+            "Not radius/geocoding search. Unset (default) returns postings regardless of location."
+        ),
+    ),
+    salary_min: float | None = Query(
+        None,
+        ge=0,
+        description=(
+            "Minimum estimated salary (see GET /jobs/{id} salary_estimate - an employer-level "
+            "estimate from DOL wage filings, never a real posted salary). Postings whose company "
+            "has no salary estimate are excluded when this is set."
+        ),
+    ),
+    salary_max: float | None = Query(
+        None,
+        ge=0,
+        description="Maximum estimated salary. Postings with no salary estimate are excluded when this is set.",
+    ),
+    salary_unspecified: bool = Query(
+        False,
+        description=(
+            "When true, return only postings whose company has no salary estimate available "
+            "(overrides salary_min/salary_max) - the '__unspecified__'-style option for this filter."
+        ),
     ),
     sort: str = Query(
         "-score",
@@ -183,6 +277,28 @@ def list_jobs(
             query = query.where(JobPosting.employment_type == employment_type)
     if min_score is not None:
         query = query.where(score_expr >= min_score)
+    if location is not None:
+        if location == UNSPECIFIED_LOCATION:
+            query = query.where(
+                ~select(JobLocation.id).where(JobLocation.job_id == JobPosting.id).exists()
+            )
+        else:
+            query = query.where(
+                select(JobLocation.id)
+                .where(
+                    JobLocation.job_id == JobPosting.id,
+                    JobLocation.location_name.ilike(f"%{location}%"),
+                )
+                .exists()
+            )
+    salary_expr = _salary_estimate_expr()
+    if salary_unspecified:
+        query = query.where(salary_expr.is_(None))
+    else:
+        if salary_min is not None:
+            query = query.where(salary_expr >= salary_min)
+        if salary_max is not None:
+            query = query.where(salary_expr <= salary_max)
 
     total = db.execute(select(func.count()).select_from(query.subquery())).scalar_one()
 
