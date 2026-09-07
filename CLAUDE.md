@@ -236,6 +236,28 @@ conventions" and SESSIONS.md for the real current state).
   `JobSummary`/`JobDetail` also carry `locations: list[str]` (populated
   via the existing `JobPosting.locations` relationship, no migration
   needed).
+  **The job detail page ("About the role") renders `job_description` as
+  real sanitized HTML as of 2026-09-07 (see SESSIONS.md "Render job
+  descriptions as real HTML instead of flattened text") — it previously
+  ran `stripHtml()` and flattened everything into one `<p>`, which
+  destroyed lists/headings for the raw-HTML sources and showed literal
+  `<p>`/`&lt;`/`&nbsp;` text for Greenhouse (whose stored value is
+  entity-escaped HTML).** Investigation confirmed ALL 7 sources store
+  real semantic HTML (Greenhouse entity-escaped, the rest raw) — this
+  was a pure rendering bug, no LLM extraction needed or built.
+  `frontend/src/lib/sanitizeHtml.ts`'s `sanitizeJobDescription()`
+  unescapes the Greenhouse case then runs **DOMPurify** (`dompurify`,
+  added this step — this is third-party HTML, do NOT render it
+  unsanitized) with a narrow allow-list: block/inline text tags + `a`
+  + tables, NO `style`/`class`/`id` (Lever inlines `font-size` on every
+  node — dropped for consistent typography), links forced to
+  `target=_blank rel="noopener noreferrer nofollow"`, empty `<p>`/`<div>`
+  spacer nodes removed. Returns `""` for nullish input and under SSR
+  (the detail view renders this client-side only, via
+  `dangerouslySetInnerHTML` inside a `.rich-text` container styled in
+  `globals.css` outside `@layer base`). The raw `job_description` column
+  is untouched — the fix is render-time only. `stripHtml()` was removed
+  from `theme.ts` (now unused).
   **`JobFilters.tsx` gained a department `<select>`, added 2026-09-02
   (see SESSIONS.md) — populated via its own `useQuery` against the new
   `GET /jobs/departments`.** As of 2026-09-07 the options are the
@@ -321,7 +343,10 @@ conventions" and SESSIONS.md for the real current state).
   optimistic-update/rollback cache behavior
   (`frontend/src/hooks/useApplicationStatus.test.tsx`); and
   `JobFilters`' slider/sentinel/clear-all/active-chip/collapse/result-count logic
-  (`frontend/src/components/JobFilters.test.tsx`). **Not yet covered,
+  (`frontend/src/components/JobFilters.test.tsx`); and
+  `sanitizeJobDescription()`'s entity-unescape, structure preservation,
+  XSS stripping, and link hardening
+  (`frontend/src/lib/sanitizeHtml.test.ts`, added 2026-09-07). **Not yet covered,
   deliberately**: every page component, `JobCard`/`JobTable`/
   `KanbanBoard`/`ApplicationsList`/`ScoreIndicator`/`SkillChips`/
   `SegmentedToggle`/`NavBar`/`Pagination`/`StatusControl`/`Toast`, and
