@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { getJob, getJobs, uploadResume, updateApplicationStatus } from "./api";
+import { getJob, getJobs, getLocations, uploadResume, updateApplicationStatus } from "./api";
 
 /**
  * Covers the fetch-client functions actually worth testing: URL/query-param
@@ -47,6 +47,31 @@ describe("api client", () => {
     const url = fetchMock.mock.calls[0][0] as string;
     expect(url).toContain("min_score=0.5");
     expect(url).toContain("department=Engineering");
+  });
+
+  it("getJobs includes location and salary range params only when passed", async () => {
+    const fetchMock = mockFetchOnce({ ok: true, json: { items: [], total: 0, limit: 20, offset: 0 } });
+
+    await getJobs({
+      location: "New York",
+      salary_min: 150000,
+      salary_max: 200000,
+      salary_unspecified: true,
+    });
+
+    const url = fetchMock.mock.calls[0][0] as string;
+    expect(url).toContain("location=New+York");
+    expect(url).toContain("salary_min=150000");
+    expect(url).toContain("salary_max=200000");
+    expect(url).toContain("salary_unspecified=true");
+  });
+
+  it("getLocations requests the distinct-locations endpoint", async () => {
+    const fetchMock = mockFetchOnce({ ok: true, json: ["New York, NY"] });
+
+    await getLocations();
+
+    expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/jobs/locations", expect.any(Object));
   });
 
   it("getJobs omits the query string entirely when called with no params", async () => {

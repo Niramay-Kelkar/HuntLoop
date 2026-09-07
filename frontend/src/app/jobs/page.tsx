@@ -17,13 +17,21 @@ export default function JobsPage() {
     company: "",
     department: "",
     employmentType: "",
+    location: "",
     minScore: "",
+    salaryMin: "",
+    salaryMax: "",
+    salaryUnspecified: false,
     sort: "-score",
   });
   const [offset, setOffset] = useState(0);
   const [viewMode, setViewMode] = useState<"cards" | "table">("cards");
 
   const parsedMinScore = filters.minScore === "" ? undefined : Number(filters.minScore);
+  const parsedSalaryMin =
+    filters.salaryUnspecified || filters.salaryMin === "" ? undefined : Number(filters.salaryMin);
+  const parsedSalaryMax =
+    filters.salaryUnspecified || filters.salaryMax === "" ? undefined : Number(filters.salaryMax);
 
   const jobs = useQuery({
     queryKey: [
@@ -32,7 +40,11 @@ export default function JobsPage() {
         company: filters.company,
         department: filters.department,
         employmentType: filters.employmentType,
+        location: filters.location,
         minScore: parsedMinScore,
+        salaryMin: parsedSalaryMin,
+        salaryMax: parsedSalaryMax,
+        salaryUnspecified: filters.salaryUnspecified,
         sort: filters.sort,
         offset,
       },
@@ -42,7 +54,11 @@ export default function JobsPage() {
         company: filters.company || undefined,
         department: filters.department || undefined,
         employment_type: filters.employmentType || undefined,
+        location: filters.location || undefined,
         min_score: parsedMinScore,
+        salary_min: parsedSalaryMin,
+        salary_max: parsedSalaryMax,
+        salary_unspecified: filters.salaryUnspecified || undefined,
         sort: filters.sort,
         limit: PAGE_SIZE,
         offset,

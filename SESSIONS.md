@@ -10366,3 +10366,72 @@ safe and catches up over days; one staler scrape day is minor) — the
 seeded marker will be overwritten by that run. README's "Scheduled
 runs" section is still stale re: cron/`.venv` (pre-dates the launchd +
 Docker moves) and was left alone — out of scope here.
+
+---
+
+## 2026-09-06 — Add match-score, salary-estimate, and location filters to GET /jobs
+
+**Investigation (before any code):**
+- No running scheduled process: `ps aux` clean, `logs/.orchestrator.lock`
+  present but 0 bytes / unheld, `last_scheduled_run.txt` dated today, no
+  advisory locks in `pg_locks`.
+- `job_postings` has **no `match_score` or `salary_estimate` column** —
+  both are computed at query/response time. `match_score` = `1 -
+  embedding <=> active_resume_embedding` (`huntloop.match_scoring`).
+  `salary_estimate.amount` = median `wage_rate_of_pay_from` over
+  `wage_unit_of_pay = 'Year'` LCA rows for the company's persisted
+  `matched_sponsor_employer_name` (`huntloop.api.sponsor_summary`) —
+  company-level, only 9 companies have a resolved sponsor match, so it's
+  NULL for ~98% of postings.
+- `job_locations` is a clean one-to-many (`job_id`, `location_name
+  varchar`). But `location_name` is **very messy free text**: ~15.6k
+  distinct values over ~143k rows; ~29.6k postings have >1 location row;
+  the same place appears as "San Francisco" / "San Francisco, CA" /
+  "San Francisco, California, United States"; many rows are a single
+  joined multi-location string using `;`, ` / `, or ` • ` separators
+  ("Boston, MA; New York, NY; ..."), up to 254 chars. Frequency floors:
+  995 values on ≥25 postings, 233 on ≥100, 90 on ≥200.
+
+**Decided (light normalization, not a normalization project):**
+- `GET /jobs/locations` returns only `location_name` values appearing on
+  ≥ `_LOCATION_MIN_POSTINGS` (100) postings, most-frequent first — a
+  usable ~233-option dropdown instead of 15.6k.
+- `?location=` does a **case-insensitive substring** match against
+  `job_locations.location_name` (EXISTS subquery), not exact equality —
+  so "San Francisco" also matches "San Francisco, CA" and the joined
+  multi-location strings. `__unspecified__` → postings with no
+  `job_locations` row at all.
+- **Radius / geocoding / "near me" location search stays out of scope**,
+  same as every prior frontend/reskin step.
+
+**Did:**
+- `huntloop.api.routers.jobs`: new `GET /jobs/locations` (mirrors
+  `/jobs/employment-types`); `list_jobs` gained `location` (substring +
+  `__unspecified__` sentinel), `salary_min` / `salary_max` (bounds on a
+  correlated median-wage scalar subquery — `_salary_estimate_expr()`,
+  reuses `sponsor_summary._ANNUAL_WAGE_UNIT`; postings with no estimate
+  are excluded once a bound is set), and `salary_unspecified` (only
+  estimate-less postings, overrides the bounds). Match-score filtering
+  already existed as `min_score` and is unchanged — this task adds tests
+  for it and the frontend already had the slider.
+- Frontend: `getLocations()` + `ListJobsParams` additions in
+  `lib/api.ts`; `UNSPECIFIED_LOCATION` in `types/api.ts`; `JobFilters.tsx`
+  gained a location `<select>` (real distinct values + "Not specified"),
+  an estimated-salary min/max number-input pair + a "No estimate"
+  checkbox, and a visible "employer-level estimate from DOL filings, not
+  a posted salary" caption. `JobFiltersValue` / `jobs/page.tsx` thread
+  the new fields through the query key + params the same way
+  `department`/`employmentType` already were.
+- Tests: `tests/test_api_jobs.py` +10 (location substring/unspecified,
+  `/jobs/locations` ordering via a `monkeypatch`ed floor, salary
+  min/max/range/unspecified/override, one all-four-filters-combined);
+  frontend +6 (`api.test.ts` location + salary params + `getLocations`;
+  `JobFilters.test.tsx` location sentinel, salary min input, "No
+  estimate" checkbox + disabled-inputs).
+
+**Verified:** live API on a throwaway port against real local Postgres —
+each filter individually and all five combined (`min_score` + `location`
++ `salary_min` + `department` + `employment_type` returned a correct
+18-row result set). Backend suite 327 → 337 passing; frontend 15 → 21
+passing. `tsc --noEmit` shows only the pre-existing generated-types
+`PageProps`/`LayoutProps` errors, none in touched files.

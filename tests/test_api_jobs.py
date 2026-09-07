@@ -516,3 +516,141 @@ def test_min_score_without_active_resume_returns_400(api_client, db_session):
     # No _seed() call - no ResumeVersion at all, active or otherwise.
     response = api_client.get("/jobs", params={"min_score": 0.5})
     assert response.status_code == 400
+
+
+# --- location filter -------------------------------------------------------
+
+
+def test_list_jobs_filters_by_location_substring(api_client, db_session):
+    _seed(db_session)
+
+    # mid is the only seeded job with locations ("Remote - US", "New York,
+    # NY"); the substring match is case-insensitive and partial.
+    response = api_client.get("/jobs", params={"location": "new york"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["items"][0]["job_title"] == "Mid Match Job"
+
+
+def test_list_jobs_filters_by_unspecified_location(api_client, db_session):
+    _seed(db_session)
+
+    response = api_client.get("/jobs", params={"location": "__unspecified__"})
+    assert response.status_code == 200
+    body = response.json()
+    # Every seeded job except mid has no job_locations rows.
+    assert body["total"] == 3
+    assert "Mid Match Job" not in {item["job_title"] for item in body["items"]}
+
+
+def test_list_jobs_no_location_filter_includes_jobs_without_locations(api_client, db_session):
+    _seed(db_session)
+
+    response = api_client.get("/jobs")
+    assert response.json()["total"] == 4
+
+
+def test_list_locations_returns_common_values_most_frequent_first(api_client, db_session, monkeypatch):
+    from huntloop.api.routers import jobs as jobs_router
+
+    # The real endpoint only surfaces locations on >=100 postings; drop
+    # that floor to 1 so the four seeded rows are enough to exercise it.
+    monkeypatch.setattr(jobs_router, "_LOCATION_MIN_POSTINGS", 1)
+    seeded = _seed(db_session)
+    db_session.add_all(
+        [
+            JobLocation(job_id=seeded["high"].id, location_name="New York, NY"),
+            JobLocation(job_id=seeded["low"].id, location_name="New York, NY"),
+        ]
+    )
+    db_session.commit()
+
+    response = api_client.get("/jobs/locations")
+    assert response.status_code == 200
+    body = response.json()
+    # "New York, NY" on 3 postings, "Remote - US" on 1 -> most frequent first.
+    assert body[0] == "New York, NY"
+    assert set(body) == {"New York, NY", "Remote - US"}
+
+
+# --- salary-estimate range filter ----------------------------------------
+
+
+def test_list_jobs_filters_by_salary_min(api_client, db_session):
+    _seed(db_session)
+    _seed_palantir_lca_rows(db_session)  # palantir median 'Year' wage: 150000
+
+    response = api_client.get("/jobs", params={"salary_min": 145000})
+    assert response.status_code == 200
+    body = response.json()
+    # palantir jobs (high, mid) clear 145000; checkr jobs have no sponsor
+    # match, so no estimate, so they're excluded once the filter is set.
+    assert {item["job_title"] for item in body["items"]} == {"High Match Job", "Mid Match Job"}
+
+
+def test_list_jobs_filters_by_salary_max(api_client, db_session):
+    _seed(db_session)
+    _seed_palantir_lca_rows(db_session)
+
+    response = api_client.get("/jobs", params={"salary_max": 145000})
+    assert response.status_code == 200
+    # palantir's 150000 estimate is above the cap; checkr has no estimate.
+    assert response.json()["total"] == 0
+
+
+def test_list_jobs_filters_by_salary_range(api_client, db_session):
+    _seed(db_session)
+    _seed_palantir_lca_rows(db_session)
+
+    response = api_client.get("/jobs", params={"salary_min": 140000, "salary_max": 160000})
+    assert response.status_code == 200
+    assert {item["job_title"] for item in response.json()["items"]} == {"High Match Job", "Mid Match Job"}
+
+
+def test_list_jobs_salary_unspecified_returns_only_estimateless_postings(api_client, db_session):
+    _seed(db_session)
+    _seed_palantir_lca_rows(db_session)
+
+    response = api_client.get("/jobs", params={"salary_unspecified": "true"})
+    assert response.status_code == 200
+    body = response.json()
+    # Only checkr's jobs (no resolved sponsor match -> no estimate).
+    assert {item["job_title"] for item in body["items"]} == {"Low Match Job", "Not Yet Embedded Job"}
+
+
+def test_list_jobs_salary_unspecified_overrides_min_max(api_client, db_session):
+    _seed(db_session)
+    _seed_palantir_lca_rows(db_session)
+
+    response = api_client.get(
+        "/jobs", params={"salary_unspecified": "true", "salary_min": 145000}
+    )
+    assert {item["job_title"] for item in response.json()["items"]} == {
+        "Low Match Job",
+        "Not Yet Embedded Job",
+    }
+
+
+# --- combined with the pre-existing filters -----------------------------
+
+
+def test_list_jobs_combines_new_filters_with_department_and_score(api_client, db_session):
+    _seed(db_session)
+    _seed_palantir_lca_rows(db_session)
+
+    response = api_client.get(
+        "/jobs",
+        params={
+            "min_score": 0.3,
+            "location": "new york",
+            "salary_min": 140000,
+            "department": "Sales",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    # Only mid satisfies all four: score ~0.707, a "New York, NY"
+    # location, palantir's 150000 estimate, department "Sales".
+    assert body["total"] == 1
+    assert body["items"][0]["job_title"] == "Mid Match Job"

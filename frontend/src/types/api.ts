@@ -101,6 +101,13 @@ export const UNSPECIFIED_DEPARTMENT = "__unspecified__";
 // its own name at the call site rather than sharing one generic sentinel.
 export const UNSPECIFIED_EMPLOYMENT_TYPE = "__unspecified__";
 
+// Same idea for the `location` query param - mirrors
+// huntloop.api.routers.jobs.UNSPECIFIED_LOCATION. Selecting it filters
+// down to postings with no location scraped at all. A real location
+// value sent in this param is matched as a case-insensitive substring
+// on the backend (not exact), and is never radius/geocoding search.
+export const UNSPECIFIED_LOCATION = "__unspecified__";
+
 export interface ResumeVersionSummary {
   id: number;
   version_number: number;
