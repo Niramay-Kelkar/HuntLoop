@@ -175,6 +175,27 @@ describe("JobFilters", () => {
     expect(screen.getByRole("slider")).toBeInTheDocument();
   });
 
+  it("offers exactly the three descending sort options with human-readable labels", () => {
+    renderFilters(emptyValue);
+
+    const sortSelect = screen.getByDisplayValue("Sort: Best match") as HTMLSelectElement;
+    const options = Array.from(sortSelect.options).map((o) => [o.value, o.textContent]);
+    expect(options).toEqual([
+      ["-score", "Sort: Best match"],
+      ["-date", "Sort: Most recent"],
+      ["-salary", "Sort: Highest salary"],
+    ]);
+    // no ascending / "worst match" option
+    expect(sortSelect.querySelector('option[value="score"]')).toBeNull();
+  });
+
+  it("passes the chosen sort value straight through onChange", () => {
+    const onChange = renderFilters(emptyValue);
+
+    fireEvent.change(screen.getByDisplayValue("Sort: Best match"), { target: { value: "-salary" } });
+    expect(onChange).toHaveBeenCalledWith({ ...emptyValue, sort: "-salary" });
+  });
+
   it("shows the result count for the current filter combination", () => {
     renderFilters(emptyValue, vi.fn(), { resultCount: 1234 });
     expect(screen.getByText("1,234 results")).toBeInTheDocument();

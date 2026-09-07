@@ -272,7 +272,8 @@ export function JobFilters({
                 className="w-full appearance-none rounded-lg border border-border-strong bg-surface py-2 pl-3 pr-7 text-[13px] text-text"
               >
                 <option value="-score">Sort: Best match</option>
-                <option value="score">Sort: Worst match</option>
+                <option value="-date">Sort: Most recent</option>
+                <option value="-salary">Sort: Highest salary</option>
               </select>
               <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-faintest">
                 ▼

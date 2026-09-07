@@ -79,6 +79,12 @@ _LOCATION_MIN_POSTINGS = 100
 # remains out of scope (see CLAUDE.md).
 
 
+# The sort options GET /jobs accepts. All are descending ("best first"):
+# an ascending / "worst match first" option was removed as having no real
+# use case. Each pushes rows missing the sort value to the end.
+_SORT_OPTIONS = ("-score", "-date", "-salary")
+
+
 def _salary_estimate_expr():
     """Correlated scalar subquery for a posting's estimated salary: the
     median 'Year'-unit DOL wage filed by the company's resolved sponsor
@@ -260,14 +266,21 @@ def list_jobs(
     ),
     sort: str = Query(
         "-score",
-        description="'score' (ascending) or '-score' (descending, default - best matches first).",
+        description=(
+            "'-score' (best resume match first, the default), '-date' (most recently "
+            "posted first) or '-salary' (highest estimated salary first). Every option "
+            "puts postings missing that value (no score / no scraped date / no salary "
+            "estimate) last, and breaks ties by posting id for a stable order."
+        ),
     ),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ) -> JobListResponse:
-    if sort not in ("score", "-score"):
-        raise HTTPException(400, f"Invalid sort {sort!r} - expected 'score' or '-score'")
+    if sort not in _SORT_OPTIONS:
+        raise HTTPException(
+            400, f"Invalid sort {sort!r} - expected one of {', '.join(_SORT_OPTIONS)}"
+        )
 
     resume_embedding = _active_resume_embedding(db)
     if min_score is not None and resume_embedding is None:
@@ -330,10 +343,17 @@ def list_jobs(
 
     total = db.execute(select(func.count()).select_from(query.subquery())).scalar_one()
 
-    # match_score_order_by handles both the NULLS LAST ordering (so
-    # not-yet-embedded jobs never sort to the top) and the no-active-resume
-    # fallback to a stable deterministic order - see huntloop.match_scoring.
-    query = query.order_by(*match_score_order_by(resume_embedding, descending=(sort == "-score")))
+    # Every sort is descending with NULLs pushed last, then a stable
+    # id tiebreaker. match_score_order_by additionally handles the
+    # no-active-resume case (nothing real to sort by -> deterministic
+    # id order) - see huntloop.match_scoring.
+    if sort == "-date":
+        order_by = [JobPosting.date_posted.desc().nulls_last()]
+    elif sort == "-salary":
+        order_by = [salary_expr.desc().nulls_last()]
+    else:  # "-score"
+        order_by = match_score_order_by(resume_embedding, descending=True)
+    query = query.order_by(*order_by, JobPosting.id.asc())
 
     query = query.limit(limit).offset(offset)
     rows = db.execute(query).all()

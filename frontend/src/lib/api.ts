@@ -89,7 +89,10 @@ export interface ListJobsParams {
   // job_applications row with status other than not_applied) - the
   // applications tracker's data source.
   tracked?: boolean;
-  sort?: "score" | "-score";
+  // All descending. "-score" = best resume match first (default),
+  // "-date" = most recently posted first, "-salary" = highest estimated
+  // salary first. Each sorts postings missing that value last.
+  sort?: "-score" | "-date" | "-salary";
   limit?: number;
   offset?: number;
 }

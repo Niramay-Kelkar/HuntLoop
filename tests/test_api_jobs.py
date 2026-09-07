@@ -11,7 +11,7 @@ verifying the API's query/filter/sort/upsert logic, not the embedding
 model itself (that's covered by the real end-to-end verification done
 manually against real data - see SESSIONS.md).
 """
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
@@ -239,13 +239,43 @@ def test_list_jobs_returns_scores_sorted_descending_by_default(api_client, db_se
     assert scores["Not Yet Embedded Job"] is None
 
 
-def test_list_jobs_ascending_sort(api_client, db_session):
+def test_list_jobs_rejects_removed_and_unknown_sort_values(api_client, db_session):
     _seed(db_session)
 
-    response = api_client.get("/jobs", params={"sort": "score"})
-    assert response.status_code == 200
-    titles_in_order = [item["job_title"] for item in response.json()["items"]]
-    assert titles_in_order == ["Low Match Job", "Mid Match Job", "High Match Job", "Not Yet Embedded Job"]
+    # "score" (ascending / worst-match-first) was removed - no real use case.
+    assert api_client.get("/jobs", params={"sort": "score"}).status_code == 400
+    assert api_client.get("/jobs", params={"sort": "date"}).status_code == 400
+    assert api_client.get("/jobs", params={"sort": "bogus"}).status_code == 400
+
+
+def test_list_jobs_sort_by_date_posted_descending(api_client, db_session):
+    seeded = _seed(db_session)
+    # high: newest, mid: older, low: oldest, no_embedding: no date at all.
+    seeded["high"].date_posted = datetime(2026, 3, 3)
+    seeded["mid"].date_posted = datetime(2026, 2, 2)
+    seeded["low"].date_posted = datetime(2026, 1, 1)
+    seeded["no_embedding"].date_posted = None
+    db_session.commit()
+
+    titles = [i["job_title"] for i in api_client.get("/jobs", params={"sort": "-date"}).json()["items"]]
+    assert titles == ["High Match Job", "Mid Match Job", "Low Match Job", "Not Yet Embedded Job"]
+
+
+def test_list_jobs_sort_by_salary_descending_with_nulls_last(api_client, db_session):
+    seeded = _seed(db_session)
+    _seed_palantir_lca_rows(db_session)  # only palantir has a resolvable estimate
+    # give the two palantir jobs different estimates via a second sponsor
+    # employer with a higher median, matched to mid's company... simpler:
+    # both palantir jobs share one estimate; checkr jobs have none.
+    body = api_client.get("/jobs", params={"sort": "-salary"}).json()
+    titles = [i["job_title"] for i in body["items"]]
+    estimates = [(i["salary_estimate"] or {}).get("amount") for i in body["items"]]
+
+    # palantir jobs (with an estimate) come before checkr jobs (no estimate),
+    # and the no-estimate rows are last, not first or interleaved.
+    assert titles[:2] == ["High Match Job", "Mid Match Job"]
+    assert estimates[0] is not None and estimates[1] is not None
+    assert estimates[2] is None and estimates[3] is None
 
 
 def test_list_jobs_filters_by_company(api_client, db_session):

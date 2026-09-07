@@ -10700,3 +10700,49 @@ notes add/edit/persist across reload; note survives a status change;
 board note mark; search filter) at desktop and 390-wide. Backend suite
 and frontend suite both green (3 pre-existing `test_backfill_lock`
 failures, unrelated - the daily backfill cron holds the advisory lock).
+
+---
+
+## 2026-09-07 — Job-list sort options: drop "worst match", add date and salary
+
+**Before-state (real implementation):**
+- Backend `GET /jobs?sort=` accepted exactly two values: `-score`
+  (match score descending, the default) and `score` (match score
+  *ascending*). Anything else -> HTTP 400.
+- `score` / "worst match first" was fully wired and selectable: the
+  frontend `JobFilters.tsx` sort `<select>` offered exactly
+  **"Sort: Best match"** (`-score`) and **"Sort: Worst match"**
+  (`score`), and the backend really did order the list worst-fit-first
+  (confirmed against live data - top rows had negative cosine
+  similarity).
+- No date or salary sort existed at all.
+- Default: `-score` (best match first).
+
+**Changed:**
+- **Removed "Worst match" (`score`, ascending).** Deliberately kept
+  nothing ascending: showing your *poorest* resume matches first has no
+  real workflow behind it, and an oldest-posting-first option is
+  speculative enough to leave out for now. `sort=score` now returns 400
+  like any other unknown value.
+- **Added "Most recent" (`-date`)** - `date_posted` descending.
+- **Added "Highest salary" (`-salary`)** - the estimated-salary scalar
+  subquery descending. NULL handling matches the rest of the salary
+  feature: postings whose company has no resolvable estimate sort
+  **last**, never first or interleaved (the salary *filter* excludes
+  them entirely when a bound is set; the sort keeps them visible but at
+  the bottom).
+- Every option is now descending, NULLs last, with a stable
+  `id`-ascending tiebreaker.
+- Frontend labels: "Sort: Best match" / "Sort: Most recent" /
+  "Sort: Highest salary". Default unchanged (`-score`). All other
+  filter/sort-combination behavior, and "clear filters preserves sort",
+  untouched.
+
+**Verified:** a real API call per remaining option confirming the rows
+are genuinely ordered (score monotonic non-increasing; dates
+descending with the one null-date row last; salary descending with
+no-estimate rows all at the tail), plus the removed `score` value now
+400s. Also driven end-to-end in the browser (each option refetches and
+visibly re-orders the card list). Backend and frontend suites green
+(the 3 pre-existing `test_backfill_lock` failures are unrelated - the
+daily backfill cron holds the advisory lock).
