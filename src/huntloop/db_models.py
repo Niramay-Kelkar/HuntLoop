@@ -136,6 +136,13 @@ class JobPosting(Base):
     job_title = Column(String(300), nullable=False)
     job_url = Column(String(500), nullable=False)
     department = Column(String(255), nullable=True)
+    # Canonical, controlled-vocabulary category the raw `department`
+    # free-text string is mapped onto (see
+    # huntloop.department_categorization) - one of the ~18 canonical
+    # categories or "Other". Additive: `department` above is kept
+    # unchanged. NULL when `department` itself is NULL (nothing to
+    # categorize) or not yet categorized.
+    department_category = Column(String(50), nullable=True)
     # Normalized employment type (see huntloop.employment_type) - one of
     # Full-time/Part-time/Contract/Internship/Other, or NULL when the
     # source genuinely exposes no employment-type signal at all for this
@@ -198,6 +205,14 @@ class JobLocation(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     job_id = Column(Integer, ForeignKey("job_postings.id", ondelete="CASCADE"))
     location_name = Column(String(255), nullable=False)
+    # Canonical grouping derived from the messy free-text location_name by
+    # huntloop.location_normalization (offline gazetteer, no geocoding).
+    # location_name itself is never modified - these are additive.
+    location_city = Column(String(120), nullable=True)
+    location_region = Column(String(64), nullable=True)  # 2-letter US state / CA province
+    location_country = Column(String(80), nullable=True)
+    location_is_remote = Column(Boolean, nullable=True)
+    location_canonical = Column(String(255), nullable=True)
 
     job = relationship("JobPosting", back_populates="locations")
 

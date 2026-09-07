@@ -13,7 +13,23 @@ import { ToastProvider } from "@/components/Toast";
  * SSR.
  */
 export function Providers({ children }: { children: React.ReactNode }) {
-  const [queryClient] = useState(() => new QueryClient());
+  const [queryClient] = useState(
+    () =>
+      new QueryClient({
+        defaultOptions: {
+          queries: {
+            // With the default retry (3 attempts w/ back-off) a failed
+            // query never surfaces its error under React 19 + Query v5
+            // here - the retryer stalls and the view is stuck on its
+            // loading skeleton forever (verified against a 404 job id
+            // and an unreachable API). Retrying is left to the explicit
+            // "Try again" buttons in ErrorState, which call refetch().
+            retry: 0,
+            staleTime: 15_000,
+          },
+        },
+      }),
+  );
 
   return (
     <QueryClientProvider client={queryClient}>

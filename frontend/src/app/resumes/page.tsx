@@ -4,6 +4,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 
 import { activateResume, getResumes, uploadResume } from "@/lib/api";
+import { EmptyState } from "@/components/EmptyState";
+import { ErrorState } from "@/components/ErrorState";
 import { useToast } from "@/components/Toast";
 import { formatDate } from "@/lib/theme";
 
@@ -140,13 +142,21 @@ export default function ResumesPage() {
           )}
 
           {resumes.isError && (
-            <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
-              Failed to load resumes: {resumes.error.message}
-            </div>
+            <ErrorState
+              error={resumes.error}
+              onRetry={() => resumes.refetch()}
+              resourceLabel="your resumes"
+              compact
+            />
           )}
 
           {resumes.isSuccess && resumes.data.length === 0 && (
-            <p className="text-[13px] text-text-faintest">No resumes uploaded yet.</p>
+            <EmptyState
+              icon="↑"
+              title="No resume uploaded yet"
+              description="Upload a PDF above — it becomes the active version every job is scored against."
+              compact
+            />
           )}
 
           {resumes.isSuccess && resumes.data.length > 0 && (

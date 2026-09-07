@@ -23,6 +23,8 @@ from sqlalchemy import create_engine
 
 from . import metrics
 from .employment_type import normalize_employment_type
+from .department_categorization import rule_based_category
+from .location_normalization import normalize_location, split_location_string
 from .relevance_filter import REFERENCE_TEXT, classify_relevance, cosine_similarity
 
 logger = logging.getLogger(__name__)
@@ -196,6 +198,16 @@ class JobDataPipeline:
                 if existing_job.department is None and new_department:
                     existing_job.department = new_department
                     backfilled_fields.append("department")
+                    # Categorize the freshly-backfilled raw department too,
+                    # so a repost never leaves department set but
+                    # department_category NULL. Rule-based only here (no
+                    # network on the hot path); the LLM backfill picks up
+                    # anything the rules can't place.
+                    if existing_job.department_category is None:
+                        cat = rule_based_category(new_department)
+                        if cat is not None:
+                            existing_job.department_category = cat
+                            backfilled_fields.append("department_category")
 
                 new_employment_type = normalize_employment_type(item.get("employment_type"))
                 if existing_job.employment_type is None and new_employment_type:
@@ -222,6 +234,7 @@ class JobDataPipeline:
                 job_url=item.get("job_url"),
                 gh_job_id=item.get("job_id"),
                 department=item.get("department"),
+                department_category=rule_based_category(item.get("department")),
                 employment_type=normalize_employment_type(item.get("employment_type")),
                 job_description=item.get("job_description"),
                 date_posted=item.get("date_posted"),
@@ -235,8 +248,32 @@ class JobDataPipeline:
             session.commit()
 
             # 5️⃣ Job Locations
+            # A single scraped value can be a joined multi-location string
+            # ("San Francisco, CA; New York, NY") - split it so each real
+            # place gets its own row and filtering groups correctly. The
+            # first piece keeps the original raw location_name unchanged;
+            # extra pieces get a row of their own. Every row also carries
+            # the canonical (city, region, country) grouping, computed at
+            # insert time (rules + offline gazetteer, no network) - same
+            # auto-compute-at-insert pattern as is_relevant / embedding /
+            # employment_type / department_category.
             for loc in item.get("job_locations", []):
-                session.add(JobLocation(job_id=job_post.id, location_name=loc))
+                if not loc:
+                    continue
+                pieces = split_location_string(loc)
+                for idx, piece in enumerate(pieces):
+                    norm = normalize_location(piece)
+                    session.add(
+                        JobLocation(
+                            job_id=job_post.id,
+                            location_name=loc if idx == 0 else piece[:255],
+                            location_city=norm.city,
+                            location_region=norm.region,
+                            location_country=norm.country,
+                            location_is_remote=norm.is_remote,
+                            location_canonical=norm.canonical[:255],
+                        )
+                    )
             session.commit()
 
             # 6️⃣ Job Skills

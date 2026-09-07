@@ -76,6 +76,27 @@ export function formatDate(dateString: string | null): string | null {
   });
 }
 
+/** A short relative-time label ("just now", "3d ago", "2mo ago") for a
+ * timestamp string, or null if there's no timestamp. Used for an
+ * application's single `status_updated_at` - a light "when did this last
+ * move" signal, not a full activity history. */
+export function timeAgo(dateString: string | null): string | null {
+  if (!dateString) return null;
+  const then = new Date(dateString).getTime();
+  if (Number.isNaN(then)) return null;
+  const seconds = Math.round((Date.now() - then) / 1000);
+  if (seconds < 45) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  const months = Math.round(days / 30);
+  if (months < 12) return `${months}mo ago`;
+  return `${Math.round(months / 12)}y ago`;
+}
+
 /** Whole-dollar wage/salary amounts as compact "$168k" strings, matching
  * design/HuntLoop.dc.html's mock sponsor/salary figures. */
 export function formatWage(amount: number): string {

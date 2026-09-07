@@ -11,7 +11,7 @@ verifying the API's query/filter/sort/upsert logic, not the embedding
 model itself (that's covered by the real end-to-end verification done
 manually against real data - see SESSIONS.md).
 """
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
@@ -71,6 +71,7 @@ def _seed(db_session):
         source_id=source.id,
         embedding=HIGH_MATCH_EMBEDDING,
         department="Engineering",
+        department_category="Engineering",
         employment_type="Full-time",
     )
     mid = JobPosting(
@@ -83,6 +84,7 @@ def _seed(db_session):
         matched_skills=["Python", "AWS"],
         missing_skills=["Go"],
         department="Sales",
+        department_category="Sales",
         employment_type="Contract",
     )
     low = JobPosting(
@@ -93,6 +95,7 @@ def _seed(db_session):
         source_id=source.id,
         embedding=LOW_MATCH_EMBEDDING,
         department="Engineering",
+        department_category="Engineering",
         employment_type="Full-time",
     )
     no_embedding = JobPosting(
@@ -103,15 +106,30 @@ def _seed(db_session):
         source_id=source.id,
         embedding=None,
         department=None,
+        department_category=None,
         employment_type=None,
     )
     db_session.add_all([high, mid, low, no_embedding])
     db_session.commit()
 
+    from huntloop.location_normalization import normalize_location
+
+    def _loc(job_id, raw):
+        n = normalize_location(raw)
+        return JobLocation(
+            job_id=job_id,
+            location_name=raw,
+            location_city=n.city,
+            location_region=n.region,
+            location_country=n.country,
+            location_is_remote=n.is_remote,
+            location_canonical=n.canonical,
+        )
+
     db_session.add_all(
         [
-            JobLocation(job_id=mid.id, location_name="Remote - US"),
-            JobLocation(job_id=mid.id, location_name="New York, NY"),
+            _loc(mid.id, "Remote - US"),
+            _loc(mid.id, "New York, NY"),
         ]
     )
     db_session.commit()
@@ -239,13 +257,43 @@ def test_list_jobs_returns_scores_sorted_descending_by_default(api_client, db_se
     assert scores["Not Yet Embedded Job"] is None
 
 
-def test_list_jobs_ascending_sort(api_client, db_session):
+def test_list_jobs_rejects_removed_and_unknown_sort_values(api_client, db_session):
     _seed(db_session)
 
-    response = api_client.get("/jobs", params={"sort": "score"})
-    assert response.status_code == 200
-    titles_in_order = [item["job_title"] for item in response.json()["items"]]
-    assert titles_in_order == ["Low Match Job", "Mid Match Job", "High Match Job", "Not Yet Embedded Job"]
+    # "score" (ascending / worst-match-first) was removed - no real use case.
+    assert api_client.get("/jobs", params={"sort": "score"}).status_code == 400
+    assert api_client.get("/jobs", params={"sort": "date"}).status_code == 400
+    assert api_client.get("/jobs", params={"sort": "bogus"}).status_code == 400
+
+
+def test_list_jobs_sort_by_date_posted_descending(api_client, db_session):
+    seeded = _seed(db_session)
+    # high: newest, mid: older, low: oldest, no_embedding: no date at all.
+    seeded["high"].date_posted = datetime(2026, 3, 3)
+    seeded["mid"].date_posted = datetime(2026, 2, 2)
+    seeded["low"].date_posted = datetime(2026, 1, 1)
+    seeded["no_embedding"].date_posted = None
+    db_session.commit()
+
+    titles = [i["job_title"] for i in api_client.get("/jobs", params={"sort": "-date"}).json()["items"]]
+    assert titles == ["High Match Job", "Mid Match Job", "Low Match Job", "Not Yet Embedded Job"]
+
+
+def test_list_jobs_sort_by_salary_descending_with_nulls_last(api_client, db_session):
+    seeded = _seed(db_session)
+    _seed_palantir_lca_rows(db_session)  # only palantir has a resolvable estimate
+    # give the two palantir jobs different estimates via a second sponsor
+    # employer with a higher median, matched to mid's company... simpler:
+    # both palantir jobs share one estimate; checkr jobs have none.
+    body = api_client.get("/jobs", params={"sort": "-salary"}).json()
+    titles = [i["job_title"] for i in body["items"]]
+    estimates = [(i["salary_estimate"] or {}).get("amount") for i in body["items"]]
+
+    # palantir jobs (with an estimate) come before checkr jobs (no estimate),
+    # and the no-estimate rows are last, not first or interleaved.
+    assert titles[:2] == ["High Match Job", "Mid Match Job"]
+    assert estimates[0] is not None and estimates[1] is not None
+    assert estimates[2] is None and estimates[3] is None
 
 
 def test_list_jobs_filters_by_company(api_client, db_session):
@@ -262,9 +310,11 @@ def test_list_jobs_filters_by_company(api_client, db_session):
     assert response.json()["total"] == 2
 
 
-def test_list_jobs_filters_by_department(api_client, db_session):
+def test_list_jobs_filters_by_department_category(api_client, db_session):
     _seed(db_session)
 
+    # The `department` param filters on the canonical category, not the
+    # raw string.
     response = api_client.get("/jobs", params={"department": "Engineering"})
     assert response.status_code == 200
     body = response.json()
@@ -282,6 +332,16 @@ def test_list_jobs_filters_by_unspecified_department(api_client, db_session):
     assert body["items"][0]["job_title"] == "Not Yet Embedded Job"
 
 
+def test_job_summary_exposes_raw_department_and_category(api_client, db_session):
+    _seed(db_session)
+
+    items = {i["job_title"]: i for i in api_client.get("/jobs").json()["items"]}
+    assert items["Mid Match Job"]["department"] == "Sales"
+    assert items["Mid Match Job"]["department_category"] == "Sales"
+    assert items["Not Yet Embedded Job"]["department"] is None
+    assert items["Not Yet Embedded Job"]["department_category"] is None
+
+
 def test_list_jobs_no_department_filter_includes_null_department_jobs(api_client, db_session):
     _seed(db_session)
 
@@ -293,11 +353,13 @@ def test_list_jobs_no_department_filter_includes_null_department_jobs(api_client
     assert body["total"] == 4
 
 
-def test_list_departments_returns_distinct_non_null_values_sorted(api_client, db_session):
+def test_list_departments_returns_distinct_categories_most_common_first(api_client, db_session):
     _seed(db_session)
 
     response = api_client.get("/jobs/departments")
     assert response.status_code == 200
+    # Engineering (2 postings) before Sales (1); NULL-category postings
+    # are never listed.
     assert response.json() == ["Engineering", "Sales"]
 
 
@@ -371,6 +433,22 @@ def test_list_jobs_has_sponsor_history_reflects_company_match(api_client, db_ses
     assert by_title["Mid Match Job"] is True
     assert by_title["Low Match Job"] is False
     assert by_title["Not Yet Embedded Job"] is False
+
+
+def test_list_jobs_includes_salary_estimate_for_resolved_sponsor_only(api_client, db_session):
+    _seed(db_session)
+    _seed_palantir_lca_rows(db_session)
+
+    response = api_client.get("/jobs")
+    by_title = {item["job_title"]: item["salary_estimate"] for item in response.json()["items"]}
+    # palantir jobs (High/Mid) resolve to a sponsor with annual-wage filings;
+    # checkr jobs (Low/Not Yet Embedded) have no sponsor match at all.
+    assert by_title["High Match Job"]["amount"] == pytest.approx(150000.0)
+    assert (
+        by_title["High Match Job"]["basis"]
+        == "Estimated from DOL wage filings for this employer, not job-specific"
+    )
+    assert by_title["Low Match Job"] is None
 
 
 def test_get_job_detail_includes_ats_platform(api_client, db_session):
@@ -498,6 +576,66 @@ def test_get_jobs_reflects_application_status_after_patch(api_client, db_session
     assert item["application_status"] == "rejected"
 
 
+def test_patch_notes_only_does_not_change_status(api_client, db_session):
+    seeded = _seed(db_session)
+    job_id = seeded["high"].id
+
+    api_client.patch(f"/jobs/{job_id}/application", json={"status": "interviewing"})
+    response = api_client.patch(f"/jobs/{job_id}/application", json={"notes": "Recruiter call went well"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "interviewing"
+    assert body["notes"] == "Recruiter call went well"
+
+
+def test_patch_status_only_preserves_existing_notes(api_client, db_session):
+    seeded = _seed(db_session)
+    job_id = seeded["high"].id
+
+    api_client.patch(f"/jobs/{job_id}/application", json={"status": "applied", "notes": "Referred by a friend"})
+    response = api_client.patch(f"/jobs/{job_id}/application", json={"status": "interviewing"})
+
+    assert response.status_code == 200
+    assert response.json()["notes"] == "Referred by a friend"
+
+
+def test_patch_application_requires_at_least_one_field(api_client, db_session):
+    seeded = _seed(db_session)
+
+    response = api_client.patch(f"/jobs/{seeded['high'].id}/application", json={})
+    assert response.status_code == 422
+
+
+def test_list_jobs_exposes_notes_and_status_updated_at(api_client, db_session):
+    seeded = _seed(db_session)
+    job_id = seeded["mid"].id
+
+    api_client.patch(f"/jobs/{job_id}/application", json={"status": "applied", "notes": "First round done"})
+
+    item = next(i for i in api_client.get("/jobs").json()["items"] if i["id"] == job_id)
+    assert item["application_notes"] == "First round done"
+    assert item["status_updated_at"] is not None
+
+    untracked = next(i for i in api_client.get("/jobs").json()["items"] if i["id"] == seeded["low"].id)
+    assert untracked["application_notes"] is None
+    assert untracked["status_updated_at"] is None
+
+
+def test_list_jobs_tracked_filter_returns_only_active_applications(api_client, db_session):
+    seeded = _seed(db_session)
+    api_client.patch(f"/jobs/{seeded['high'].id}/application", json={"status": "applied"})
+    api_client.patch(f"/jobs/{seeded['mid'].id}/application", json={"status": "interviewing"})
+    # a row that exists but was set back to not_applied must not count as tracked
+    api_client.patch(f"/jobs/{seeded['low'].id}/application", json={"status": "applied"})
+    api_client.patch(f"/jobs/{seeded['low'].id}/application", json={"status": "not_applied"})
+
+    body = api_client.get("/jobs", params={"tracked": "true"}).json()
+    ids = {i["id"] for i in body["items"]}
+    assert ids == {seeded["high"].id, seeded["mid"].id}
+    assert body["total"] == 2
+
+
 def test_patch_application_404_for_missing_job(api_client, db_session):
     _seed(db_session)
 
@@ -521,16 +659,23 @@ def test_min_score_without_active_resume_returns_400(api_client, db_session):
 # --- location filter -------------------------------------------------------
 
 
-def test_list_jobs_filters_by_location_substring(api_client, db_session):
+def test_list_jobs_filters_by_canonical_location_group(api_client, db_session):
     _seed(db_session)
 
-    # mid is the only seeded job with locations ("Remote - US", "New York,
-    # NY"); the substring match is case-insensitive and partial.
-    response = api_client.get("/jobs", params={"location": "new york"})
+    # mid is the only seeded job with locations; "New York, NY" canonicalizes
+    # to "New York City, NY, United States" and the filter matches that
+    # canonical group exactly.
+    response = api_client.get(
+        "/jobs", params={"location": "New York City, NY, United States"}
+    )
     assert response.status_code == 200
     body = response.json()
     assert body["total"] == 1
     assert body["items"][0]["job_title"] == "Mid Match Job"
+
+    # The raw pre-canonicalization string is not itself a valid filter value.
+    response = api_client.get("/jobs", params={"location": "New York, NY"})
+    assert response.json()["total"] == 0
 
 
 def test_list_jobs_filters_by_unspecified_location(api_client, db_session):
@@ -558,10 +703,24 @@ def test_list_locations_returns_common_values_most_frequent_first(api_client, db
     # that floor to 1 so the four seeded rows are enough to exercise it.
     monkeypatch.setattr(jobs_router, "_LOCATION_MIN_POSTINGS", 1)
     seeded = _seed(db_session)
+    from huntloop.location_normalization import normalize_location
+
+    def _loc(job_id, raw):
+        n = normalize_location(raw)
+        return JobLocation(
+            job_id=job_id,
+            location_name=raw,
+            location_city=n.city,
+            location_region=n.region,
+            location_country=n.country,
+            location_is_remote=n.is_remote,
+            location_canonical=n.canonical,
+        )
+
     db_session.add_all(
         [
-            JobLocation(job_id=seeded["high"].id, location_name="New York, NY"),
-            JobLocation(job_id=seeded["low"].id, location_name="New York, NY"),
+            _loc(seeded["high"].id, "SF"),
+            _loc(seeded["low"].id, "san francisco, california"),
         ]
     )
     db_session.commit()
@@ -569,9 +728,14 @@ def test_list_locations_returns_common_values_most_frequent_first(api_client, db
     response = api_client.get("/jobs/locations")
     assert response.status_code == 200
     body = response.json()
-    # "New York, NY" on 3 postings, "Remote - US" on 1 -> most frequent first.
-    assert body[0] == "New York, NY"
-    assert set(body) == {"New York, NY", "Remote - US"}
+    # "SF" and "san francisco, california" both canonicalize to the same
+    # group (2 postings); "New York City, ..." + "Remote - ..." 1 each.
+    assert body[0] == "San Francisco, CA, United States"
+    assert set(body) == {
+        "San Francisco, CA, United States",
+        "New York City, NY, United States",
+        "Remote - United States",
+    }
 
 
 # --- salary-estimate range filter ----------------------------------------
@@ -643,7 +807,7 @@ def test_list_jobs_combines_new_filters_with_department_and_score(api_client, db
         "/jobs",
         params={
             "min_score": 0.3,
-            "location": "new york",
+            "location": "New York City, NY, United States",
             "salary_min": 140000,
             "department": "Sales",
         },

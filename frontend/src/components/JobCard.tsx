@@ -3,8 +3,9 @@ import Link from "next/link";
 import type { JobSummary } from "@/types/api";
 import { ScoreIndicator } from "./ScoreIndicator";
 import { SkillChipsPreview } from "./SkillChips";
+import { SponsorBadge } from "./SponsorBadge";
 import { StatusControl } from "./StatusControl";
-import { avatarColors, formatDate, initials } from "@/lib/theme";
+import { avatarColors, formatDate, formatWage, initials } from "@/lib/theme";
 
 export function JobCard({ job }: { job: JobSummary }) {
   const postedDate = formatDate(job.date_posted);
@@ -34,19 +35,27 @@ export function JobCard({ job }: { job: JobSummary }) {
         <SkillChipsPreview matchedSkills={job.matched_skills} />
       </div>
 
-      <div className="pointer-events-none relative z-[1] flex items-center gap-2 text-xs text-text-subtle">
-        <span>{job.locations.length > 0 ? job.locations.join(" · ") : "Location not listed"}</span>
-        <span className="text-divider">·</span>
-        <span
-          className="inline-flex items-center gap-1"
-          style={{ color: job.has_sponsor_history ? "#1f8f4e" : "#a89f95" }}
-        >
-          <span
-            className="h-1.5 w-1.5 rounded-full"
-            style={{ backgroundColor: job.has_sponsor_history ? "#1f9d55" : "#c9c2b8" }}
-          />
-          {job.has_sponsor_history ? "Sponsors H-1B" : "No H-1B data"}
+      <div className="pointer-events-none relative z-[1] flex flex-col gap-1.5 text-xs text-text-subtle">
+        <span className="truncate">
+          {job.locations.length > 0 ? job.locations.join(" · ") : "Location not listed"}
         </span>
+        <div className="flex flex-wrap items-center gap-1.5">
+          {job.employment_type && (
+            <span className="rounded-md bg-surface-alt px-1.5 py-0.5 font-mono text-[10px] text-text-muted">
+              {job.employment_type}
+            </span>
+          )}
+          <SponsorBadge hasSponsorHistory={job.has_sponsor_history} />
+          {job.salary_estimate && (
+            <span
+              className="rounded-md px-1.5 py-0.5 font-mono text-[10px]"
+              style={{ backgroundColor: "#f4efe7", color: "#7a6f5f" }}
+              title={job.salary_estimate.basis}
+            >
+              Est. ~{formatWage(job.salary_estimate.amount)}
+            </span>
+          )}
+        </div>
       </div>
 
       <div className="relative z-[1] flex items-center justify-between border-t border-divider pt-2.5">

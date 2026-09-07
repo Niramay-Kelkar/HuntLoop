@@ -17,12 +17,22 @@ export interface HealthResponse {
   status: string;
 }
 
+export interface SalaryEstimate {
+  amount: number;
+  basis: string;
+}
+
 export interface JobSummary {
   id: number;
   job_title: string;
   company_name: string;
   job_url: string;
   department: string | null;
+  // Canonical category the raw department is mapped onto (see
+  // huntloop.department_categorization) - one of ~18 controlled values
+  // or "Other". null when there's no raw department or it isn't
+  // categorized yet.
+  department_category: string | null;
   employment_type: string | null;
   date_posted: string | null;
   match_score: number | null;
@@ -30,7 +40,17 @@ export interface JobSummary {
   missing_skills: string[] | null;
   locations: string[];
   application_status: ApplicationStatus;
+  // Free-text notes the user saved for this application (job_applications.notes).
+  // null when there's no application row or no note.
+  application_notes: string | null;
+  // When the application row was last touched. A single timestamp, not a
+  // history of past statuses. null when there's no application row.
+  status_updated_at: string | null;
   has_sponsor_history: boolean;
+  // Employer-level estimate from DOL wage filings (see the detail page /
+  // filter panel labeling) - never a real posted salary. null when the
+  // company has no resolved sponsor match or no annual-wage filings.
+  salary_estimate: SalaryEstimate | null;
 }
 
 export interface SponsorSummary {
@@ -42,16 +62,11 @@ export interface SponsorSummary {
   latest_case_status: string | null;
 }
 
-export interface SalaryEstimate {
-  amount: number;
-  basis: string;
-}
-
 export interface JobDetail extends JobSummary {
   job_description: string | null;
   ats_platform: string | null;
   sponsor: SponsorSummary | null;
-  salary_estimate: SalaryEstimate | null;
+  // salary_estimate is inherited from JobSummary.
 }
 
 export interface JobListResponse {
@@ -62,7 +77,7 @@ export interface JobListResponse {
 }
 
 export interface ApplicationStatusUpdate {
-  status: ApplicationStatus;
+  status?: ApplicationStatus;
   notes?: string | null;
 }
 

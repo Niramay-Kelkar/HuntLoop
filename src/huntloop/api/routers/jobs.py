@@ -14,7 +14,7 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from huntloop.api.dependencies import get_db
@@ -79,6 +79,12 @@ _LOCATION_MIN_POSTINGS = 100
 # remains out of scope (see CLAUDE.md).
 
 
+# The sort options GET /jobs accepts. All are descending ("best first"):
+# an ascending / "worst match first" option was removed as having no real
+# use case. Each pushes rows missing the sort value to the end.
+_SORT_OPTIONS = ("-score", "-date", "-salary")
+
+
 def _salary_estimate_expr():
     """Correlated scalar subquery for a posting's estimated salary: the
     median 'Year'-unit DOL wage filed by the company's resolved sponsor
@@ -117,6 +123,15 @@ def _score_and_status_columns(resume_embedding):
     return score_expr, status_expr
 
 
+# The application-row columns (notes + last-updated timestamp) that both
+# the list and detail responses now surface. Kept alongside status_expr
+# rather than folded into it so callers can select exactly what they need.
+_APPLICATION_DETAIL_COLUMNS = (
+    JobApplication.notes.label("application_notes"),
+    JobApplication.status_updated_at.label("application_status_updated_at"),
+)
+
+
 def _row_to_summary(row) -> JobSummary:
     job = row.JobPosting
     return JobSummary(
@@ -125,6 +140,7 @@ def _row_to_summary(row) -> JobSummary:
         company_name=row.company_name,
         job_url=job.job_url,
         department=job.department,
+        department_category=job.department_category,
         employment_type=job.employment_type,
         date_posted=job.date_posted,
         match_score=row.match_score,
@@ -132,19 +148,32 @@ def _row_to_summary(row) -> JobSummary:
         missing_skills=job.missing_skills,
         locations=[loc.location_name for loc in job.locations],
         application_status=row.application_status,
+        application_notes=row.application_notes,
+        status_updated_at=row.application_status_updated_at,
         has_sponsor_history=row.matched_sponsor_employer_name is not None,
+        salary_estimate=(
+            SalaryEstimate(amount=row.salary_estimate_amount)
+            if row.salary_estimate_amount is not None
+            else None
+        ),
     )
 
 
 @router.get("/departments", response_model=list[str])
 def list_departments(db: Session = Depends(get_db)) -> list[str]:
-    """The real, distinct department values currently in use across
-    job_postings (non-null only) - lets the frontend populate its
-    department filter from real data instead of a hardcoded list.
-    Department is free text from each ATS source (see CLAUDE.md) and is
-    deliberately not normalized/canonicalized here."""
+    """The canonical department CATEGORIES currently present in the data
+    (see huntloop.department_categorization) - the controlled set the raw
+    free-text `department` strings are mapped onto, so the frontend
+    filter offers ~18 clean choices instead of ~4,800 messy raw values.
+
+    Real distinct values only (a category is listed only if some posting
+    is mapped to it), most-common-first. The raw `department` string is
+    still returned per-posting on `GET /jobs/{id}` for transparency."""
     rows = db.execute(
-        select(JobPosting.department).where(JobPosting.department.isnot(None)).distinct().order_by(JobPosting.department)
+        select(JobPosting.department_category, func.count())
+        .where(JobPosting.department_category.isnot(None))
+        .group_by(JobPosting.department_category)
+        .order_by(func.count().desc())
     )
     return [row[0] for row in rows]
 
@@ -168,16 +197,31 @@ def list_employment_types(db: Session = Depends(get_db)) -> list[str]:
 
 @router.get("/locations", response_model=list[str])
 def list_locations(db: Session = Depends(get_db)) -> list[str]:
-    """The real, distinct location values in use across job_postings that
+    """The canonical location groups in use across job_postings that
     appear on at least `_LOCATION_MIN_POSTINGS` postings, most common
-    first. See `_LOCATION_MIN_POSTINGS` for why this is frequency-capped
-    rather than the full distinct set, and `list_jobs` for how the
-    matching `location` filter does a substring (not exact) match."""
+    first.
+
+    These are `huntloop.location_normalization`'s canonical labels (e.g.
+    "San Francisco, CA, United States", "Remote - United States",
+    "London, United Kingdom") - the messy free-text `location_name`
+    variants are collapsed onto them so the filter groups the same real
+    place together. Unresolved long-tail values (internal building codes,
+    "Hybrid", "HQ", ...) are excluded from this list. The matching
+    `location` filter does an EXACT match on the canonical label; the raw
+    `location_name`(s) stay visible per-posting for transparency."""
     rows = db.execute(
-        select(JobLocation.location_name)
-        .group_by(JobLocation.location_name)
-        .having(func.count() >= _LOCATION_MIN_POSTINGS)
-        .order_by(func.count().desc(), JobLocation.location_name)
+        select(JobLocation.location_canonical)
+        .where(
+            JobLocation.location_canonical.isnot(None),
+            or_(
+                JobLocation.location_city.isnot(None),
+                JobLocation.location_country.isnot(None),
+                JobLocation.location_is_remote.is_(True),
+            ),
+        )
+        .group_by(JobLocation.location_canonical)
+        .having(func.count(func.distinct(JobLocation.job_id)) >= _LOCATION_MIN_POSTINGS)
+        .order_by(func.count(func.distinct(JobLocation.job_id)).desc(), JobLocation.location_canonical)
     )
     return [row[0] for row in rows]
 
@@ -188,9 +232,10 @@ def list_jobs(
     department: str | None = Query(
         None,
         description=(
-            "Filter by exact department value, or "
-            f"'{UNSPECIFIED_DEPARTMENT}' to return only postings with no department set. "
-            "Unset (default) returns postings regardless of department, including those with none."
+            "Filter by canonical department category (see GET /jobs/departments), or "
+            f"'{UNSPECIFIED_DEPARTMENT}' to return only postings with no category "
+            "(no raw department, or not yet categorized). "
+            "Unset (default) returns postings regardless of department category."
         ),
     ),
     employment_type: str | None = Query(
@@ -207,10 +252,12 @@ def list_jobs(
     location: str | None = Query(
         None,
         description=(
-            "Filter to postings with a location matching this text (case-insensitive "
-            "substring, so 'San Francisco' also matches 'San Francisco, CA'), or "
-            f"'{UNSPECIFIED_LOCATION}' to return only postings with no location scraped. "
-            "Not radius/geocoding search. Unset (default) returns postings regardless of location."
+            "Filter to postings in this canonical location group (an exact match on a "
+            "value from GET /jobs/locations, e.g. 'San Francisco, CA, United States' - "
+            "which groups every 'San Francisco' / 'San Francisco, CA' / 'SF Bay Area' "
+            f"variant), or '{UNSPECIFIED_LOCATION}' to return only postings with no "
+            "location scraped. Not radius/geocoding search. Unset (default) returns "
+            "postings regardless of location."
         ),
     ),
     salary_min: float | None = Query(
@@ -234,22 +281,38 @@ def list_jobs(
             "(overrides salary_min/salary_max) - the '__unspecified__'-style option for this filter."
         ),
     ),
+    tracked: bool = Query(
+        False,
+        description=(
+            "When true, return only postings the user has actively tracked - i.e. with a "
+            "job_applications row whose status is not 'not_applied'. This is the applications "
+            "tracker's data source; the full job list is unaffected when unset (default)."
+        ),
+    ),
     sort: str = Query(
         "-score",
-        description="'score' (ascending) or '-score' (descending, default - best matches first).",
+        description=(
+            "'-score' (best resume match first, the default), '-date' (most recently "
+            "posted first) or '-salary' (highest estimated salary first). Every option "
+            "puts postings missing that value (no score / no scraped date / no salary "
+            "estimate) last, and breaks ties by posting id for a stable order."
+        ),
     ),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
 ) -> JobListResponse:
-    if sort not in ("score", "-score"):
-        raise HTTPException(400, f"Invalid sort {sort!r} - expected 'score' or '-score'")
+    if sort not in _SORT_OPTIONS:
+        raise HTTPException(
+            400, f"Invalid sort {sort!r} - expected one of {', '.join(_SORT_OPTIONS)}"
+        )
 
     resume_embedding = _active_resume_embedding(db)
     if min_score is not None and resume_embedding is None:
         raise HTTPException(400, "min_score filter requires an active resume with a computed embedding")
 
     score_expr, status_expr = _score_and_status_columns(resume_embedding)
+    salary_expr = _salary_estimate_expr()
 
     query = (
         select(
@@ -258,18 +321,22 @@ def list_jobs(
             Company.matched_sponsor_employer_name,
             score_expr,
             status_expr,
+            *_APPLICATION_DETAIL_COLUMNS,
+            salary_expr.label("salary_estimate_amount"),
         )
         .join(Company, JobPosting.company_id == Company.id)
         .outerjoin(JobApplication, JobApplication.job_posting_id == JobPosting.id)
     )
 
+    if tracked:
+        query = query.where(JobApplication.status != ApplicationStatus.NOT_APPLIED.value)
     if company:
         query = query.where(func.lower(Company.name) == company.lower())
     if department is not None:
         if department == UNSPECIFIED_DEPARTMENT:
-            query = query.where(JobPosting.department.is_(None))
+            query = query.where(JobPosting.department_category.is_(None))
         else:
-            query = query.where(JobPosting.department == department)
+            query = query.where(JobPosting.department_category == department)
     if employment_type is not None:
         if employment_type == UNSPECIFIED_EMPLOYMENT_TYPE:
             query = query.where(JobPosting.employment_type.is_(None))
@@ -287,11 +354,10 @@ def list_jobs(
                 select(JobLocation.id)
                 .where(
                     JobLocation.job_id == JobPosting.id,
-                    JobLocation.location_name.ilike(f"%{location}%"),
+                    JobLocation.location_canonical == location,
                 )
                 .exists()
             )
-    salary_expr = _salary_estimate_expr()
     if salary_unspecified:
         query = query.where(salary_expr.is_(None))
     else:
@@ -302,10 +368,17 @@ def list_jobs(
 
     total = db.execute(select(func.count()).select_from(query.subquery())).scalar_one()
 
-    # match_score_order_by handles both the NULLS LAST ordering (so
-    # not-yet-embedded jobs never sort to the top) and the no-active-resume
-    # fallback to a stable deterministic order - see huntloop.match_scoring.
-    query = query.order_by(*match_score_order_by(resume_embedding, descending=(sort == "-score")))
+    # Every sort is descending with NULLs pushed last, then a stable
+    # id tiebreaker. match_score_order_by additionally handles the
+    # no-active-resume case (nothing real to sort by -> deterministic
+    # id order) - see huntloop.match_scoring.
+    if sort == "-date":
+        order_by = [JobPosting.date_posted.desc().nulls_last()]
+    elif sort == "-salary":
+        order_by = [salary_expr.desc().nulls_last()]
+    else:  # "-score"
+        order_by = match_score_order_by(resume_embedding, descending=True)
+    query = query.order_by(*order_by, JobPosting.id.asc())
 
     query = query.limit(limit).offset(offset)
     rows = db.execute(query).all()
@@ -324,7 +397,7 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
     score_expr, status_expr = _score_and_status_columns(resume_embedding)
 
     query = (
-        select(JobPosting, Company, score_expr, status_expr)
+        select(JobPosting, Company, score_expr, status_expr, *_APPLICATION_DETAIL_COLUMNS)
         .join(Company, JobPosting.company_id == Company.id)
         .outerjoin(JobApplication, JobApplication.job_posting_id == JobPosting.id)
         .where(JobPosting.id == job_id)
@@ -348,6 +421,7 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
         company_name=company.name,
         job_url=job.job_url,
         department=job.department,
+        department_category=job.department_category,
         employment_type=job.employment_type,
         date_posted=job.date_posted,
         match_score=row.match_score,
@@ -355,6 +429,8 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
         missing_skills=job.missing_skills,
         locations=[loc.location_name for loc in job.locations],
         application_status=row.application_status,
+        application_notes=row.application_notes,
+        status_updated_at=row.application_status_updated_at,
         has_sponsor_history=company.matched_sponsor_employer_name is not None,
         job_description=job.job_description,
         ats_platform=company.ats_platform,
@@ -371,21 +447,31 @@ def update_application_status(
     if job is None:
         raise HTTPException(404, f"No job posting with id={job_id}")
 
+    fields = payload.model_fields_set
+    if "status" not in fields and "notes" not in fields:
+        raise HTTPException(422, "Send at least one of 'status' or 'notes'.")
+
     application = db.query(JobApplication).filter_by(job_posting_id=job_id).first()
 
     if application is None:
-        application = JobApplication(job_posting_id=job_id, status=payload.status, notes=payload.notes)
+        application = JobApplication(job_posting_id=job_id)
         db.add(application)
-    else:
-        application.status = payload.status
-        application.notes = payload.notes
 
-    # applied_at is set the first time status moves away from
-    # not_applied, and never overwritten afterward - it represents when
-    # the user first applied, not the most recent status change (that's
-    # status_updated_at, bumped automatically by the column's onupdate).
-    if payload.status != ApplicationStatus.NOT_APPLIED and application.applied_at is None:
-        application.applied_at = datetime.now(timezone.utc)
+    # Each field is written only when it was actually present in the
+    # request body - so a status-only change never clears an existing
+    # note, and a notes-only change never touches the status.
+    if "status" in fields and payload.status is not None:
+        application.status = payload.status
+
+        # applied_at is set the first time status moves away from
+        # not_applied, and never overwritten afterward - it represents
+        # when the user first applied, not the most recent status change
+        # (that's status_updated_at, bumped by the column's onupdate).
+        if payload.status != ApplicationStatus.NOT_APPLIED and application.applied_at is None:
+            application.applied_at = datetime.now(timezone.utc)
+
+    if "notes" in fields:
+        application.notes = payload.notes
 
     db.commit()
     db.refresh(application)

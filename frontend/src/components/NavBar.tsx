@@ -18,14 +18,14 @@ export function NavBar() {
       className="sticky top-0 z-30 border-b border-border backdrop-blur-md"
       style={{ backgroundColor: "rgba(249,248,246,.88)" }}
     >
-      <div className="mx-auto flex h-[58px] max-w-6xl items-center gap-3 px-6">
+      <div className="mx-auto flex min-h-[58px] max-w-6xl flex-wrap items-center gap-x-3 gap-y-1 px-6 py-2">
         <Link href="/dashboard" className="mr-2 flex items-center gap-2">
           <span className="grid h-[26px] w-[26px] place-items-center rounded-[7px] bg-accent shadow-[0_2px_6px_rgba(224,83,61,.35)]">
             <span className="font-mono text-sm font-bold text-white">H</span>
           </span>
           <span className="font-mono text-base font-semibold tracking-tight">HuntLoop</span>
         </Link>
-        <nav className="flex items-center gap-1">
+        <nav className="flex flex-wrap items-center gap-1">
           {NAV_ITEMS.map((item) => {
             // /jobs/[id] should still highlight the Jobs tab.
             const isActive = item.href === "/jobs" ? pathname.startsWith("/jobs") : pathname === item.href;

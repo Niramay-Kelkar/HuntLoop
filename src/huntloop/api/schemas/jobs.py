@@ -11,6 +11,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from huntloop.db_models import ApplicationStatus
 
 
+class SalaryEstimate(BaseModel):
+    """A rough estimate derived from the sponsor's median wage - never a
+    real posted salary for this specific job, hence the mandatory label."""
+
+    amount: float
+    basis: str = "Estimated from DOL wage filings for this employer, not job-specific"
+
+
 class JobSummary(BaseModel):
     """One row in GET /jobs' paginated list."""
 
@@ -20,7 +28,18 @@ class JobSummary(BaseModel):
     job_title: str
     company_name: str
     job_url: str
-    department: str | None = None
+    department: str | None = Field(
+        default=None,
+        description="The raw department string as scraped from the source ATS, kept for transparency.",
+    )
+    department_category: str | None = Field(
+        default=None,
+        description=(
+            "Canonical category the raw department is mapped onto (see "
+            "huntloop.department_categorization) - one of ~18 controlled values or 'Other'. "
+            "null when there is no raw department or it isn't categorized yet."
+        ),
+    )
     employment_type: str | None = Field(
         default=None,
         description=(
@@ -47,6 +66,21 @@ class JobSummary(BaseModel):
     application_status: ApplicationStatus = Field(
         description="Defaults to not_applied when no job_applications row exists yet."
     )
+    application_notes: str | None = Field(
+        default=None,
+        description=(
+            "Free-text notes the user has saved for this application "
+            "(job_applications.notes). null when there is no application row or no note."
+        ),
+    )
+    status_updated_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When the application row was last touched (job_applications.status_updated_at). "
+            "null when no application row exists. This is a single timestamp, not a history "
+            "of past statuses."
+        ),
+    )
     has_sponsor_history: bool = Field(
         description=(
             "Whether this job's company has a resolved DOL sponsor match "
@@ -54,6 +88,14 @@ class JobSummary(BaseModel):
             "scripts/resolve_sponsor_matches.py). A cheap presence check, not "
             "the full sponsor aggregate - see JobDetail.sponsor for that."
         )
+    )
+    salary_estimate: SalaryEstimate | None = Field(
+        default=None,
+        description=(
+            "The same employer-level DOL-wage estimate GET /jobs/{id} returns - "
+            "an estimate, never a real posted salary. null when the company has "
+            "no resolved sponsor match or no annual-wage filings."
+        ),
     )
 
 
@@ -77,23 +119,14 @@ class SponsorSummary(BaseModel):
     )
 
 
-class SalaryEstimate(BaseModel):
-    """A rough estimate derived from the sponsor's median wage - never a
-    real posted salary for this specific job, hence the mandatory label."""
-
-    amount: float
-    basis: str = "Estimated from DOL wage filings for this employer, not job-specific"
-
-
 class JobDetail(JobSummary):
     """GET /jobs/{id} - JobSummary plus the full job description, the
     company's detected ATS platform, and (if resolved) its DOL sponsor
-    summary and a derived salary estimate."""
+    summary. salary_estimate is inherited from JobSummary."""
 
     job_description: str | None = None
     ats_platform: str | None = None
     sponsor: SponsorSummary | None = None
-    salary_estimate: SalaryEstimate | None = None
 
 
 class JobListResponse(BaseModel):
@@ -106,9 +139,14 @@ class JobListResponse(BaseModel):
 
 
 class ApplicationStatusUpdate(BaseModel):
-    """PATCH /jobs/{id}/application request body."""
+    """PATCH /jobs/{id}/application request body.
 
-    status: ApplicationStatus
+    Both fields are optional individually, but at least one must be sent.
+    `notes` is only written when the key is present in the request body
+    (so a status-only update never wipes an existing note, and a
+    notes-only update never touches the status)."""
+
+    status: ApplicationStatus | None = None
     notes: str | None = None
 
 

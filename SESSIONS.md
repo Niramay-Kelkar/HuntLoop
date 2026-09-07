@@ -10435,3 +10435,537 @@ each filter individually and all five combined (`min_score` + `location`
 18-row result set). Backend suite 327 → 337 passing; frontend 15 → 21
 passing. `tsc --noEmit` shows only the pre-existing generated-types
 `PageProps`/`LayoutProps` errors, none in touched files.
+
+---
+
+## 2026-09-06 — Improve the job filter panel usability
+
+**Did:** Reorganized `frontend/src/components/JobFilters.tsx` for
+usability now that it carries six filter types (company, department,
+employment type, location, min match score, estimated-salary
+range/unspecified) plus sort. UI/UX layer only — no filter behavior,
+sentinel, `JobFiltersValue` shape, or `jobs/page.tsx` query-key/param
+wiring was touched.
+
+**Investigation (real "before" state):**
+- One flat, always-visible panel — a rounded card between the page
+  header and the results, not a sidebar, not collapsible. Top row
+  (flex-wrap): company text input + department / employment-type /
+  location / sort `<select>`s. Second row under a divider: min-match
+  range slider, est-salary min/max number inputs + "No estimate"
+  checkbox, a static DOL-estimate caption.
+- Active-filter visibility: none beyond each control showing its own
+  value — you had to scan all eight controls to know what was filtering.
+- Clear-all: existed, but as a small mono-text "Clear filters ✕" button
+  tucked bottom-right of the second row, only rendered when a filter was
+  set; easy to miss.
+- Result count: only in the page `<h1>` subtitle ("N postings · scored
+  against your active resume") above the panel — not adjacent to the
+  filters, phrased as total "postings", label unchanged when filters
+  narrowed it.
+- Selects were fixed-width with no narrow-width handling.
+
+**Built:**
+- Collapsible controls body (`useState` `expanded`, default open) with a
+  persistent header row: a "Filters" toggle carrying an active-count
+  badge, a live result count for the current filter combination (new
+  `resultCount` / `isLoading` props fed from the `jobs` query's `total`
+  / `isPending` in `page.tsx`), and a prominent single "Clear all ✕".
+- A chips row: one removable chip per active filter (`activeChips(value)`
+  helper — company / dept / type / location / min-match / est-salary
+  range as a single chip / "no estimate" as its own chip). Each chip
+  clears exactly its own field(s); `sort` is never touched.
+- `w-full sm:w-auto` on the selects and `flex-wrap` on the header/chip
+  rows so nothing overflows at narrow widths.
+
+**Verified:**
+- Live API + UI on a throwaway port against real local Postgres. Request
+  URLs byte-identical to before — e.g. applying company + a $150k salary
+  floor produced
+  `GET /jobs?company=palantir&salary_min=150000&sort=-score&limit=12&offset=0`,
+  and the panel's "320 results" matched a direct
+  `curl .../jobs?company=palantir&salary_min=150000` (`total` 320).
+  Removing the salary chip dropped only `salary_min`; "Clear all" reset
+  every field and restored the unfiltered count; collapse hid the
+  controls while keeping the header/count visible.
+- Frontend suite 21 → 27 passing (`JobFilters.test.tsx`: chip-per-filter
+  + count badge, chip click clears only that filter, salary range as one
+  chip clearing both bounds, collapse/expand, result-count readout +
+  loading placeholder; the two existing clear-button tests updated to
+  the new "Clear all" label). `tsc --noEmit` clean on touched files.
+- Chrome could not shrink its window below ~1560px, so true 390px
+  rendering was not screenshot-verified; the responsive changes are
+  flex-wrap + `w-full sm:w-auto`, consistent with the rest of the app.
+
+---
+
+## 2026-09-06 — Fix two mobile-width layout issues on `ui-ux-improvements`
+
+**Did:** Two CSS/layout-only fixes for real mobile-width problems found in
+the prior verification pass (both confirmed at a 390×844 viewport with
+Playwright against the running app + real local Postgres):
+
+- `NavBar.tsx` — the Dashboard/Jobs/Applications/Resume row did not wrap,
+  forcing horizontal page scroll on narrow viewports. The nav container
+  had a fixed `h-[58px]` and no wrap. Changed to `min-h-[58px]`,
+  `flex-wrap`, `gap-y-1`, `py-2`, and added `flex-wrap` to the inner
+  `<nav>`, so the links wrap onto a second line when they don't fit. No
+  hamburger — a simple wrap matches how the filter panel and other rows
+  already handle narrow widths.
+- `JobFilters.tsx` — `w-full sm:w-auto` was on the `<select>` elements,
+  whose wrapping `<div className="relative">` is content-sized inside the
+  `flex-wrap` row, so the selects never actually went full-width at
+  mobile. Moved `w-full sm:w-auto` to the wrapper `<div>`s and left the
+  `<select>`s as plain `w-full`. Behaviour, sentinel values, query-key
+  wiring, and desktop rendering are all unchanged.
+
+**Verified (Playwright, 390×844, real running app):**
+- Before: `document.documentElement.scrollWidth` = 507 vs `clientWidth`
+  390 on both `/dashboard` and `/jobs` (horizontal overflow). Filter
+  selects rendered at inconsistent widths (308 / 168 / 308 / 148 px).
+- After: `scrollWidth` = `clientWidth` = 390 on both pages, no horizontal
+  overflow anywhere. Nav wraps to a second line ("Resume" drops below).
+  All four filter selects render at a consistent 308 px (full width).
+  Screenshots captured for both states.
+- Desktop (1280×900) before vs after: byte-identical metrics — no
+  overflow, select widths 709 / 168 / 320 / 148 px unchanged, nav on one
+  line. Confirmed visually against a screenshot too.
+- Purely CSS/layout, no new interactive behaviour (no mobile menu
+  toggle), so no new tests were added. Full frontend suite unchanged and
+  green before and after (27 passing).
+
+---
+
+## 2026-09-07 — Make the job list scannable without opening each posting (`ui-ux-improvements`)
+
+**Before-state (Playwright, `/jobs`, both view modes, real local data):**
+- Card view showed: title, company, matched-skill chips, location, a tiny
+  dot + "Sponsors H-1B" / "No H-1B data" line, status control, posted
+  date, and the match-score ring. NOT shown: `employment_type` (fetched
+  in `JobSummary` but never rendered — so "Software Engineer, Internship"
+  roles were indistinguishable from full-time at a glance), any salary
+  estimate, department.
+- Table view showed: Match % pill (small), Role (title + company),
+  Location, a tiny "Sponsors H-1B" text, Status. NOT shown: salary
+  estimate, employment type, posted date — and a lot of empty
+  horizontal space.
+- Salary estimate was completely absent from the list API
+  (`JobSummary`) — only `GET /jobs/{id}` returned it — so neither view
+  could show it even though it's a core differentiator and the filter
+  panel already filters on it.
+
+**Changed:**
+- **API:** `JobSummary` (and so every `GET /jobs` row) now carries
+  `salary_estimate` — the *same* employer-level DOL-wage estimate
+  `GET /jobs/{id}` returns, computed from the `_salary_estimate_expr()`
+  scalar subquery that already existed for the `salary_min`/`salary_max`
+  filters (now also selected as a column). `JobDetail` inherits it
+  instead of redeclaring it.
+- **New `SponsorBadge` component** — the sponsor signal is now a real
+  green/neutral pill badge (dot + wording, with the DOL-history
+  explanation as a tooltip), shared by card and table, replacing the
+  easy-to-miss muted text.
+- **`JobCard`:** a dedicated meta block — location on its own line, then
+  a wrap-safe row of `employment_type` chip (when present) + sponsor
+  badge + `Est. ~$150k` chip (when an estimate exists; the word "Est."
+  plus the full "…not job-specific" basis tooltip carry the same
+  estimate-not-posted-salary framing the filter caption / detail page
+  use). Score ring, skills, status control, detail link, posted date all
+  unchanged.
+- **`JobTable`:** new "Est. salary" column (`~$150k` / "—", basis as
+  tooltip) with a persistent caption under the table spelling out the
+  estimate caveat; `employment_type` appended to the company line;
+  sponsor cell uses `SponsorBadge`; match pill enlarged for legibility;
+  `min-w` widened `720 → 820`.
+- Toggle, status control, detail links, pagination: untouched.
+
+**Verified (Playwright, real running app, before + after screenshots):**
+- Desktop 1280×900 and mobile 390×844, both card and table views. No
+  horizontal page overflow at any width before or after
+  (`scrollWidth == clientWidth`); the table keeps its own
+  `overflow-x-auto` internal scroll on mobile as before. Card meta row
+  wraps cleanly and stays on one line at 390 px for the real data.
+- Backend suite 336 → 337 (new: list rows expose `salary_estimate` only
+  for a resolved sponsor). Frontend suite 27 → 38 (new: `SponsorBadge`
+  both states, `JobCard` employment-type / salary-label / sponsor-badge
+  visibility, `JobTable` salary column + caption + employment-type
+  line + sponsor badge). `tsc --noEmit` clean.
+
+---
+
+## 2026-09-07 — Real empty / loading / error states across the app
+
+**Before-state findings (Playwright, real running app):**
+- **Loading:** every page already used TanStack Query `isPending` with a
+  skeleton, so no blank flash on a normal load — this part was fine and
+  was left alone.
+- **Error (API unreachable / 4xx):** genuinely broken. The default
+  TanStack Query retry behaviour never surfaced the error under this
+  React version — a failed query stayed stuck on its loading skeleton
+  indefinitely (reproduced with the API stopped, and with a job detail
+  page for an id that does not exist — skeleton still spinning after a
+  minute). When the error path *was* forced, each page dumped the raw
+  error string (including the response body / JSON) into a red box, with
+  no way to retry.
+- **Empty (zero results, not an error):** the job list had a reasonable
+  message; the applications tracker and resume section showed only a
+  bare one-liner or nothing framing "why"; the job detail page had no
+  distinct "this posting does not exist" state (it fell into the broken
+  error path above).
+
+**Changed:**
+- Query client now does not auto-retry; retrying is an explicit "Try
+  again" button. This alone fixes the stuck-skeleton-forever bug.
+- Fetch client rejects with a typed `ApiError` carrying the status and,
+  separately, the raw body — and now times out instead of hanging
+  forever. Requests can no longer wedge a view.
+- New shared `ErrorState` and `EmptyState` components, used on every
+  page instead of per-page ad-hoc treatments. `ErrorState` words a 404
+  as "Not found" and anything else as a temporary server problem with a
+  working retry; the raw body is never shown.
+- Job list, job detail, dashboard, applications tracker and resume
+  section all wired to the shared components; job detail now has a real
+  "Not found" screen with a back link; the applications tracker and
+  resume section got context-specific empty copy.
+- No change to what data is fetched or how.
+
+**Verified:** before/after screenshots at desktop (1280) and mobile
+(390×844) for the invalid-job, zero-results, and API-down scenarios;
+"Try again" recovers once the API is back. Frontend suite 38 → 44 (new:
+`ErrorState` 404-vs-server-problem + retry, `EmptyState`, `ApiError`
+shape). Production build and `tsc --noEmit` clean.
+
+---
+
+## 2026-09-07 — Application-tracker depth: notes, "status changed", tracked-only fetch
+
+**Before-state findings (real schema/routes + Playwright):**
+- **`job_applications.notes`: existed end to end but was invisible.** The
+  column has been there since the table was created; `PATCH
+  /jobs/{id}/application` already accepted a `notes` field and wrote it;
+  `ApplicationStatusResponse` already returned it; the TS types even
+  declared it. But no component ever sent or displayed a note, and
+  `GET /jobs` / `JobSummary` didn't expose it at all - so the kanban and
+  list views had no way to show one. Worse, the PATCH handler
+  *unconditionally* overwrote `notes` with the request body's value, and
+  the only caller (`StatusControl`) sends `{status}` only - so any note
+  would have been wiped on the next status change.
+- **Status history: genuinely does not exist, and one timestamp does.**
+  `job_applications` is strictly one row per posting (`job_posting_id`
+  unique), upserted in place. `status` and `notes` are overwritten;
+  `status_updated_at` is a single `onupdate=now()` timestamp. There is no
+  record of previous statuses or when each change happened.
+- **The tracker was effectively unusable at real data volume.** The
+  applications page fetched the *entire* jobs table 100 rows at a time to
+  find the few tracked ones - with ~99k postings that's ~990 sequential
+  requests; the page sat on its loading skeleton for minutes and never
+  finished.
+
+**Changed:**
+- **Notes are now first-class.** `GET /jobs` and `GET /jobs/{id}` expose
+  `application_notes` and `status_updated_at`. The list view is now a
+  stack of cards each with an inline auto-saving note field
+  (`NotesEditor`, save-on-blur, only when changed - not a rich-text
+  editor); the job detail page has the same field; the board shows a
+  small "has a note" mark. All wired through a new
+  `useApplicationNotesMutation` that mirrors the existing status
+  mutation's optimistic-update / rollback / toast pattern and only ever
+  sends `notes`.
+- **PATCH is now a real partial update** - each of `status` / `notes` is
+  written only when present in the request body, so a status change
+  never clears a note and vice versa. At least one field is required.
+- **"Status changed 3d ago"** is surfaced from the existing
+  `status_updated_at` on both the list cards and the job detail page - a
+  light touch, no schema change.
+- **`GET /jobs?tracked=true`** returns only actively-tracked postings;
+  the tracker uses it and now loads instantly instead of walking the
+  whole table.
+- **Search within your applications** - a client-side filter box over the
+  (now small) tracked set, applies to both board and list.
+- Drag-and-drop, the status mutation, and the board/list toggle are
+  unchanged.
+
+**Deliberately NOT built - flagged as a separate follow-up:**
+- **Multi-event status history / activity timeline.** This needs a new
+  append-only table (a row per status change with its own timestamp, and
+  ideally per-note history), a migration, write-path changes in the PATCH
+  handler to insert history rows, and a new read endpoint + timeline UI.
+  That's a real feature with its own schema decision, out of scope here.
+  What exists now (the single `status_updated_at`, surfaced as "changed
+  Nd ago") is the useful subset of that idea that needed no schema
+  change.
+
+**Verified:** Playwright before/after (tracker infinite-load -> instant;
+notes add/edit/persist across reload; note survives a status change;
+board note mark; search filter) at desktop and 390-wide. Backend suite
+and frontend suite both green (3 pre-existing `test_backfill_lock`
+failures, unrelated - the daily backfill cron holds the advisory lock).
+
+---
+
+## 2026-09-07 — Job-list sort options: drop "worst match", add date and salary
+
+**Before-state (real implementation):**
+- Backend `GET /jobs?sort=` accepted exactly two values: `-score`
+  (match score descending, the default) and `score` (match score
+  *ascending*). Anything else -> HTTP 400.
+- `score` / "worst match first" was fully wired and selectable: the
+  frontend `JobFilters.tsx` sort `<select>` offered exactly
+  **"Sort: Best match"** (`-score`) and **"Sort: Worst match"**
+  (`score`), and the backend really did order the list worst-fit-first
+  (confirmed against live data - top rows had negative cosine
+  similarity).
+- No date or salary sort existed at all.
+- Default: `-score` (best match first).
+
+**Changed:**
+- **Removed "Worst match" (`score`, ascending).** Deliberately kept
+  nothing ascending: showing your *poorest* resume matches first has no
+  real workflow behind it, and an oldest-posting-first option is
+  speculative enough to leave out for now. `sort=score` now returns 400
+  like any other unknown value.
+- **Added "Most recent" (`-date`)** - `date_posted` descending.
+- **Added "Highest salary" (`-salary`)** - the estimated-salary scalar
+  subquery descending. NULL handling matches the rest of the salary
+  feature: postings whose company has no resolvable estimate sort
+  **last**, never first or interleaved (the salary *filter* excludes
+  them entirely when a bound is set; the sort keeps them visible but at
+  the bottom).
+- Every option is now descending, NULLs last, with a stable
+  `id`-ascending tiebreaker.
+- Frontend labels: "Sort: Best match" / "Sort: Most recent" /
+  "Sort: Highest salary". Default unchanged (`-score`). All other
+  filter/sort-combination behavior, and "clear filters preserves sort",
+  untouched.
+
+**Verified:** a real API call per remaining option confirming the rows
+are genuinely ordered (score monotonic non-increasing; dates
+descending with the one null-date row last; salary descending with
+no-estimate rows all at the tail), plus the removed `score` value now
+400s. Also driven end-to-end in the browser (each option refetches and
+visibly re-orders the card list). Backend and frontend suites green
+(the 3 pre-existing `test_backfill_lock` failures are unrelated - the
+daily backfill cron holds the advisory lock).
+
+---
+
+## 2026-09-07 — Canonical department categorization (`ui-ux-improvements`)
+
+**Investigation (real data, before any code):**
+- `job_postings.department` is free text from each ATS source. Real
+  live numbers: 99,043 rows, 55,621 with a non-NULL department (56.2%),
+  43,422 NULL (43.8%, almost all `workday_api` which exposes no
+  per-posting department), **0 empty-string**. **4,821 distinct
+  non-NULL values.**
+- Distribution: only 4 values appear on ≥1,000 postings ("Engineering"
+  3,156, "Sales" 2,642, "Real estate" 2,013, "Testing & Laboratory"
+  1,681); 71 on 100-999; 688 on 10-99; **2,349 on 2-9 and 1,709
+  singletons.** By source: greenhouse 93.6% populated / 4,113 distinct,
+  workday 0%, smartrecruiters 52.1%, icims 92.4%, lever 89.4%, ashby
+  98.2%, gem 99.6%.
+- Much cleaner than `location` (~15.6k distinct there) but still messy:
+  clean heads ("Engineering", "Finance", "IT"), company-specific tails
+  ("R&D - Backend Infra", "SW Eng - Core Identity-670", "20213 S&M -
+  Sales - Square Outside"), ~897 values carrying a 3+-digit
+  requisition code, non-English labels ("Steuerberatung"),
+  industry-vertical labels naming no function ("Real estate", "Energy
+  and natural resources" — both Turner & Townsend construction-
+  consultancy verticals), and genuinely unclassifiable values
+  ("Reconditioning", "Woven City", "zz-Evergreen Requisition", "Ω
+  ARCHIVE - Do not remove").
+- **Feasibility:** a keyword rule pass covers **79.4% of postings** /
+  3,008 of 4,760 distinct values outright. Cost is bounded by the
+  distinct-value count (~4.8k), NOT the row count (~99k) — each string
+  is resolved once. So rules + an LLM pass over the ~1,750 residual
+  distinct values (≈44 batched calls) is cheap and sufficient; no
+  per-row LLM work.
+
+**Taxonomy (18 + "Other"), chosen from the real data — this is not one
+tech company's data, it spans ~700 employers incl. hospitals,
+universities, manufacturers, construction consultancies:** Engineering,
+Data & Analytics, Product, Design, IT (internal/corporate tech, distinct
+from product engineering), Sales, Marketing, Customer Support,
+Operations (incl. admin/logistics/supply-chain/biz-ops), Finance &
+Accounting, Legal & Compliance, People & HR, Healthcare & Clinical,
+Research & Science, Manufacturing & Production, Construction & Skilled
+Trades, Consulting & Professional Services, Executive & General
+Management, Other. "Other" = a real department string that names no
+function we categorize; it is NOT the same as NULL (NULL = no raw
+department at all).
+
+**Implemented:**
+- Migration `a1b2c3d4e5f6` adds nullable `job_postings.department_category
+  VARCHAR(50)`. The raw `department` string is kept **unchanged** —
+  this is an additive layer.
+- `huntloop.department_categorization`: `CANONICAL_CATEGORIES`,
+  `rule_based_category(raw)` (pure, deterministic, ordered keyword regex
+  rules, first-match-wins with specific-before-broad disambiguation —
+  e.g. "Sales Engineer" → Sales, "Data Engineering" → Data & Analytics,
+  "People Operations" → People & HR), and `categorize_values()` (rules
+  first, then an LLM pass over the residual reusing the
+  skills-matching provider chain: Groq gpt-oss-120b → Groq gpt-oss-20b →
+  Gemini). A value the LLM genuinely saw but couldn't place → "Other";
+  a value no provider could answer (quota spent) is left NULL for a
+  later run, exactly like the skills-matching backlog drains over days.
+- `huntloop.pipelines`: new postings get a rule-based
+  `department_category` at insert time (and on a repost that backfills a
+  previously-NULL raw department), same auto-compute-at-insert pattern
+  as `is_relevant`/`embedding`/`employment_type`.
+- `scripts/backfill_department_category.py`: rule + LLM pass over
+  distinct uncategorized values, one VALUES-joined UPDATE per 500-value
+  chunk (a single seq scan, not one per value). Wired as **stage 3/3**
+  of `scripts/run_orchestrator_cron.sh` (runs via `.venv` — no torch,
+  HTTP only), so the LLM tail keeps draining and new data never
+  silently regresses to permanently-NULL.
+- API: `GET /jobs/departments` now returns the canonical **categories**
+  present in the data (most-common-first), not the ~4,800 raw strings;
+  `GET /jobs?department=` filters on `department_category` (`__unspecified__`
+  = no category). `GET /jobs` / `GET /jobs/{id}` expose both `department`
+  (raw, for transparency) and `department_category`.
+- Frontend: the department `<select>` shows the canonical categories;
+  the job detail sidebar shows the category with the raw string beneath
+  it when they differ.
+
+**Real before → after coverage (live query):** `department_category`
+populated **0 → 45,628** of the 55,621 non-NULL-department postings
+(**82.0%**). Rule pass wrote 43,726; the LLM pass ~1,900 more
+distinct-value mappings before Groq's *and* Gemini's daily free-tier
+quotas (already spent by the day's scheduled skills-matching run) were
+exhausted. The remaining ~10,100 postings (~1,650 distinct values) stay
+NULL and drain via stage 3 of the daily orchestrator over the next runs
+— same model as skills-matching. All 18 categories are populated;
+Engineering (9,779) and Sales (7,081) lead, Healthcare & Clinical
+(3,829) and Construction & Skilled Trades (3,505) are large because the
+company set includes many hospitals and Turner & Townsend.
+
+**Verified:** rule mapping spot-checked against real values across the
+whole frequency spectrum (clean head, messy tail, disambiguation,
+unclassifiable → None); LLM pass confirmed working on real residual
+values ("Account Development Representative" → Sales, "Algorithms &
+Data" → Data & Analytics, "Brain Interfaces Hardware" → Engineering);
+filter endpoint returns categories and filters correctly. Backend suite
+409 passed (was 345), frontend 51 passed (was 50). The 3 pre-existing
+`test_backfill_lock` failures are unrelated (daily cron holds the
+advisory lock) — not seen this run because that lock was free.
+
+**Branch note:** committed to `ui-ux-improvements` per the task's
+default-to-the-branch instruction. This is schema/backend/pipeline work
+on a frontend-focused branch — it would sit more naturally in its own
+PR, but there's no technical blocker to stacking it here and the
+instruction was explicit.
+
+**Did not touch:** the raw `department` values, Workday's
+department-NULL-by-design status, skills-matching, embeddings,
+`huntloop-claude-code-prompts.md`.
+
+---
+
+## 2026-09-07 — Canonical location normalization (`ui-ux-improvements`)
+
+**Investigation (live data, before any code):**
+- `job_locations`: 143,716 rows, **15,622 distinct `location_name`**,
+  0 NULL; 99,043 `job_postings`, ~98.9k with at least one location row.
+  Earlier-in-session estimate (~15,580 / ~142,669 / ~29,572) re-confirmed
+  as still roughly accurate, not stale.
+- **Joined multi-location strings: ~1,354 distinct** (`;` 2,749 rows,
+  ` / ` 279, ` • ` 99, `|` 1,151, ` and `/` & ` ~309) — a single
+  `location_name` holding several places. Examples: "San Francisco, CA •
+  New York, NY • United States" (91), "Livingston, NJ / New York, NY /
+  Sunnyvale, CA / Bellevue, WA" (37).
+- Frequency: very long tail — top 50 distinct values = 19.8% of rows,
+  top 500 = 54%, top 1,000 = 66%, top 5,000 = 91%.
+- Sampling across the spectrum: clean heads ("San Francisco" 2,249,
+  "New York, NY" 1,409, "London" 825); dozens of variants per real
+  city ("San Francisco" / "San Francisco, CA" / "San Francisco,
+  California" / "San Francisco, California, United States" / "San
+  Francisco Bay Area" / "SF" — all one place); reversed order
+  ("California - San Francisco", "US > Arizona > Phoenix"); city +
+  campus/office noise ("Bengaluru Millenia", "San Francisco HQ"); street
+  addresses ("2228 Miller Park Way, Milwaukee, WI 53219"); 663 pure
+  "Remote", 12,173 rows mentioning remote somewhere; genuine garbage
+  ("Software Engineering", "HQ", "Hybrid", "N/A", internal building
+  codes like "RENSS - TEMPEL LN").
+
+**Approach chosen — hierarchical, rules + offline gazetteer, NO LLM, NO
+network geocoding:**
+- *Hierarchical (city / region / country + is_remote), not flat.* Place
+  names have genuine natural hierarchy (unlike the department
+  categories), and hierarchy is what lets "San Francisco, CA, United
+  States" collapse every SF variant while still leaving room for
+  region/country rollups later. Columns: `job_locations.location_{city,
+  region,country,is_remote,canonical}` (nullable, migration
+  `b2c3d4e5f6a7`, additive — `location_name` untouched).
+- *Rules + `geonamescache` (offline gazetteer: ~34k cities pop > 15k,
+  50 US states + DC, ~250 countries).* A prototype parser (component
+  split on `,`/` - `/` > `/`_`; country-alias then US-state/CA-province
+  then gazetteer city lookup; reversed-order detection; trailing-noise
+  and street/zip stripping; single-bare-token prefers a populous
+  same-named city over the state of the same name) hit **95.7% of rows /
+  92.7% of distinct values** with pure rules. That's high enough that an
+  LLM pass (department needed one for its residual ~1,750 values) is
+  unnecessary spend here. A network geocoder (Nominatim) was considered
+  and rejected: it adds a ToS-constrained, rate-limited (1 req/s → hours
+  for 15.6k values) dependency, still needs the same canonicalization
+  layer on top, and buys little over the offline gazetteer for this
+  "group the same city together" problem. `region` is a 2-letter US /
+  CA code only — other countries' 2-letter admin codes collide with US
+  state abbreviations ("Chennai, TN" is Tamil Nadu, not Tennessee) so
+  they're left unset rather than mis-parsed; country still resolves.
+- *Joined multi-location strings ARE split into multiple rows.* The only
+  way "San Francisco" returns a "SF; NYC" posting. Pipeline and backfill
+  keep the first piece's row with its original raw `location_name` and
+  add a sibling row per further place.
+
+**Implemented:** `huntloop.location_normalization`
+(`normalize_location()` → `NormalizedLocation`, `split_location_string()`);
+`geonamescache` added to `requirements.txt`; migration `b2c3d4e5f6a7`;
+`JobDataPipeline` normalizes + splits at insert (rules only, no network
+on the hot path — same auto-compute-at-insert pattern as
+is_relevant/embedding/employment_type/department_category);
+`scripts/backfill_location_normalization.py` (plain `.venv`, resumable,
+idempotent on already-split siblings); `GET /jobs/locations` now returns
+canonical groups (≥100 distinct postings, unresolved tail excluded) and
+`GET /jobs?location=` does an exact match on `location_canonical`;
+frontend `location` `<select>` picks up the canonical labels with no
+component change (the comments were updated).
+
+**Real before → after (live query):** `location_canonical` 0 → **all
+150,283 rows populated** (raw `location_name` also backfilled where a
+joined string was split into siblings). **97,252 / 98,912 postings with
+any location (98.3%) resolve to a real canonical group**; row-level
+~95.8% resolved, **~4.2% (6,373 rows) stay unresolved** — internal
+building/site codes, bare "Hybrid"/"HQ", some non-ASCII European city
+names ("München", "Nürnberg") — these keep the cleaned raw string as
+`location_canonical` with NULL city/country and are excluded from the
+`/jobs/locations` dropdown. Honestly messier data than department: the
+long tail here is real and won't fully close without diminishing-return
+work (Unicode folding, a bigger gazetteer). Top canonical groups: "San
+Francisco, CA, United States" (~7.9k rows), "Remote - United States"
+(~6.2k), "New York City, NY, United States" (~6.2k), "Bengaluru, India"
+(~3.6k), "London, United Kingdom" (~2.9k).
+
+**Verified:** normalizer spot-checked across the spectrum (all SF
+variants → one label; reversed order; multi-loc split; "Chennai, TN,
+India" → country India, region unset; "Hybrid"/"HQ"/"Software
+Engineering" → unresolved but non-empty canonical). Live API: `?location=
+"San Francisco, CA, United States"` returns 6,255 postings covering the
+"San Francisco"/"San Francisco, CA" raw variants; `?location=Remote -
+United States` 4,330; `?location=__unspecified__` 131. Backend suite
+446 passed (was 409); frontend 52 passed (was 51). No advisory lock
+held and no scrape/backfill process running at start (`ps aux` +
+`pg_locks` checked).
+
+**Data-integrity note:** the first backfill run used a pre-fix normalizer
+and appended some sibling rows; recovered by deleting novel-name
+siblings + exact `(job_id, location_name)` dupes and re-running the
+now-idempotent script. 15,617 / 15,622 original distinct `location_name`
+values preserved; the 5 lost were degenerate (two empty strings, three
+malformed trailing-punctuation addresses), ~10 rows total.
+
+**Branch note:** committed to `ui-ux-improvements`, same open PR, per the
+task. The next change (job-description readability) gets its own
+branch/PR.
+
+**Did not touch:** raw `location_name` semantics beyond the split,
+lat-long/radius search (still out of scope), skills-matching, embeddings,
+`huntloop-claude-code-prompts.md`.

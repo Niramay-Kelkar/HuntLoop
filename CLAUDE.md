@@ -41,15 +41,21 @@ conventions" and SESSIONS.md for the real current state).
   /resumes/{id}/activate`.**
   **`GET /jobs` gained a `department` query param, and `GET
   /jobs/departments` (added 2026-09-02, see SESSIONS.md's "Add a
-  department filter to job search") was added alongside it — exact
-  match against `JobPosting.department`, or the sentinel
-  `UNSPECIFIED_DEPARTMENT = "__unspecified__"` to filter to
-  `department IS NULL`. Leaving `department` unset returns postings
-  regardless of department, including NULL ones, same as before this
-  change — the filter is additive/optional, never silently
-  exclusionary, since `department` is NULL for ~44% of postings
-  (100% of Workday's, by source-data design — see the department-NULL
-  entries above) and those must stay visible by default.
+  department filter to job search") was added alongside it. **As of
+  2026-09-07 (see SESSIONS.md "Canonical department categorization")
+  both operate on the canonical `department_category` column, NOT the
+  raw `department` free text:** `GET /jobs/departments` returns the ~18
+  canonical categories present in the data (most-common-first), and
+  `GET /jobs?department=` matches `JobPosting.department_category`
+  exactly, or `UNSPECIFIED_DEPARTMENT = "__unspecified__"` to filter to
+  rows with no category (no raw department, or not yet categorized).
+  Leaving `department` unset returns postings regardless of category,
+  including uncategorized ones — the filter is additive/optional, never
+  silently exclusionary, since `department`/`department_category` is
+  NULL for a large share of postings (100% of Workday's, by source-data
+  design) and those must stay visible by default. The raw `department`
+  string is still returned per-posting on `GET /jobs` and `GET
+  /jobs/{id}` for transparency.
   `/jobs/departments` is registered before `/jobs/{job_id}` in the
   router file — registering it after would let `{job_id}`'s int-typed
   path param intercept `/jobs/departments` and 422 before this handler
@@ -68,18 +74,46 @@ conventions" and SESSIONS.md for the real current state).
   **`GET /jobs` also gained `location`, `salary_min`/`salary_max`, and
   `salary_unspecified` params, plus `GET /jobs/locations` (added
   2026-09-06, see SESSIONS.md's "Add match-score, salary-estimate, and
-  location filters" entry).** `location`: case-insensitive **substring**
-  match against `job_locations.location_name` (EXISTS subquery), or the
-  `__unspecified__` sentinel for postings with no `job_locations` row.
-  Substring, not exact, because `location_name` is very messy free text
-  (~15.6k distinct values; "San Francisco" vs "San Francisco, CA" vs
-  "San Francisco, California, United States"; many rows are one joined
-  multi-location string with `;`/` / `/` • ` separators) — so "San
-  Francisco" also matches "San Francisco, CA". `GET /jobs/locations`
-  only surfaces values on ≥ `_LOCATION_MIN_POSTINGS` (100) postings
-  (~233), most-frequent first — a usable dropdown, not the 15.6k
-  distinct set. **Location-radius/geocoding/"near me" search stays out
-  of scope**, same as every prior step. `salary_min`/`salary_max` bound
+  location filters" entry).** **As of 2026-09-07 (see SESSIONS.md
+  "Canonical location normalization") `location` matches the CANONICAL
+  location grouping, not raw substring:** `GET /jobs?location=` is an
+  EXACT match on `job_locations.location_canonical` (EXISTS subquery),
+  or `UNSPECIFIED_LOCATION = "__unspecified__"` for postings with no
+  `job_locations` row; `GET /jobs/locations` returns the canonical
+  labels present on ≥ `_LOCATION_MIN_POSTINGS` (100) distinct postings,
+  most-frequent first — a clean grouped dropdown ("San Francisco, CA,
+  United States" covers every "San Francisco" / "San Francisco, CA" /
+  "SF Bay Area" variant; "Remote - United States"; "London, United
+  Kingdom"), with the unresolved long-tail excluded. The raw
+  `location_name`(s) are still returned per-posting on `GET /jobs` and
+  `GET /jobs/{id}` for transparency.
+  Normalization is `huntloop.location_normalization` — rules + an
+  OFFLINE gazetteer (`geonamescache`: ~34k cities pop > 15k, US states,
+  ~250 countries), **no network geocoding, no LLM**: place names resolve
+  cleanly against a gazetteer where department strings needed an LLM
+  pass. It parses "City, Region, Country" (and reversed / ` - ` / ` > `
+  / `_` variants, trailing office/campus noise, street/zip stripping)
+  into `job_locations.location_{city,region,country,is_remote,canonical}`
+  (nullable, migration `b2c3d4e5f6a7` — additive, `location_name`
+  untouched). `region` is a 2-letter US-state / CA-province code only
+  (other countries' 2-letter admin codes collide with US state
+  abbreviations — "Chennai, TN" — so they're left unset). **Joined
+  multi-location strings ARE split into multiple `job_locations` rows**
+  (~1.3k distinct joined strings): the pipeline / backfill keep the
+  first piece's row with its original raw `location_name` and add a
+  sibling row per further place, so a "SF; NYC" posting is returned by
+  both the "San Francisco" and the "New York City" filter.
+  Auto-computed at insert by `JobDataPipeline` (rules + gazetteer only,
+  no network on the hot path); `scripts/backfill_location_normalization.py`
+  (plain `.venv`, idempotent/resumable) backfilled existing rows.
+  **Real coverage: ~98.3% of postings with any location resolve to a
+  canonical group; ~4.2% of rows stay unresolved** (internal building
+  codes, "Hybrid"/"HQ", some non-ASCII European city names) — those
+  keep the cleaned raw string as `location_canonical` and NULL
+  city/country, and are filtered out of the `/jobs/locations` dropdown.
+  **Location-radius/geocoding/"near me" (lat-long distance) search
+  stays out of scope**, same as every prior step — this is text
+  canonicalization only. `salary_min`/`salary_max` bound
   a correlated median-`'Year'`-wage scalar subquery
   (`_salary_estimate_expr()`, the same employer-level DOL-filing
   estimate `GET /jobs/{id}` exposes as `salary_estimate.amount` — never
@@ -189,13 +223,12 @@ conventions" and SESSIONS.md for the real current state).
   needed).
   **`JobFilters.tsx` gained a department `<select>`, added 2026-09-02
   (see SESSIONS.md) — populated via its own `useQuery` against the new
-  `GET /jobs/departments`, real distinct values only, never a hardcoded
-  list.** Options: "All departments" (unset — no filter, matches
-  `frontend/src/app/jobs/page.tsx`'s existing filter-state/query-key
-  wiring for `company`/`min_score`), each real department value, and
-  "Not specified" (sends `UNSPECIFIED_DEPARTMENT` from
-  `frontend/src/types/api.ts`, filters to NULL-department postings
-  only). No URL query-param sync for any filter, department included —
+  `GET /jobs/departments`.** As of 2026-09-07 the options are the
+  canonical department CATEGORIES (see the `department_category` bullet
+  above), not the ~4,800 raw strings: "All departments" (unset), each
+  canonical category actually present in the data, and "Not specified"
+  (sends `UNSPECIFIED_DEPARTMENT` from `frontend/src/types/api.ts`,
+  filters to postings with no category). No URL query-param sync for any filter, department included —
   matches the existing `company`/`min_score` pattern, not a gap
   introduced here.
   **`JobFilters.tsx` gained a matching `employment_type` `<select>`,
@@ -208,7 +241,9 @@ conventions" and SESSIONS.md for the real current state).
   page.tsx`'s query key/params the same way `department` already was.**
   **`JobFilters.tsx` gained a `location` `<select>` (same shape as the
   department/employment-type selects, populated from `GET
-  /jobs/locations`, plus "Not specified" → `UNSPECIFIED_LOCATION`), an
+  /jobs/locations` — as of 2026-09-07 these are the canonical location
+  groups, not raw substrings; see the `location_canonical` bullet above
+  — plus "Not specified" → `UNSPECIFIED_LOCATION`), an
   estimated-salary min/max number-input pair with a "No estimate"
   checkbox (→ `salary_unspecified`, which disables the range inputs),
   and a visible caption stating the salary figure is an employer-level
@@ -218,6 +253,28 @@ conventions" and SESSIONS.md for the real current state).
   `salaryMax`, `salaryUnspecified`, threaded through `jobs/page.tsx`'s
   query key/params like `department` already was. The match-score
   slider (`minScore` → `min_score`) already existed.**
+  **`JobFilters.tsx` was reorganized for usability 2026-09-06 (see
+  SESSIONS.md's "Improve the job filter panel usability" entry) — a
+  UI/UX-only change: no filter's behavior, sentinel values, or the
+  `JobFiltersValue` shape / `jobs/page.tsx` query-key/param wiring
+  changed at all (verified against the real API — request URLs are
+  byte-identical, e.g. `?company=palantir&salary_min=150000&sort=-score&limit=12&offset=0`).
+  Before: a flat always-visible two-row panel of ~8 controls with no
+  summary of what was active (you scanned every control) and a small
+  easy-to-miss "Clear filters ✕" text button as the only affordance;
+  the result count lived only in the page `<h1>` subtitle above the
+  panel. After: the controls sit in a collapsible body (`useState`
+  `expanded`, default open); a persistent header row shows a "Filters"
+  toggle with an active-count badge, the live result count for the
+  current combination (`resultCount`/`isLoading` props fed from the
+  `jobs` query's `total`/`isPending` in `page.tsx`), and a single
+  "Clear all ✕" button; and a chips row renders one removable chip per
+  active filter (`activeChips(value)` — company / dept / type / location
+  / min-match / est-salary-range-as-one-chip / no-estimate), each
+  clearing exactly its own field(s) and never `sort`. Selects went
+  `w-full sm:w-auto` so they don't overflow at narrow widths; header and
+  chip rows `flex-wrap`. `EMPTY_FILTERS` and "clear preserves sort" are
+  unchanged.**
 - **Frontend test suite: Vitest + React Testing Library, added
   2026-09-04 (see SESSIONS.md's "Frontend test suite (Vitest + RTL) + CI
   wiring" entry) — the frontend had zero test tooling before this.**
@@ -235,7 +292,7 @@ conventions" and SESSIONS.md for the real current state).
   (`frontend/src/lib/api.test.ts`); `useApplicationStatusMutation`'s
   optimistic-update/rollback cache behavior
   (`frontend/src/hooks/useApplicationStatus.test.tsx`); and
-  `JobFilters`' slider/sentinel/clear-button logic
+  `JobFilters`' slider/sentinel/clear-all/active-chip/collapse/result-count logic
   (`frontend/src/components/JobFilters.test.tsx`). **Not yet covered,
   deliberately**: every page component, `JobCard`/`JobTable`/
   `KanbanBoard`/`ApplicationsList`/`ScoreIndicator`/`SkillChips`/
@@ -1406,7 +1463,15 @@ conventions" and SESSIONS.md for the real current state).
   so this can never be mistaken for a real posted salary). `GET /jobs`
   list rows gained one lightweight boolean, `has_sponsor_history`
   (`Company.matched_sponsor_employer_name is not None`, added to the
-  existing join — no per-row aggregate query, for performance). The
+  existing join — no per-row aggregate query, for performance).
+  **`JobSummary` rows also carry `salary_estimate` (`{amount, basis}`,
+  same shape/meaning as `GET /jobs/{id}`'s) as of 2026-09-07 (see
+  SESSIONS.md's "Make the job list scannable…" entry) — it reuses the
+  `_salary_estimate_expr()` scalar subquery already built for the
+  `salary_min`/`salary_max` filters, now also selected as a column;
+  `JobDetail` inherits it rather than redeclaring it. The `JobCard` /
+  `JobTable` list views surface it (labeled "Est." + basis tooltip),
+  alongside `employment_type` and a shared `SponsorBadge` pill.** The
   frontend was NOT touched in this step — wiring this real data into the
   job detail page's sponsor sidebar (currently omitted, per the reskin
   step's known display gap) was the deliberately deferred next step.
@@ -2096,6 +2161,62 @@ conventions" and SESSIONS.md for the real current state).
     no manual step — the real end-to-end confirmation. Distinct stored
     values: Full-time 53,438 · Other 5,580 · Part-time 4,501 · Contract
     2,510 · Internship 605.
+- **`job_postings.department_category` added end-to-end 2026-09-07 (see
+  SESSIONS.md "Canonical department categorization") — an ADDITIVE
+  canonical-category layer over the raw free-text `department`; the raw
+  value is kept unchanged.** Investigation of the real live data: 4,821
+  distinct non-NULL `department` values across 55,621 postings (43.8%
+  of rows NULL, ~all `workday_api` by source design; 0 empty-string) —
+  far cleaner than `location` (~15.6k distinct) but still messy (clean
+  heads, company-specific tails with requisition codes, non-English
+  labels, industry-vertical labels naming no function). **Taxonomy: 18
+  canonical categories + "Other"** (Engineering, Data & Analytics,
+  Product, Design, IT, Sales, Marketing, Customer Support, Operations,
+  Finance & Accounting, Legal & Compliance, People & HR, Healthcare &
+  Clinical, Research & Science, Manufacturing & Production, Construction
+  & Skilled Trades, Consulting & Professional Services, Executive &
+  General Management, Other) — deliberately broader than a generic
+  tech-company list because the ~700-employer set spans hospitals,
+  universities, manufacturers, and construction consultancies. "Other"
+  = a real department string naming no function we categorize; NOT the
+  same as NULL (no raw department at all).
+  `huntloop.department_categorization`: `rule_based_category(raw)` is
+  pure/deterministic (ordered keyword regex, first-match-wins,
+  specific-before-broad — "Sales Engineer" → Sales, "Data Engineering"
+  → Data & Analytics); `categorize_values()` runs rules first then an
+  LLM pass over the residual distinct values reusing the
+  **skills-matching provider chain** (Groq gpt-oss-120b → gpt-oss-20b →
+  Gemini). Cost is bounded by the ~4.8k DISTINCT values, not the ~99k
+  rows. A value the LLM saw but couldn't place → "Other"; a value no
+  provider could answer (daily quota spent) is left NULL for a later
+  run — same drain-over-days model as skills-matching. Migration
+  `a1b2c3d4e5f6` (nullable `VARCHAR(50)`).
+  **Auto-computed at insert** by `JobDataPipeline` (rule-based only on
+  the hot path — no network), and on a repost that backfills a
+  previously-NULL raw department; same pattern as
+  `is_relevant`/`embedding`/`employment_type`.
+  `scripts/backfill_department_category.py` (rule + LLM, one
+  VALUES-joined UPDATE per 500-value chunk) is wired as **stage 3/3 of
+  `scripts/run_orchestrator_cron.sh`** (runs via `.venv`, HTTP only, no
+  torch), so the LLM tail keeps draining and new data never silently
+  regresses to permanently-NULL.
+  **API:** `GET /jobs/departments` now returns the canonical CATEGORIES
+  present in the data (most-common-first), not the ~4,800 raw strings;
+  `GET /jobs?department=` filters on `department_category`
+  (`__unspecified__` = no category); `GET /jobs` / `GET /jobs/{id}`
+  expose both `department` (raw, for transparency) and
+  `department_category`. **Frontend:** the department `<select>` shows
+  the canonical categories; the job detail sidebar shows the category
+  with the raw string beneath it when they differ.
+  **Real before → after (live query):** `department_category` 0 →
+  45,628 / 55,621 non-NULL-department postings (**82.0%**) — rules
+  wrote 43,726, the LLM pass ~1,900 more distinct-value mappings before
+  Groq's and Gemini's free-tier daily quotas (already spent by the
+  day's scheduled skills-matching run) were exhausted; the remaining
+  ~10,100 postings drain via stage 3 over subsequent daily runs. All 18
+  categories populated; Engineering (9,779) and Sales (7,081) lead,
+  Healthcare & Clinical (3,829) and Construction & Skilled Trades
+  (3,505) large due to the hospital/consultancy employers.
 - **iCIMS spider BUILT + onboarded + first scrape 2026-09-01 (see
   SESSIONS.md "Build the iCIMS spider + gated onboarding + first
   scrape"). Recommendation was GO — but a step grayer on ToS/risk than

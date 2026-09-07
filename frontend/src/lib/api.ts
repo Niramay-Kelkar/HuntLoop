@@ -22,14 +22,49 @@ import type {
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
+// How long any single request is allowed to hang before we give up and
+// surface an error, rather than leaving a view stuck on its loading
+// skeleton indefinitely when the API is unreachable or wedged.
+const REQUEST_TIMEOUT_MS = 20_000;
+const UPLOAD_TIMEOUT_MS = 60_000;
+
+/**
+ * Every failed API call rejects with one of these, so UI can tell a
+ * "this resource doesn't exist" (404) apart from "the server is down or
+ * erroring" (5xx / status null) and word the message accordingly.
+ * `message` is kept short and human-ish; the raw response body lives in
+ * `detail` for logging, never for dumping onto the screen.
+ */
+export class ApiError extends Error {
+  readonly status: number | null;
+  readonly detail: string;
+
+  constructor(message: string, status: number | null, detail = "") {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.detail = detail;
+  }
+}
+
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}${path}`, {
+      headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      ...init,
+    });
+  } catch {
+    throw new ApiError("Could not reach the server.", null);
+  }
   if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`${init?.method ?? "GET"} ${path} failed: ${response.status} ${body}`);
+    const body = await response.text().catch(() => "");
+    throw new ApiError(
+      `${init?.method ?? "GET"} ${path} failed with ${response.status}`,
+      response.status,
+      body,
+    );
   }
   return response.json() as Promise<T>;
 }
@@ -50,7 +85,14 @@ export interface ListJobsParams {
   salary_min?: number;
   salary_max?: number;
   salary_unspecified?: boolean;
-  sort?: "score" | "-score";
+  // When true, only postings the user has actively tracked (a
+  // job_applications row with status other than not_applied) - the
+  // applications tracker's data source.
+  tracked?: boolean;
+  // All descending. "-score" = best resume match first (default),
+  // "-date" = most recently posted first, "-salary" = highest estimated
+  // salary first. Each sorts postings missing that value last.
+  sort?: "-score" | "-date" | "-salary";
   limit?: number;
   offset?: number;
 }
@@ -77,11 +119,12 @@ export function getEmploymentTypes(): Promise<string[]> {
   return apiFetch<string[]>("/jobs/employment-types");
 }
 
-// The real, distinct location values in common use (GET /jobs/locations)
-// - same reasoning/pattern as getDepartments(). The backend caps this to
-// locations appearing on many postings (job_locations.location_name is
-// very messy free text), and the `location` filter matches as a
-// substring, so these are options, not an exhaustive exact list.
+// The canonical location groups in common use (GET /jobs/locations) -
+// same reasoning/pattern as getDepartments(). The messy free-text
+// location_name variants are collapsed onto these by
+// huntloop.location_normalization; the backend caps the list to groups
+// on many postings, and the `location` filter does an EXACT match on the
+// canonical label.
 export function getLocations(): Promise<string[]> {
   return apiFetch<string[]>("/jobs/locations");
 }
@@ -117,13 +160,19 @@ export function getResumes(): Promise<ResumeVersionSummary[]> {
 export async function uploadResume(file: File): Promise<ResumeVersionSummary> {
   const formData = new FormData();
   formData.append("file", file);
-  const response = await fetch(`${API_BASE_URL}/resumes/upload`, {
-    method: "POST",
-    body: formData,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE_URL}/resumes/upload`, {
+      method: "POST",
+      body: formData,
+      signal: AbortSignal.timeout(UPLOAD_TIMEOUT_MS),
+    });
+  } catch {
+    throw new ApiError("Could not reach the server.", null);
+  }
   if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`POST /resumes/upload failed: ${response.status} ${body}`);
+    const body = await response.text().catch(() => "");
+    throw new ApiError(`POST /resumes/upload failed with ${response.status}`, response.status, body);
   }
   return response.json() as Promise<ResumeVersionSummary>;
 }
