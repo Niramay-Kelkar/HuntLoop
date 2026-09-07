@@ -11139,3 +11139,104 @@ on `master`, now shifted a few lines).
 **Did not touch:** the raw `job_description` column (unchanged — the fix
 is render-time only), any scraper/pipeline/backend code, skills-matching,
 `huntloop-claude-code-prompts.md`.
+
+---
+
+## 2026-09-07 — Verify the two deferred items against a real scheduled run
+
+Verification/reporting only, no code changes. `ps aux` + `pg_locks`
+checked first: no orchestrator/backfill running, no advisory lock held.
+
+**Runs since 2026-09-06:** exactly ONE real scheduled run —
+**2026-09-07 03:00:00 PDT**, fired by the normal `com.huntloop.scraper`
+launchd job (both `date`-stamped markers read `03:00:00` to the second →
+machine was awake, normal on-schedule fire, not a wake-catch-up).
+Completed cleanly: stage 1 exit 0, stage 2 exit 0, wrapper exit 0 at
+09:35:20 PDT (`logs/cron.log`, single `scheduled run started` /
+`run finished` pair; internal stage-1 timestamps are container-UTC,
+stage-2 are host-PDT — hence the apparent ordering jumble). The
+2026-09-06 03:00 slot stays permanently skipped — the machine cold-booted
+07:46:59 on 2026-09-06 (past 3am), and the boot-catchup plist was
+installed later that day with a same-day marker pre-seeded, so its one
+`logs/catchup.log` line (2026-09-06 15:56:26, "today's scheduled run
+already recorded — nothing to catch up") is the seeded no-op, not a real
+catch-up. No archived rotation holds a recoverable earlier full run
+(`cron-20260905T110948.log.gz` is pre-2026-09-05 accumulated scrapy
+DEBUG spam; `cron-20260907T030000.log.gz` is a 193-byte rotation stub).
+
+**Boot-catchup real-world confirmation: STILL NOT CONFIRMED.** No reboot
+since 2026-09-06 07:46 (uptime 1d8h), so the mechanism has never faced a
+genuine missed-slot. `com.huntloop.scraper-catchup` `runs = 1` (the
+seeded no-op), `last exit code = 0`. Unchanged from the "tested by
+simulation/manual trigger only" status.
+
+**Item 1 — observability end-to-end: NOW CONFIRMED.** The
+Prometheus/Pushgateway/Grafana stack was up (32h uptime, since
+~2026-09-06 08:00) when the 2026-09-07 03:00 run pushed metrics — the
+first time a real *scheduled* run (not a manual from-scratch session)
+has flowed through end-to-end. `logs/cron.log` shows both pushes
+succeeding ("Pushed run metrics to Pushgateway at pushgateway:9091" at
+stage-1 end; "Pushed skills-matching backfill metrics to Pushgateway at
+localhost:9091" at stage-2 end). Verified against real fresh data, not
+stale:
+- `push_time_seconds{job="huntloop_orchestrator"}` = 2026-09-07 07:26:21
+  PDT; `{job="huntloop_skills_matching_backfill"}` = 2026-09-07 09:35:13
+  PDT — both match this run's stage boundaries.
+- Direct Prometheus: `huntloop_run_duration_seconds` = 15867.94
+  (≈4h25m stage-1 wall time ✓); `sum(huntloop_jobs_scraped_total)` =
+  86,715; `huntloop_scrape_errors_total` = primehealthcare/icims 6,
+  redbull/smartrecruiters 1; `huntloop_skills_matching_backlog_remaining`
+  = 82,126; skills processed/succeeded/failed by provider =
+  2317/2267/50 (gemini 2200/2158/42, groq_120b 87/83/4, groq 30/26/4) —
+  every figure matches `cron.log`'s own stage summaries.
+- Grafana's datasource proxy (`/api/datasources/proxy/uid/prometheus`)
+  returns the identical values (15867.94, 82126, …); `/api/health`
+  `database: ok`; both dashboards (`huntloop-scraping`,
+  `huntloop-skills-matching`) provisioned and present. The
+  skills-matching dashboard specifically — previously "wired but not yet
+  confirmed against real data" — now has real data.
+- Caveat (expected, not a defect): Pushgateway holds only the latest
+  value, so one run renders as a flat line from its push time forward,
+  and there is no history before 2026-09-07 (the 2026-09-06 gap + the
+  stack not having run at prior 3am slots). Continuity from here depends
+  on the `restart: unless-stopped` policy keeping the stack up.
+
+**Item 2 — groq_120b backlog throughput: ONE real data point now,
+still too few to call a stable rate, but the promotion's value is clear.**
+Real measured 2026-09-07 stage-2 run (`SKILLS_MATCHING_PROVIDERS =
+groq_120b,groq,gemini`, the default since the 2026-09-04 promotion):
+- Backlog 84,393 → **82,126** (net −2,267). 128.1 min elapsed, stopped
+  cleanly on `AllProvidersExhausted` (exit 0).
+- Processed 2,317 / succeeded 2,267 / failed-left-NULL 50.
+- Routing (succeeded): **gemini 2,158 (496 batches)**, **groq_120b 83
+  (41 batches)**, **groq 26 (12 batches)**.
+- `groq_120b` hit its 200K TPD after 83 jobs (07:30→08:13); `groq`
+  (20b) after 26 more (→09:02); `gemini` hit its ~500 RPD after 2,158
+  (→09:35, all exhausted → stop). json-validate per-batch failovers:
+  groq_120b 2, groq 38.
+- **Interpretation:** same pattern CLAUDE.md already documents for
+  20b — both same-account Groq TPD buckets are largely pre-spent by the
+  time the daily run reaches stage 2, so they contribute only a
+  front-loaded ~100 jobs combined; **gemini does ~95% of the volume**
+  and its RPD cap (~2,150 successful jobs/run at full batch-of-5) is the
+  real ceiling. groq_120b's promotion earns its place on *quality*
+  (it catches the full-resume-dump cases 20b/Gemini/Mistral miss — see
+  the 2026-09-04 entry), not throughput.
+- **Clearance estimate (extrapolation from ONE run, treat as
+  provisional):** at ~2,267 net/run the current 82,126 backlog clears
+  in **~36 days** of daily runs, ignoring new inflow. Prior unbounded
+  run (2026-08-30, pre-120b) cleared ~1,625; the improvement is gemini
+  now sustaining full batches, not the 120b stage. Not a stable rate
+  until several more scheduled runs land — gemini's per-minute 429
+  shedding (documented 2026-08-30) varied 25-40% before and only 2% of
+  this run's calls failed, so run-to-run variance is real.
+
+**Status closeout:**
+- Observability end-to-end (both dashboards, real scheduled data):
+  **CONFIRMED** — no longer deferred.
+- groq_120b throughput: **partially confirmed** — mechanism works
+  end-to-end under the default chain in a real scheduled run, first
+  real clearance number recorded; a stable multi-run rate is still
+  open (one data point).
+- Boot-catchup real-world firing: **still open** — no reboot-through-3am
+  has occurred since it was built.
