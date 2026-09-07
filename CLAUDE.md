@@ -1428,7 +1428,15 @@ conventions" and SESSIONS.md for the real current state).
   so this can never be mistaken for a real posted salary). `GET /jobs`
   list rows gained one lightweight boolean, `has_sponsor_history`
   (`Company.matched_sponsor_employer_name is not None`, added to the
-  existing join — no per-row aggregate query, for performance). The
+  existing join — no per-row aggregate query, for performance).
+  **`JobSummary` rows also carry `salary_estimate` (`{amount, basis}`,
+  same shape/meaning as `GET /jobs/{id}`'s) as of 2026-09-07 (see
+  SESSIONS.md's "Make the job list scannable…" entry) — it reuses the
+  `_salary_estimate_expr()` scalar subquery already built for the
+  `salary_min`/`salary_max` filters, now also selected as a column;
+  `JobDetail` inherits it rather than redeclaring it. The `JobCard` /
+  `JobTable` list views surface it (labeled "Est." + basis tooltip),
+  alongside `employment_type` and a shared `SponsorBadge` pill.** The
   frontend was NOT touched in this step — wiring this real data into the
   job detail page's sponsor sidebar (currently omitted, per the reskin
   step's known display gap) was the deliberately deferred next step.

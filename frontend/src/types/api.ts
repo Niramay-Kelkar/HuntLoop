@@ -17,6 +17,11 @@ export interface HealthResponse {
   status: string;
 }
 
+export interface SalaryEstimate {
+  amount: number;
+  basis: string;
+}
+
 export interface JobSummary {
   id: number;
   job_title: string;
@@ -31,6 +36,10 @@ export interface JobSummary {
   locations: string[];
   application_status: ApplicationStatus;
   has_sponsor_history: boolean;
+  // Employer-level estimate from DOL wage filings (see the detail page /
+  // filter panel labeling) - never a real posted salary. null when the
+  // company has no resolved sponsor match or no annual-wage filings.
+  salary_estimate: SalaryEstimate | null;
 }
 
 export interface SponsorSummary {
@@ -42,16 +51,11 @@ export interface SponsorSummary {
   latest_case_status: string | null;
 }
 
-export interface SalaryEstimate {
-  amount: number;
-  basis: string;
-}
-
 export interface JobDetail extends JobSummary {
   job_description: string | null;
   ats_platform: string | null;
   sponsor: SponsorSummary | null;
-  salary_estimate: SalaryEstimate | null;
+  // salary_estimate is inherited from JobSummary.
 }
 
 export interface JobListResponse {

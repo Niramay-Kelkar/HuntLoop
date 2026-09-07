@@ -133,6 +133,11 @@ def _row_to_summary(row) -> JobSummary:
         locations=[loc.location_name for loc in job.locations],
         application_status=row.application_status,
         has_sponsor_history=row.matched_sponsor_employer_name is not None,
+        salary_estimate=(
+            SalaryEstimate(amount=row.salary_estimate_amount)
+            if row.salary_estimate_amount is not None
+            else None
+        ),
     )
 
 
@@ -250,6 +255,7 @@ def list_jobs(
         raise HTTPException(400, "min_score filter requires an active resume with a computed embedding")
 
     score_expr, status_expr = _score_and_status_columns(resume_embedding)
+    salary_expr = _salary_estimate_expr()
 
     query = (
         select(
@@ -258,6 +264,7 @@ def list_jobs(
             Company.matched_sponsor_employer_name,
             score_expr,
             status_expr,
+            salary_expr.label("salary_estimate_amount"),
         )
         .join(Company, JobPosting.company_id == Company.id)
         .outerjoin(JobApplication, JobApplication.job_posting_id == JobPosting.id)
@@ -291,7 +298,6 @@ def list_jobs(
                 )
                 .exists()
             )
-    salary_expr = _salary_estimate_expr()
     if salary_unspecified:
         query = query.where(salary_expr.is_(None))
     else:

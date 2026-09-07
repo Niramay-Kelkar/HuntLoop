@@ -10533,3 +10533,60 @@ Playwright against the running app + real local Postgres):
 - Purely CSS/layout, no new interactive behaviour (no mobile menu
   toggle), so no new tests were added. Full frontend suite unchanged and
   green before and after (27 passing).
+
+---
+
+## 2026-09-07 — Make the job list scannable without opening each posting (`ui-ux-improvements`)
+
+**Before-state (Playwright, `/jobs`, both view modes, real local data):**
+- Card view showed: title, company, matched-skill chips, location, a tiny
+  dot + "Sponsors H-1B" / "No H-1B data" line, status control, posted
+  date, and the match-score ring. NOT shown: `employment_type` (fetched
+  in `JobSummary` but never rendered — so "Software Engineer, Internship"
+  roles were indistinguishable from full-time at a glance), any salary
+  estimate, department.
+- Table view showed: Match % pill (small), Role (title + company),
+  Location, a tiny "Sponsors H-1B" text, Status. NOT shown: salary
+  estimate, employment type, posted date — and a lot of empty
+  horizontal space.
+- Salary estimate was completely absent from the list API
+  (`JobSummary`) — only `GET /jobs/{id}` returned it — so neither view
+  could show it even though it's a core differentiator and the filter
+  panel already filters on it.
+
+**Changed:**
+- **API:** `JobSummary` (and so every `GET /jobs` row) now carries
+  `salary_estimate` — the *same* employer-level DOL-wage estimate
+  `GET /jobs/{id}` returns, computed from the `_salary_estimate_expr()`
+  scalar subquery that already existed for the `salary_min`/`salary_max`
+  filters (now also selected as a column). `JobDetail` inherits it
+  instead of redeclaring it.
+- **New `SponsorBadge` component** — the sponsor signal is now a real
+  green/neutral pill badge (dot + wording, with the DOL-history
+  explanation as a tooltip), shared by card and table, replacing the
+  easy-to-miss muted text.
+- **`JobCard`:** a dedicated meta block — location on its own line, then
+  a wrap-safe row of `employment_type` chip (when present) + sponsor
+  badge + `Est. ~$150k` chip (when an estimate exists; the word "Est."
+  plus the full "…not job-specific" basis tooltip carry the same
+  estimate-not-posted-salary framing the filter caption / detail page
+  use). Score ring, skills, status control, detail link, posted date all
+  unchanged.
+- **`JobTable`:** new "Est. salary" column (`~$150k` / "—", basis as
+  tooltip) with a persistent caption under the table spelling out the
+  estimate caveat; `employment_type` appended to the company line;
+  sponsor cell uses `SponsorBadge`; match pill enlarged for legibility;
+  `min-w` widened `720 → 820`.
+- Toggle, status control, detail links, pagination: untouched.
+
+**Verified (Playwright, real running app, before + after screenshots):**
+- Desktop 1280×900 and mobile 390×844, both card and table views. No
+  horizontal page overflow at any width before or after
+  (`scrollWidth == clientWidth`); the table keeps its own
+  `overflow-x-auto` internal scroll on mobile as before. Card meta row
+  wraps cleanly and stays on one line at 390 px for the real data.
+- Backend suite 336 → 337 (new: list rows expose `salary_estimate` only
+  for a resolved sponsor). Frontend suite 27 → 38 (new: `SponsorBadge`
+  both states, `JobCard` employment-type / salary-label / sponsor-badge
+  visibility, `JobTable` salary column + caption + employment-type
+  line + sponsor badge). `tsc --noEmit` clean.

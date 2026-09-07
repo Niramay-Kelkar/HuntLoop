@@ -11,6 +11,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from huntloop.db_models import ApplicationStatus
 
 
+class SalaryEstimate(BaseModel):
+    """A rough estimate derived from the sponsor's median wage - never a
+    real posted salary for this specific job, hence the mandatory label."""
+
+    amount: float
+    basis: str = "Estimated from DOL wage filings for this employer, not job-specific"
+
+
 class JobSummary(BaseModel):
     """One row in GET /jobs' paginated list."""
 
@@ -55,6 +63,14 @@ class JobSummary(BaseModel):
             "the full sponsor aggregate - see JobDetail.sponsor for that."
         )
     )
+    salary_estimate: SalaryEstimate | None = Field(
+        default=None,
+        description=(
+            "The same employer-level DOL-wage estimate GET /jobs/{id} returns - "
+            "an estimate, never a real posted salary. null when the company has "
+            "no resolved sponsor match or no annual-wage filings."
+        ),
+    )
 
 
 class SponsorSummary(BaseModel):
@@ -77,23 +93,14 @@ class SponsorSummary(BaseModel):
     )
 
 
-class SalaryEstimate(BaseModel):
-    """A rough estimate derived from the sponsor's median wage - never a
-    real posted salary for this specific job, hence the mandatory label."""
-
-    amount: float
-    basis: str = "Estimated from DOL wage filings for this employer, not job-specific"
-
-
 class JobDetail(JobSummary):
     """GET /jobs/{id} - JobSummary plus the full job description, the
     company's detected ATS platform, and (if resolved) its DOL sponsor
-    summary and a derived salary estimate."""
+    summary. salary_estimate is inherited from JobSummary."""
 
     job_description: str | None = None
     ats_platform: str | None = None
     sponsor: SponsorSummary | None = None
-    salary_estimate: SalaryEstimate | None = None
 
 
 class JobListResponse(BaseModel):

@@ -28,6 +28,7 @@ function makeJob(overrides: Partial<JobSummary> = {}): JobSummary {
     locations: [],
     application_status: "not_applied",
     has_sponsor_history: false,
+    salary_estimate: null,
     ...overrides,
   };
 }

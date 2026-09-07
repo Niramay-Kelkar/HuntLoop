@@ -373,6 +373,22 @@ def test_list_jobs_has_sponsor_history_reflects_company_match(api_client, db_ses
     assert by_title["Not Yet Embedded Job"] is False
 
 
+def test_list_jobs_includes_salary_estimate_for_resolved_sponsor_only(api_client, db_session):
+    _seed(db_session)
+    _seed_palantir_lca_rows(db_session)
+
+    response = api_client.get("/jobs")
+    by_title = {item["job_title"]: item["salary_estimate"] for item in response.json()["items"]}
+    # palantir jobs (High/Mid) resolve to a sponsor with annual-wage filings;
+    # checkr jobs (Low/Not Yet Embedded) have no sponsor match at all.
+    assert by_title["High Match Job"]["amount"] == pytest.approx(150000.0)
+    assert (
+        by_title["High Match Job"]["basis"]
+        == "Estimated from DOL wage filings for this employer, not job-specific"
+    )
+    assert by_title["Low Match Job"] is None
+
+
 def test_get_job_detail_includes_ats_platform(api_client, db_session):
     seeded = _seed(db_session)
 
