@@ -112,10 +112,24 @@ def _seed(db_session):
     db_session.add_all([high, mid, low, no_embedding])
     db_session.commit()
 
+    from huntloop.location_normalization import normalize_location
+
+    def _loc(job_id, raw):
+        n = normalize_location(raw)
+        return JobLocation(
+            job_id=job_id,
+            location_name=raw,
+            location_city=n.city,
+            location_region=n.region,
+            location_country=n.country,
+            location_is_remote=n.is_remote,
+            location_canonical=n.canonical,
+        )
+
     db_session.add_all(
         [
-            JobLocation(job_id=mid.id, location_name="Remote - US"),
-            JobLocation(job_id=mid.id, location_name="New York, NY"),
+            _loc(mid.id, "Remote - US"),
+            _loc(mid.id, "New York, NY"),
         ]
     )
     db_session.commit()
@@ -645,16 +659,23 @@ def test_min_score_without_active_resume_returns_400(api_client, db_session):
 # --- location filter -------------------------------------------------------
 
 
-def test_list_jobs_filters_by_location_substring(api_client, db_session):
+def test_list_jobs_filters_by_canonical_location_group(api_client, db_session):
     _seed(db_session)
 
-    # mid is the only seeded job with locations ("Remote - US", "New York,
-    # NY"); the substring match is case-insensitive and partial.
-    response = api_client.get("/jobs", params={"location": "new york"})
+    # mid is the only seeded job with locations; "New York, NY" canonicalizes
+    # to "New York City, NY, United States" and the filter matches that
+    # canonical group exactly.
+    response = api_client.get(
+        "/jobs", params={"location": "New York City, NY, United States"}
+    )
     assert response.status_code == 200
     body = response.json()
     assert body["total"] == 1
     assert body["items"][0]["job_title"] == "Mid Match Job"
+
+    # The raw pre-canonicalization string is not itself a valid filter value.
+    response = api_client.get("/jobs", params={"location": "New York, NY"})
+    assert response.json()["total"] == 0
 
 
 def test_list_jobs_filters_by_unspecified_location(api_client, db_session):
@@ -682,10 +703,24 @@ def test_list_locations_returns_common_values_most_frequent_first(api_client, db
     # that floor to 1 so the four seeded rows are enough to exercise it.
     monkeypatch.setattr(jobs_router, "_LOCATION_MIN_POSTINGS", 1)
     seeded = _seed(db_session)
+    from huntloop.location_normalization import normalize_location
+
+    def _loc(job_id, raw):
+        n = normalize_location(raw)
+        return JobLocation(
+            job_id=job_id,
+            location_name=raw,
+            location_city=n.city,
+            location_region=n.region,
+            location_country=n.country,
+            location_is_remote=n.is_remote,
+            location_canonical=n.canonical,
+        )
+
     db_session.add_all(
         [
-            JobLocation(job_id=seeded["high"].id, location_name="New York, NY"),
-            JobLocation(job_id=seeded["low"].id, location_name="New York, NY"),
+            _loc(seeded["high"].id, "SF"),
+            _loc(seeded["low"].id, "san francisco, california"),
         ]
     )
     db_session.commit()
@@ -693,9 +728,14 @@ def test_list_locations_returns_common_values_most_frequent_first(api_client, db
     response = api_client.get("/jobs/locations")
     assert response.status_code == 200
     body = response.json()
-    # "New York, NY" on 3 postings, "Remote - US" on 1 -> most frequent first.
-    assert body[0] == "New York, NY"
-    assert set(body) == {"New York, NY", "Remote - US"}
+    # "SF" and "san francisco, california" both canonicalize to the same
+    # group (2 postings); "New York City, ..." + "Remote - ..." 1 each.
+    assert body[0] == "San Francisco, CA, United States"
+    assert set(body) == {
+        "San Francisco, CA, United States",
+        "New York City, NY, United States",
+        "Remote - United States",
+    }
 
 
 # --- salary-estimate range filter ----------------------------------------
@@ -767,7 +807,7 @@ def test_list_jobs_combines_new_filters_with_department_and_score(api_client, db
         "/jobs",
         params={
             "min_score": 0.3,
-            "location": "new york",
+            "location": "New York City, NY, United States",
             "salary_min": 140000,
             "department": "Sales",
         },

@@ -36,6 +36,31 @@ def test_process_item_inserts_job_posting(pipeline, db_session):
     assert row.gh_job_id == str(item["job_id"])
     assert row.company.name == "TestCo"
     assert [loc.location_name for loc in row.locations] == ["Remote - US"]
+    # locations are canonicalized at insert time (rules + offline
+    # gazetteer, no network) - same auto-compute-at-insert pattern as
+    # is_relevant / employment_type / department_category.
+    loc = row.locations[0]
+    assert loc.location_is_remote is True
+    assert loc.location_country == "United States"
+    assert loc.location_canonical == "Remote - United States"
+
+
+def test_process_item_splits_joined_multi_location_string(pipeline, db_session):
+    item = make_item(
+        job_id="multi-1", job_url="https://boards.greenhouse.io/testco/jobs/multi-1"
+    )
+    item["job_locations"] = ["San Francisco, CA; New York, NY"]
+
+    pipeline.process_item(item, spider=None)
+
+    row = db_session.query(JobPosting).filter_by(job_url=item["job_url"]).one()
+    locs = sorted(row.locations, key=lambda l: l.id)
+    # First row keeps the original raw string unchanged; the second place
+    # gets its own row so filtering groups each city correctly.
+    assert locs[0].location_name == "San Francisco, CA; New York, NY"
+    assert locs[0].location_canonical == "San Francisco, CA, United States"
+    assert locs[1].location_name == "New York, NY"
+    assert locs[1].location_canonical == "New York City, NY, United States"
     # is_relevant AND embedding are both computed at insert time (see
     # JobDataPipeline._classify_and_embed) - this test env has no torch/
     # sentence-transformers installed (see CLAUDE.md), so the pipeline

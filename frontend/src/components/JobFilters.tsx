@@ -10,7 +10,7 @@ export interface JobFiltersValue {
   company: string;
   department: string; // "" = unset (no filter); UNSPECIFIED_DEPARTMENT = "no category"; otherwise a canonical category
   employmentType: string; // "" = unset (no filter); UNSPECIFIED_EMPLOYMENT_TYPE = "none set"; otherwise a real value
-  location: string; // "" = unset; UNSPECIFIED_LOCATION = "no location scraped"; otherwise a real value (substring-matched)
+  location: string; // "" = unset; UNSPECIFIED_LOCATION = "no location scraped"; otherwise a canonical location group (exact match, see GET /jobs/locations)
   minScore: string; // kept as a raw string while editing; parsed by the caller
   salaryMin: string; // raw string while editing; parsed by the caller
   salaryMax: string; // raw string while editing; parsed by the caller

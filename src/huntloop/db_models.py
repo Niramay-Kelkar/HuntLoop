@@ -205,6 +205,14 @@ class JobLocation(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     job_id = Column(Integer, ForeignKey("job_postings.id", ondelete="CASCADE"))
     location_name = Column(String(255), nullable=False)
+    # Canonical grouping derived from the messy free-text location_name by
+    # huntloop.location_normalization (offline gazetteer, no geocoding).
+    # location_name itself is never modified - these are additive.
+    location_city = Column(String(120), nullable=True)
+    location_region = Column(String(64), nullable=True)  # 2-letter US state / CA province
+    location_country = Column(String(80), nullable=True)
+    location_is_remote = Column(Boolean, nullable=True)
+    location_canonical = Column(String(255), nullable=True)
 
     job = relationship("JobPosting", back_populates="locations")
 

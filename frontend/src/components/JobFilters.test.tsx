@@ -23,7 +23,10 @@ function renderFilters(
   const queryClient = new QueryClient();
   vi.spyOn(api, "getDepartments").mockResolvedValue(["Engineering", "Sales"]);
   vi.spyOn(api, "getEmploymentTypes").mockResolvedValue(["Contract", "Full-time"]);
-  vi.spyOn(api, "getLocations").mockResolvedValue(["New York, NY", "Remote - US"]);
+  vi.spyOn(api, "getLocations").mockResolvedValue([
+    "San Francisco, CA, United States",
+    "Remote - United States",
+  ]);
   render(
     <QueryClientProvider client={queryClient}>
       <JobFilters value={value} onChange={onChange} {...extraProps} />
@@ -126,6 +129,23 @@ describe("JobFilters", () => {
     fireEvent.change(select, { target: { value: UNSPECIFIED_LOCATION } });
 
     expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ location: UNSPECIFIED_LOCATION }));
+  });
+
+  it("populates the location <select> with the canonical groups from GET /jobs/locations", async () => {
+    const onChange = renderFilters(emptyValue);
+
+    const canonical = await screen.findByRole("option", {
+      name: "San Francisco, CA, United States",
+    });
+    expect(canonical).toBeInTheDocument();
+
+    const select = screen.getByDisplayValue("All locations");
+    fireEvent.change(select, {
+      target: { value: "San Francisco, CA, United States" },
+    });
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ location: "San Francisco, CA, United States" }),
+    );
   });
 
   it("updates salaryMin from the estimated-salary min input", () => {

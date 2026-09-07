@@ -14,7 +14,7 @@ import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from huntloop.api.dependencies import get_db
@@ -197,16 +197,31 @@ def list_employment_types(db: Session = Depends(get_db)) -> list[str]:
 
 @router.get("/locations", response_model=list[str])
 def list_locations(db: Session = Depends(get_db)) -> list[str]:
-    """The real, distinct location values in use across job_postings that
+    """The canonical location groups in use across job_postings that
     appear on at least `_LOCATION_MIN_POSTINGS` postings, most common
-    first. See `_LOCATION_MIN_POSTINGS` for why this is frequency-capped
-    rather than the full distinct set, and `list_jobs` for how the
-    matching `location` filter does a substring (not exact) match."""
+    first.
+
+    These are `huntloop.location_normalization`'s canonical labels (e.g.
+    "San Francisco, CA, United States", "Remote - United States",
+    "London, United Kingdom") - the messy free-text `location_name`
+    variants are collapsed onto them so the filter groups the same real
+    place together. Unresolved long-tail values (internal building codes,
+    "Hybrid", "HQ", ...) are excluded from this list. The matching
+    `location` filter does an EXACT match on the canonical label; the raw
+    `location_name`(s) stay visible per-posting for transparency."""
     rows = db.execute(
-        select(JobLocation.location_name)
-        .group_by(JobLocation.location_name)
-        .having(func.count() >= _LOCATION_MIN_POSTINGS)
-        .order_by(func.count().desc(), JobLocation.location_name)
+        select(JobLocation.location_canonical)
+        .where(
+            JobLocation.location_canonical.isnot(None),
+            or_(
+                JobLocation.location_city.isnot(None),
+                JobLocation.location_country.isnot(None),
+                JobLocation.location_is_remote.is_(True),
+            ),
+        )
+        .group_by(JobLocation.location_canonical)
+        .having(func.count(func.distinct(JobLocation.job_id)) >= _LOCATION_MIN_POSTINGS)
+        .order_by(func.count(func.distinct(JobLocation.job_id)).desc(), JobLocation.location_canonical)
     )
     return [row[0] for row in rows]
 
@@ -237,10 +252,12 @@ def list_jobs(
     location: str | None = Query(
         None,
         description=(
-            "Filter to postings with a location matching this text (case-insensitive "
-            "substring, so 'San Francisco' also matches 'San Francisco, CA'), or "
-            f"'{UNSPECIFIED_LOCATION}' to return only postings with no location scraped. "
-            "Not radius/geocoding search. Unset (default) returns postings regardless of location."
+            "Filter to postings in this canonical location group (an exact match on a "
+            "value from GET /jobs/locations, e.g. 'San Francisco, CA, United States' - "
+            "which groups every 'San Francisco' / 'San Francisco, CA' / 'SF Bay Area' "
+            f"variant), or '{UNSPECIFIED_LOCATION}' to return only postings with no "
+            "location scraped. Not radius/geocoding search. Unset (default) returns "
+            "postings regardless of location."
         ),
     ),
     salary_min: float | None = Query(
@@ -337,7 +354,7 @@ def list_jobs(
                 select(JobLocation.id)
                 .where(
                     JobLocation.job_id == JobPosting.id,
-                    JobLocation.location_name.ilike(f"%{location}%"),
+                    JobLocation.location_canonical == location,
                 )
                 .exists()
             )

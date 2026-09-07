@@ -10857,3 +10857,115 @@ instruction was explicit.
 **Did not touch:** the raw `department` values, Workday's
 department-NULL-by-design status, skills-matching, embeddings,
 `huntloop-claude-code-prompts.md`.
+
+---
+
+## 2026-09-07 — Canonical location normalization (`ui-ux-improvements`)
+
+**Investigation (live data, before any code):**
+- `job_locations`: 143,716 rows, **15,622 distinct `location_name`**,
+  0 NULL; 99,043 `job_postings`, ~98.9k with at least one location row.
+  Earlier-in-session estimate (~15,580 / ~142,669 / ~29,572) re-confirmed
+  as still roughly accurate, not stale.
+- **Joined multi-location strings: ~1,354 distinct** (`;` 2,749 rows,
+  ` / ` 279, ` • ` 99, `|` 1,151, ` and `/` & ` ~309) — a single
+  `location_name` holding several places. Examples: "San Francisco, CA •
+  New York, NY • United States" (91), "Livingston, NJ / New York, NY /
+  Sunnyvale, CA / Bellevue, WA" (37).
+- Frequency: very long tail — top 50 distinct values = 19.8% of rows,
+  top 500 = 54%, top 1,000 = 66%, top 5,000 = 91%.
+- Sampling across the spectrum: clean heads ("San Francisco" 2,249,
+  "New York, NY" 1,409, "London" 825); dozens of variants per real
+  city ("San Francisco" / "San Francisco, CA" / "San Francisco,
+  California" / "San Francisco, California, United States" / "San
+  Francisco Bay Area" / "SF" — all one place); reversed order
+  ("California - San Francisco", "US > Arizona > Phoenix"); city +
+  campus/office noise ("Bengaluru Millenia", "San Francisco HQ"); street
+  addresses ("2228 Miller Park Way, Milwaukee, WI 53219"); 663 pure
+  "Remote", 12,173 rows mentioning remote somewhere; genuine garbage
+  ("Software Engineering", "HQ", "Hybrid", "N/A", internal building
+  codes like "RENSS - TEMPEL LN").
+
+**Approach chosen — hierarchical, rules + offline gazetteer, NO LLM, NO
+network geocoding:**
+- *Hierarchical (city / region / country + is_remote), not flat.* Place
+  names have genuine natural hierarchy (unlike the department
+  categories), and hierarchy is what lets "San Francisco, CA, United
+  States" collapse every SF variant while still leaving room for
+  region/country rollups later. Columns: `job_locations.location_{city,
+  region,country,is_remote,canonical}` (nullable, migration
+  `b2c3d4e5f6a7`, additive — `location_name` untouched).
+- *Rules + `geonamescache` (offline gazetteer: ~34k cities pop > 15k,
+  50 US states + DC, ~250 countries).* A prototype parser (component
+  split on `,`/` - `/` > `/`_`; country-alias then US-state/CA-province
+  then gazetteer city lookup; reversed-order detection; trailing-noise
+  and street/zip stripping; single-bare-token prefers a populous
+  same-named city over the state of the same name) hit **95.7% of rows /
+  92.7% of distinct values** with pure rules. That's high enough that an
+  LLM pass (department needed one for its residual ~1,750 values) is
+  unnecessary spend here. A network geocoder (Nominatim) was considered
+  and rejected: it adds a ToS-constrained, rate-limited (1 req/s → hours
+  for 15.6k values) dependency, still needs the same canonicalization
+  layer on top, and buys little over the offline gazetteer for this
+  "group the same city together" problem. `region` is a 2-letter US /
+  CA code only — other countries' 2-letter admin codes collide with US
+  state abbreviations ("Chennai, TN" is Tamil Nadu, not Tennessee) so
+  they're left unset rather than mis-parsed; country still resolves.
+- *Joined multi-location strings ARE split into multiple rows.* The only
+  way "San Francisco" returns a "SF; NYC" posting. Pipeline and backfill
+  keep the first piece's row with its original raw `location_name` and
+  add a sibling row per further place.
+
+**Implemented:** `huntloop.location_normalization`
+(`normalize_location()` → `NormalizedLocation`, `split_location_string()`);
+`geonamescache` added to `requirements.txt`; migration `b2c3d4e5f6a7`;
+`JobDataPipeline` normalizes + splits at insert (rules only, no network
+on the hot path — same auto-compute-at-insert pattern as
+is_relevant/embedding/employment_type/department_category);
+`scripts/backfill_location_normalization.py` (plain `.venv`, resumable,
+idempotent on already-split siblings); `GET /jobs/locations` now returns
+canonical groups (≥100 distinct postings, unresolved tail excluded) and
+`GET /jobs?location=` does an exact match on `location_canonical`;
+frontend `location` `<select>` picks up the canonical labels with no
+component change (the comments were updated).
+
+**Real before → after (live query):** `location_canonical` 0 → **all
+150,283 rows populated** (raw `location_name` also backfilled where a
+joined string was split into siblings). **97,252 / 98,912 postings with
+any location (98.3%) resolve to a real canonical group**; row-level
+~95.8% resolved, **~4.2% (6,373 rows) stay unresolved** — internal
+building/site codes, bare "Hybrid"/"HQ", some non-ASCII European city
+names ("München", "Nürnberg") — these keep the cleaned raw string as
+`location_canonical` with NULL city/country and are excluded from the
+`/jobs/locations` dropdown. Honestly messier data than department: the
+long tail here is real and won't fully close without diminishing-return
+work (Unicode folding, a bigger gazetteer). Top canonical groups: "San
+Francisco, CA, United States" (~7.9k rows), "Remote - United States"
+(~6.2k), "New York City, NY, United States" (~6.2k), "Bengaluru, India"
+(~3.6k), "London, United Kingdom" (~2.9k).
+
+**Verified:** normalizer spot-checked across the spectrum (all SF
+variants → one label; reversed order; multi-loc split; "Chennai, TN,
+India" → country India, region unset; "Hybrid"/"HQ"/"Software
+Engineering" → unresolved but non-empty canonical). Live API: `?location=
+"San Francisco, CA, United States"` returns 6,255 postings covering the
+"San Francisco"/"San Francisco, CA" raw variants; `?location=Remote -
+United States` 4,330; `?location=__unspecified__` 131. Backend suite
+446 passed (was 409); frontend 52 passed (was 51). No advisory lock
+held and no scrape/backfill process running at start (`ps aux` +
+`pg_locks` checked).
+
+**Data-integrity note:** the first backfill run used a pre-fix normalizer
+and appended some sibling rows; recovered by deleting novel-name
+siblings + exact `(job_id, location_name)` dupes and re-running the
+now-idempotent script. 15,617 / 15,622 original distinct `location_name`
+values preserved; the 5 lost were degenerate (two empty strings, three
+malformed trailing-punctuation addresses), ~10 rows total.
+
+**Branch note:** committed to `ui-ux-improvements`, same open PR, per the
+task. The next change (job-description readability) gets its own
+branch/PR.
+
+**Did not touch:** raw `location_name` semantics beyond the split,
+lat-long/radius search (still out of scope), skills-matching, embeddings,
+`huntloop-claude-code-prompts.md`.

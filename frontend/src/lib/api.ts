@@ -119,11 +119,12 @@ export function getEmploymentTypes(): Promise<string[]> {
   return apiFetch<string[]>("/jobs/employment-types");
 }
 
-// The real, distinct location values in common use (GET /jobs/locations)
-// - same reasoning/pattern as getDepartments(). The backend caps this to
-// locations appearing on many postings (job_locations.location_name is
-// very messy free text), and the `location` filter matches as a
-// substring, so these are options, not an exhaustive exact list.
+// The canonical location groups in common use (GET /jobs/locations) -
+// same reasoning/pattern as getDepartments(). The messy free-text
+// location_name variants are collapsed onto these by
+// huntloop.location_normalization; the backend caps the list to groups
+// on many postings, and the `location` filter does an EXACT match on the
+// canonical label.
 export function getLocations(): Promise<string[]> {
   return apiFetch<string[]>("/jobs/locations");
 }

@@ -74,18 +74,46 @@ conventions" and SESSIONS.md for the real current state).
   **`GET /jobs` also gained `location`, `salary_min`/`salary_max`, and
   `salary_unspecified` params, plus `GET /jobs/locations` (added
   2026-09-06, see SESSIONS.md's "Add match-score, salary-estimate, and
-  location filters" entry).** `location`: case-insensitive **substring**
-  match against `job_locations.location_name` (EXISTS subquery), or the
-  `__unspecified__` sentinel for postings with no `job_locations` row.
-  Substring, not exact, because `location_name` is very messy free text
-  (~15.6k distinct values; "San Francisco" vs "San Francisco, CA" vs
-  "San Francisco, California, United States"; many rows are one joined
-  multi-location string with `;`/` / `/` • ` separators) — so "San
-  Francisco" also matches "San Francisco, CA". `GET /jobs/locations`
-  only surfaces values on ≥ `_LOCATION_MIN_POSTINGS` (100) postings
-  (~233), most-frequent first — a usable dropdown, not the 15.6k
-  distinct set. **Location-radius/geocoding/"near me" search stays out
-  of scope**, same as every prior step. `salary_min`/`salary_max` bound
+  location filters" entry).** **As of 2026-09-07 (see SESSIONS.md
+  "Canonical location normalization") `location` matches the CANONICAL
+  location grouping, not raw substring:** `GET /jobs?location=` is an
+  EXACT match on `job_locations.location_canonical` (EXISTS subquery),
+  or `UNSPECIFIED_LOCATION = "__unspecified__"` for postings with no
+  `job_locations` row; `GET /jobs/locations` returns the canonical
+  labels present on ≥ `_LOCATION_MIN_POSTINGS` (100) distinct postings,
+  most-frequent first — a clean grouped dropdown ("San Francisco, CA,
+  United States" covers every "San Francisco" / "San Francisco, CA" /
+  "SF Bay Area" variant; "Remote - United States"; "London, United
+  Kingdom"), with the unresolved long-tail excluded. The raw
+  `location_name`(s) are still returned per-posting on `GET /jobs` and
+  `GET /jobs/{id}` for transparency.
+  Normalization is `huntloop.location_normalization` — rules + an
+  OFFLINE gazetteer (`geonamescache`: ~34k cities pop > 15k, US states,
+  ~250 countries), **no network geocoding, no LLM**: place names resolve
+  cleanly against a gazetteer where department strings needed an LLM
+  pass. It parses "City, Region, Country" (and reversed / ` - ` / ` > `
+  / `_` variants, trailing office/campus noise, street/zip stripping)
+  into `job_locations.location_{city,region,country,is_remote,canonical}`
+  (nullable, migration `b2c3d4e5f6a7` — additive, `location_name`
+  untouched). `region` is a 2-letter US-state / CA-province code only
+  (other countries' 2-letter admin codes collide with US state
+  abbreviations — "Chennai, TN" — so they're left unset). **Joined
+  multi-location strings ARE split into multiple `job_locations` rows**
+  (~1.3k distinct joined strings): the pipeline / backfill keep the
+  first piece's row with its original raw `location_name` and add a
+  sibling row per further place, so a "SF; NYC" posting is returned by
+  both the "San Francisco" and the "New York City" filter.
+  Auto-computed at insert by `JobDataPipeline` (rules + gazetteer only,
+  no network on the hot path); `scripts/backfill_location_normalization.py`
+  (plain `.venv`, idempotent/resumable) backfilled existing rows.
+  **Real coverage: ~98.3% of postings with any location resolve to a
+  canonical group; ~4.2% of rows stay unresolved** (internal building
+  codes, "Hybrid"/"HQ", some non-ASCII European city names) — those
+  keep the cleaned raw string as `location_canonical` and NULL
+  city/country, and are filtered out of the `/jobs/locations` dropdown.
+  **Location-radius/geocoding/"near me" (lat-long distance) search
+  stays out of scope**, same as every prior step — this is text
+  canonicalization only. `salary_min`/`salary_max` bound
   a correlated median-`'Year'`-wage scalar subquery
   (`_salary_estimate_expr()`, the same employer-level DOL-filing
   estimate `GET /jobs/{id}` exposes as `salary_estimate.amount` — never
@@ -213,7 +241,9 @@ conventions" and SESSIONS.md for the real current state).
   page.tsx`'s query key/params the same way `department` already was.**
   **`JobFilters.tsx` gained a `location` `<select>` (same shape as the
   department/employment-type selects, populated from `GET
-  /jobs/locations`, plus "Not specified" → `UNSPECIFIED_LOCATION`), an
+  /jobs/locations` — as of 2026-09-07 these are the canonical location
+  groups, not raw substrings; see the `location_canonical` bullet above
+  — plus "Not specified" → `UNSPECIFIED_LOCATION`), an
   estimated-salary min/max number-input pair with a "No estimate"
   checkbox (→ `salary_unspecified`, which disables the range inputs),
   and a visible caption stating the salary figure is an employer-level
