@@ -5,9 +5,10 @@ import { useQuery } from "@tanstack/react-query";
 
 import { getJob } from "@/lib/api";
 import { ErrorState } from "@/components/ErrorState";
+import { NotesEditor } from "@/components/NotesEditor";
 import { ScoreIndicator } from "@/components/ScoreIndicator";
 import { StatusControl } from "@/components/StatusControl";
-import { avatarColors, formatDate, formatWage, initials, stripHtml } from "@/lib/theme";
+import { avatarColors, formatDate, formatWage, initials, stripHtml, timeAgo } from "@/lib/theme";
 
 export function JobDetailClient({ jobId }: { jobId: number }) {
   const job = useQuery({
@@ -42,6 +43,8 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
   const missing = detail.missing_skills ?? [];
   const description = detail.job_description ? stripHtml(detail.job_description) : null;
   const sponsor = detail.sponsor;
+  const statusChanged =
+    detail.application_status !== "not_applied" ? timeAgo(detail.status_updated_at) : null;
 
   return (
     <div className="flex flex-col gap-4">
@@ -76,7 +79,7 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
               <ScoreIndicator score={detail.match_score} size="lg" />
             </div>
 
-            <div className="mt-5 flex flex-wrap gap-2.5">
+            <div className="mt-5 flex flex-wrap items-center gap-2.5">
               <a
                 href={detail.job_url}
                 target="_blank"
@@ -86,6 +89,16 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
                 Apply ↗
               </a>
               <StatusControl jobId={detail.id} status={detail.application_status} />
+              {statusChanged && (
+                <span className="font-mono text-[11px] text-text-faintest">changed {statusChanged}</span>
+              )}
+            </div>
+
+            <div className="mt-4 border-t border-divider pt-4">
+              <h3 className="mb-2 font-mono text-[11px] font-semibold uppercase tracking-wide text-text-faintest">
+                Your notes
+              </h3>
+              <NotesEditor jobId={detail.id} notes={detail.application_notes} rows={3} />
             </div>
           </div>
 

@@ -10634,3 +10634,69 @@ Playwright against the running app + real local Postgres):
 "Try again" recovers once the API is back. Frontend suite 38 → 44 (new:
 `ErrorState` 404-vs-server-problem + retry, `EmptyState`, `ApiError`
 shape). Production build and `tsc --noEmit` clean.
+
+---
+
+## 2026-09-07 — Application-tracker depth: notes, "status changed", tracked-only fetch
+
+**Before-state findings (real schema/routes + Playwright):**
+- **`job_applications.notes`: existed end to end but was invisible.** The
+  column has been there since the table was created; `PATCH
+  /jobs/{id}/application` already accepted a `notes` field and wrote it;
+  `ApplicationStatusResponse` already returned it; the TS types even
+  declared it. But no component ever sent or displayed a note, and
+  `GET /jobs` / `JobSummary` didn't expose it at all - so the kanban and
+  list views had no way to show one. Worse, the PATCH handler
+  *unconditionally* overwrote `notes` with the request body's value, and
+  the only caller (`StatusControl`) sends `{status}` only - so any note
+  would have been wiped on the next status change.
+- **Status history: genuinely does not exist, and one timestamp does.**
+  `job_applications` is strictly one row per posting (`job_posting_id`
+  unique), upserted in place. `status` and `notes` are overwritten;
+  `status_updated_at` is a single `onupdate=now()` timestamp. There is no
+  record of previous statuses or when each change happened.
+- **The tracker was effectively unusable at real data volume.** The
+  applications page fetched the *entire* jobs table 100 rows at a time to
+  find the few tracked ones - with ~99k postings that's ~990 sequential
+  requests; the page sat on its loading skeleton for minutes and never
+  finished.
+
+**Changed:**
+- **Notes are now first-class.** `GET /jobs` and `GET /jobs/{id}` expose
+  `application_notes` and `status_updated_at`. The list view is now a
+  stack of cards each with an inline auto-saving note field
+  (`NotesEditor`, save-on-blur, only when changed - not a rich-text
+  editor); the job detail page has the same field; the board shows a
+  small "has a note" mark. All wired through a new
+  `useApplicationNotesMutation` that mirrors the existing status
+  mutation's optimistic-update / rollback / toast pattern and only ever
+  sends `notes`.
+- **PATCH is now a real partial update** - each of `status` / `notes` is
+  written only when present in the request body, so a status change
+  never clears a note and vice versa. At least one field is required.
+- **"Status changed 3d ago"** is surfaced from the existing
+  `status_updated_at` on both the list cards and the job detail page - a
+  light touch, no schema change.
+- **`GET /jobs?tracked=true`** returns only actively-tracked postings;
+  the tracker uses it and now loads instantly instead of walking the
+  whole table.
+- **Search within your applications** - a client-side filter box over the
+  (now small) tracked set, applies to both board and list.
+- Drag-and-drop, the status mutation, and the board/list toggle are
+  unchanged.
+
+**Deliberately NOT built - flagged as a separate follow-up:**
+- **Multi-event status history / activity timeline.** This needs a new
+  append-only table (a row per status change with its own timestamp, and
+  ideally per-note history), a migration, write-path changes in the PATCH
+  handler to insert history rows, and a new read endpoint + timeline UI.
+  That's a real feature with its own schema decision, out of scope here.
+  What exists now (the single `status_updated_at`, surfaced as "changed
+  Nd ago") is the useful subset of that idea that needed no schema
+  change.
+
+**Verified:** Playwright before/after (tracker infinite-load -> instant;
+notes add/edit/persist across reload; note survives a status change;
+board note mark; search filter) at desktop and 390-wide. Backend suite
+and frontend suite both green (3 pre-existing `test_backfill_lock`
+failures, unrelated - the daily backfill cron holds the advisory lock).

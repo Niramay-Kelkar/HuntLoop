@@ -20,6 +20,8 @@ function makeJob(overrides: Partial<JobSummary> = {}): JobSummary {
     missing_skills: null,
     locations: ["New York, NY"],
     application_status: "not_applied",
+    application_notes: null,
+    status_updated_at: null,
     has_sponsor_history: false,
     salary_estimate: null,
     ...overrides,

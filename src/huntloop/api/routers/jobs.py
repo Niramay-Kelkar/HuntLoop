@@ -117,6 +117,15 @@ def _score_and_status_columns(resume_embedding):
     return score_expr, status_expr
 
 
+# The application-row columns (notes + last-updated timestamp) that both
+# the list and detail responses now surface. Kept alongside status_expr
+# rather than folded into it so callers can select exactly what they need.
+_APPLICATION_DETAIL_COLUMNS = (
+    JobApplication.notes.label("application_notes"),
+    JobApplication.status_updated_at.label("application_status_updated_at"),
+)
+
+
 def _row_to_summary(row) -> JobSummary:
     job = row.JobPosting
     return JobSummary(
@@ -132,6 +141,8 @@ def _row_to_summary(row) -> JobSummary:
         missing_skills=job.missing_skills,
         locations=[loc.location_name for loc in job.locations],
         application_status=row.application_status,
+        application_notes=row.application_notes,
+        status_updated_at=row.application_status_updated_at,
         has_sponsor_history=row.matched_sponsor_employer_name is not None,
         salary_estimate=(
             SalaryEstimate(amount=row.salary_estimate_amount)
@@ -239,6 +250,14 @@ def list_jobs(
             "(overrides salary_min/salary_max) - the '__unspecified__'-style option for this filter."
         ),
     ),
+    tracked: bool = Query(
+        False,
+        description=(
+            "When true, return only postings the user has actively tracked - i.e. with a "
+            "job_applications row whose status is not 'not_applied'. This is the applications "
+            "tracker's data source; the full job list is unaffected when unset (default)."
+        ),
+    ),
     sort: str = Query(
         "-score",
         description="'score' (ascending) or '-score' (descending, default - best matches first).",
@@ -264,12 +283,15 @@ def list_jobs(
             Company.matched_sponsor_employer_name,
             score_expr,
             status_expr,
+            *_APPLICATION_DETAIL_COLUMNS,
             salary_expr.label("salary_estimate_amount"),
         )
         .join(Company, JobPosting.company_id == Company.id)
         .outerjoin(JobApplication, JobApplication.job_posting_id == JobPosting.id)
     )
 
+    if tracked:
+        query = query.where(JobApplication.status != ApplicationStatus.NOT_APPLIED.value)
     if company:
         query = query.where(func.lower(Company.name) == company.lower())
     if department is not None:
@@ -330,7 +352,7 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
     score_expr, status_expr = _score_and_status_columns(resume_embedding)
 
     query = (
-        select(JobPosting, Company, score_expr, status_expr)
+        select(JobPosting, Company, score_expr, status_expr, *_APPLICATION_DETAIL_COLUMNS)
         .join(Company, JobPosting.company_id == Company.id)
         .outerjoin(JobApplication, JobApplication.job_posting_id == JobPosting.id)
         .where(JobPosting.id == job_id)
@@ -361,6 +383,8 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
         missing_skills=job.missing_skills,
         locations=[loc.location_name for loc in job.locations],
         application_status=row.application_status,
+        application_notes=row.application_notes,
+        status_updated_at=row.application_status_updated_at,
         has_sponsor_history=company.matched_sponsor_employer_name is not None,
         job_description=job.job_description,
         ats_platform=company.ats_platform,
@@ -377,21 +401,31 @@ def update_application_status(
     if job is None:
         raise HTTPException(404, f"No job posting with id={job_id}")
 
+    fields = payload.model_fields_set
+    if "status" not in fields and "notes" not in fields:
+        raise HTTPException(422, "Send at least one of 'status' or 'notes'.")
+
     application = db.query(JobApplication).filter_by(job_posting_id=job_id).first()
 
     if application is None:
-        application = JobApplication(job_posting_id=job_id, status=payload.status, notes=payload.notes)
+        application = JobApplication(job_posting_id=job_id)
         db.add(application)
-    else:
-        application.status = payload.status
-        application.notes = payload.notes
 
-    # applied_at is set the first time status moves away from
-    # not_applied, and never overwritten afterward - it represents when
-    # the user first applied, not the most recent status change (that's
-    # status_updated_at, bumped automatically by the column's onupdate).
-    if payload.status != ApplicationStatus.NOT_APPLIED and application.applied_at is None:
-        application.applied_at = datetime.now(timezone.utc)
+    # Each field is written only when it was actually present in the
+    # request body - so a status-only change never clears an existing
+    # note, and a notes-only change never touches the status.
+    if "status" in fields and payload.status is not None:
+        application.status = payload.status
+
+        # applied_at is set the first time status moves away from
+        # not_applied, and never overwritten afterward - it represents
+        # when the user first applied, not the most recent status change
+        # (that's status_updated_at, bumped by the column's onupdate).
+        if payload.status != ApplicationStatus.NOT_APPLIED and application.applied_at is None:
+            application.applied_at = datetime.now(timezone.utc)
+
+    if "notes" in fields:
+        application.notes = payload.notes
 
     db.commit()
     db.refresh(application)

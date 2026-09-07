@@ -85,6 +85,10 @@ export interface ListJobsParams {
   salary_min?: number;
   salary_max?: number;
   salary_unspecified?: boolean;
+  // When true, only postings the user has actively tracked (a
+  // job_applications row with status other than not_applied) - the
+  // applications tracker's data source.
+  tracked?: boolean;
   sort?: "score" | "-score";
   limit?: number;
   offset?: number;

@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import { getJobs } from "@/lib/api";
 import type { JobListResponse } from "@/types/api";
@@ -11,22 +11,22 @@ import { ErrorState } from "@/components/ErrorState";
 import { KanbanBoard } from "@/components/KanbanBoard";
 import { SegmentedToggle } from "@/components/SegmentedToggle";
 
-// The real API has no server-side status filter (see CLAUDE.md's `GET
-// /jobs` params: company/min_score/sort/limit/offset only) and caps
-// `limit` at 100 - the tracker pages through every job with that cap and
-// groups/filters by status client-side, same as design/HuntLoop.dc.html's
-// own `all`/`trackerList`/`kanbanColumns` derivation. Returns the same
-// JobListResponse shape as a single-page fetch (not a bare array) so
-// useApplicationStatusMutation's generic `old.items.map(...)` cache
+// The tracker only needs postings the user has actually tracked, which
+// `GET /jobs?tracked=true` returns directly (a small set) - it no longer
+// pages through the entire jobs table client-side. A defensive loop still
+// handles the unlikely case of more than one page of tracked
+// applications. Returns the same JobListResponse shape as a single-page
+// fetch so useApplicationStatusMutation's `old.items.map(...)` cache
 // updater works on this query's cache entry too.
 const PAGE_LIMIT = 100;
+const NO_ITEMS: JobListResponse["items"] = [];
 
-async function getAllJobs(): Promise<JobListResponse> {
-  const first = await getJobs({ limit: PAGE_LIMIT, offset: 0 });
+async function getTrackedJobs(): Promise<JobListResponse> {
+  const first = await getJobs({ tracked: true, limit: PAGE_LIMIT, offset: 0, sort: "-score" });
   const items = [...first.items];
   let offset = PAGE_LIMIT;
   while (offset < first.total) {
-    const page = await getJobs({ limit: PAGE_LIMIT, offset });
+    const page = await getJobs({ tracked: true, limit: PAGE_LIMIT, offset, sort: "-score" });
     items.push(...page.items);
     offset += PAGE_LIMIT;
   }
@@ -35,11 +35,26 @@ async function getAllJobs(): Promise<JobListResponse> {
 
 export default function ApplicationsPage() {
   const [mode, setMode] = useState<"kanban" | "list">("kanban");
+  const [search, setSearch] = useState("");
 
   const jobs = useQuery({
     queryKey: ["jobs", { tracker: true }],
-    queryFn: getAllJobs,
+    queryFn: getTrackedJobs,
   });
+
+  const allItems = jobs.data?.items ?? NO_ITEMS;
+  const query = search.trim().toLowerCase();
+  const filtered = useMemo(
+    () =>
+      query === ""
+        ? allItems
+        : allItems.filter(
+            (j) =>
+              j.job_title.toLowerCase().includes(query) ||
+              j.company_name.toLowerCase().includes(query),
+          ),
+    [allItems, query],
+  );
 
   return (
     <main className="flex flex-1 flex-col gap-4">
@@ -47,7 +62,7 @@ export default function ApplicationsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-text">Applications</h1>
           <p className="mt-0.5 text-[13px] text-text-subtle">
-            Track everything you&apos;ve engaged with. Drag cards between columns to update status.
+            Every job you&apos;ve set a status on. Drag cards between columns to update status.
           </p>
         </div>
         <SegmentedToggle
@@ -68,17 +83,38 @@ export default function ApplicationsPage() {
         <ErrorState error={jobs.error} onRetry={() => jobs.refetch()} resourceLabel="your applications" />
       )}
 
-      {jobs.isSuccess && jobs.data.items.length === 0 && (
+      {jobs.isSuccess && allItems.length === 0 && (
         <EmptyState
           icon="✦"
-          title="Nothing to track yet"
-          description="Once postings are scraped they show up here. Set a status on any job from the Jobs list and it moves onto this board."
+          title="No applications tracked yet"
+          description="Set a status on any job from the Jobs list or a job's detail page and it shows up here."
         />
       )}
 
-      {jobs.isSuccess &&
-        jobs.data.items.length > 0 &&
-        (mode === "kanban" ? <KanbanBoard jobs={jobs.data.items} /> : <ApplicationsList jobs={jobs.data.items} />)}
+      {jobs.isSuccess && allItems.length > 0 && (
+        <>
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search your applications by role or company…"
+            aria-label="Search applications"
+            className="w-full max-w-sm rounded-lg border border-border bg-surface px-3 py-1.5 text-[13px] text-text placeholder:text-text-faintest focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent"
+          />
+          {filtered.length === 0 ? (
+            <EmptyState
+              icon="⌕"
+              title="No applications match your search"
+              description="Try a different role or company name, or clear the search box."
+              compact
+            />
+          ) : mode === "kanban" ? (
+            <KanbanBoard jobs={filtered} />
+          ) : (
+            <ApplicationsList jobs={filtered} />
+          )}
+        </>
+      )}
     </main>
   );
 }

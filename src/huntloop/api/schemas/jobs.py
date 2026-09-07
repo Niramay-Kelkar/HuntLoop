@@ -55,6 +55,21 @@ class JobSummary(BaseModel):
     application_status: ApplicationStatus = Field(
         description="Defaults to not_applied when no job_applications row exists yet."
     )
+    application_notes: str | None = Field(
+        default=None,
+        description=(
+            "Free-text notes the user has saved for this application "
+            "(job_applications.notes). null when there is no application row or no note."
+        ),
+    )
+    status_updated_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When the application row was last touched (job_applications.status_updated_at). "
+            "null when no application row exists. This is a single timestamp, not a history "
+            "of past statuses."
+        ),
+    )
     has_sponsor_history: bool = Field(
         description=(
             "Whether this job's company has a resolved DOL sponsor match "
@@ -113,9 +128,14 @@ class JobListResponse(BaseModel):
 
 
 class ApplicationStatusUpdate(BaseModel):
-    """PATCH /jobs/{id}/application request body."""
+    """PATCH /jobs/{id}/application request body.
 
-    status: ApplicationStatus
+    Both fields are optional individually, but at least one must be sent.
+    `notes` is only written when the key is present in the request body
+    (so a status-only update never wipes an existing note, and a
+    notes-only update never touches the status)."""
+
+    status: ApplicationStatus | None = None
     notes: str | None = None
 
 

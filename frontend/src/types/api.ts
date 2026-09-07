@@ -35,6 +35,12 @@ export interface JobSummary {
   missing_skills: string[] | null;
   locations: string[];
   application_status: ApplicationStatus;
+  // Free-text notes the user saved for this application (job_applications.notes).
+  // null when there's no application row or no note.
+  application_notes: string | null;
+  // When the application row was last touched. A single timestamp, not a
+  // history of past statuses. null when there's no application row.
+  status_updated_at: string | null;
   has_sponsor_history: boolean;
   // Employer-level estimate from DOL wage filings (see the detail page /
   // filter panel labeling) - never a real posted salary. null when the
@@ -66,7 +72,7 @@ export interface JobListResponse {
 }
 
 export interface ApplicationStatusUpdate {
-  status: ApplicationStatus;
+  status?: ApplicationStatus;
   notes?: string | null;
 }
 

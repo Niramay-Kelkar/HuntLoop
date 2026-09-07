@@ -5,7 +5,7 @@ import Link from "next/link";
 
 import type { JobSummary } from "@/types/api";
 import { useApplicationStatusMutation } from "@/hooks/useApplicationStatus";
-import { STATUS_META, STATUS_ORDER, avatarColors, formatDate, initials, scoreTier } from "@/lib/theme";
+import { STATUS_META, STATUS_ORDER, avatarColors, initials, scoreTier, timeAgo } from "@/lib/theme";
 import type { ApplicationStatus } from "@/types/api";
 
 /**
@@ -53,7 +53,7 @@ export function KanbanBoard({ jobs }: { jobs: JobSummary[] }) {
             {colJobs.map((job) => {
               const avatar = avatarColors(job.id);
               const tier = job.match_score !== null ? scoreTier(job.match_score) : null;
-              const dateLabel = formatDate(job.date_posted);
+              const updatedLabel = timeAgo(job.status_updated_at);
               return (
                 <Link
                   key={job.id}
@@ -88,7 +88,14 @@ export function KanbanBoard({ jobs }: { jobs: JobSummary[] }) {
                     ) : (
                       <span className="font-mono text-xs text-text-faintest">—</span>
                     )}
-                    <span className="font-mono text-[11px] text-text-faintest">{dateLabel ?? "—"}</span>
+                    <span className="flex items-center gap-1 font-mono text-[11px] text-text-faintest">
+                      {job.application_notes ? (
+                        <span title={job.application_notes} aria-label="Has a note">
+                          ✎
+                        </span>
+                      ) : null}
+                      {updatedLabel ?? "—"}
+                    </span>
                   </div>
                 </Link>
               );

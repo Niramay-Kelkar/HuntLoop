@@ -514,6 +514,66 @@ def test_get_jobs_reflects_application_status_after_patch(api_client, db_session
     assert item["application_status"] == "rejected"
 
 
+def test_patch_notes_only_does_not_change_status(api_client, db_session):
+    seeded = _seed(db_session)
+    job_id = seeded["high"].id
+
+    api_client.patch(f"/jobs/{job_id}/application", json={"status": "interviewing"})
+    response = api_client.patch(f"/jobs/{job_id}/application", json={"notes": "Recruiter call went well"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "interviewing"
+    assert body["notes"] == "Recruiter call went well"
+
+
+def test_patch_status_only_preserves_existing_notes(api_client, db_session):
+    seeded = _seed(db_session)
+    job_id = seeded["high"].id
+
+    api_client.patch(f"/jobs/{job_id}/application", json={"status": "applied", "notes": "Referred by a friend"})
+    response = api_client.patch(f"/jobs/{job_id}/application", json={"status": "interviewing"})
+
+    assert response.status_code == 200
+    assert response.json()["notes"] == "Referred by a friend"
+
+
+def test_patch_application_requires_at_least_one_field(api_client, db_session):
+    seeded = _seed(db_session)
+
+    response = api_client.patch(f"/jobs/{seeded['high'].id}/application", json={})
+    assert response.status_code == 422
+
+
+def test_list_jobs_exposes_notes_and_status_updated_at(api_client, db_session):
+    seeded = _seed(db_session)
+    job_id = seeded["mid"].id
+
+    api_client.patch(f"/jobs/{job_id}/application", json={"status": "applied", "notes": "First round done"})
+
+    item = next(i for i in api_client.get("/jobs").json()["items"] if i["id"] == job_id)
+    assert item["application_notes"] == "First round done"
+    assert item["status_updated_at"] is not None
+
+    untracked = next(i for i in api_client.get("/jobs").json()["items"] if i["id"] == seeded["low"].id)
+    assert untracked["application_notes"] is None
+    assert untracked["status_updated_at"] is None
+
+
+def test_list_jobs_tracked_filter_returns_only_active_applications(api_client, db_session):
+    seeded = _seed(db_session)
+    api_client.patch(f"/jobs/{seeded['high'].id}/application", json={"status": "applied"})
+    api_client.patch(f"/jobs/{seeded['mid'].id}/application", json={"status": "interviewing"})
+    # a row that exists but was set back to not_applied must not count as tracked
+    api_client.patch(f"/jobs/{seeded['low'].id}/application", json={"status": "applied"})
+    api_client.patch(f"/jobs/{seeded['low'].id}/application", json={"status": "not_applied"})
+
+    body = api_client.get("/jobs", params={"tracked": "true"}).json()
+    ids = {i["id"] for i in body["items"]}
+    assert ids == {seeded["high"].id, seeded["mid"].id}
+    assert body["total"] == 2
+
+
 def test_patch_application_404_for_missing_job(api_client, db_session):
     _seed(db_session)
 
