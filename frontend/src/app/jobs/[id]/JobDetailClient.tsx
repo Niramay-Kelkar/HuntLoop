@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 
 import { getJob } from "@/lib/api";
+import { ErrorState } from "@/components/ErrorState";
 import { ScoreIndicator } from "@/components/ScoreIndicator";
 import { StatusControl } from "@/components/StatusControl";
 import { avatarColors, formatDate, formatWage, initials, stripHtml } from "@/lib/theme";
@@ -25,8 +26,11 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
 
   if (job.isError) {
     return (
-      <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-        Failed to load job: {job.error.message}
+      <div className="flex flex-col gap-4">
+        <Link href="/jobs" className="inline-block font-mono text-xs text-text-subtle hover:text-text">
+          ← Back to jobs
+        </Link>
+        <ErrorState error={job.error} onRetry={() => job.refetch()} resourceLabel="this job" />
       </div>
     );
   }

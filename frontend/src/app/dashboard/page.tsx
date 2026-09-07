@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 
 import { getDashboardStats } from "@/lib/api";
+import { ErrorState } from "@/components/ErrorState";
 import { STATUS_META, STATUS_ORDER } from "@/lib/theme";
 
 const STAT_CARDS = [
@@ -43,9 +44,11 @@ export default function DashboardPage() {
       )}
 
       {stats.isError && (
-        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-          Failed to load dashboard stats: {stats.error.message}
-        </div>
+        <ErrorState
+          error={stats.error}
+          onRetry={() => stats.refetch()}
+          resourceLabel="the dashboard"
+        />
       )}
 
       {stats.isSuccess && (

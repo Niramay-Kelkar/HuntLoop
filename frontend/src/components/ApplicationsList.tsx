@@ -1,6 +1,7 @@
 import Link from "next/link";
 
 import type { JobSummary } from "@/types/api";
+import { EmptyState } from "./EmptyState";
 import { StatusControl } from "./StatusControl";
 import { STATUS_ORDER, avatarColors, formatDate, initials, scoreTier } from "@/lib/theme";
 
@@ -12,6 +13,16 @@ export function ApplicationsList({ jobs }: { jobs: JobSummary[] }) {
     .filter((j) => j.application_status !== "not_applied")
     .slice()
     .sort((a, b) => STATUS_ORDER.indexOf(a.application_status) - STATUS_ORDER.indexOf(b.application_status));
+
+  if (tracked.length === 0) {
+    return (
+      <EmptyState
+        icon="✦"
+        title="No applications tracked yet"
+        description="Set a status on a job from the Jobs list or a job's detail page and it shows up here."
+      />
+    );
+  }
 
   return (
     <div className="overflow-hidden rounded-xl border border-border bg-surface">
@@ -72,11 +83,6 @@ export function ApplicationsList({ jobs }: { jobs: JobSummary[] }) {
           </tbody>
         </table>
       </div>
-      {tracked.length === 0 && (
-        <div className="px-5 py-12 text-center text-sm text-text-faintest">
-          No applications tracked yet — status changes made from the job list or job detail page show up here.
-        </div>
-      )}
     </div>
   );
 }

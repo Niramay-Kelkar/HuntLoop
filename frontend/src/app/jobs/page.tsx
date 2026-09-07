@@ -4,6 +4,8 @@ import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 
 import { getJobs } from "@/lib/api";
+import { EmptyState } from "@/components/EmptyState";
+import { ErrorState } from "@/components/ErrorState";
 import { JobCard } from "@/components/JobCard";
 import { JobFilters, type JobFiltersValue } from "@/components/JobFilters";
 import { JobTable } from "@/components/JobTable";
@@ -113,15 +115,15 @@ export default function JobsPage() {
       )}
 
       {jobs.isError && (
-        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-          Failed to load jobs: {jobs.error.message}
-        </div>
+        <ErrorState error={jobs.error} onRetry={() => jobs.refetch()} resourceLabel="jobs" />
       )}
 
       {jobs.isSuccess && jobs.data.items.length === 0 && (
-        <div className="rounded-xl border border-dashed border-border-strong p-10 text-center text-sm text-text-faintest">
-          No jobs match these filters. Try lowering the minimum score or clearing the company filter.
-        </div>
+        <EmptyState
+          icon="⌕"
+          title="No postings match your filters"
+          description="Try lowering the minimum match score, clearing the company search, or widening the location and salary filters."
+        />
       )}
 
       {jobs.isSuccess && jobs.data.items.length > 0 && (

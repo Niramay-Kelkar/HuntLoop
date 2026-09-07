@@ -6,6 +6,8 @@ import { useState } from "react";
 import { getJobs } from "@/lib/api";
 import type { JobListResponse } from "@/types/api";
 import { ApplicationsList } from "@/components/ApplicationsList";
+import { EmptyState } from "@/components/EmptyState";
+import { ErrorState } from "@/components/ErrorState";
 import { KanbanBoard } from "@/components/KanbanBoard";
 import { SegmentedToggle } from "@/components/SegmentedToggle";
 
@@ -63,12 +65,19 @@ export default function ApplicationsPage() {
       )}
 
       {jobs.isError && (
-        <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-          Failed to load applications: {jobs.error.message}
-        </div>
+        <ErrorState error={jobs.error} onRetry={() => jobs.refetch()} resourceLabel="your applications" />
+      )}
+
+      {jobs.isSuccess && jobs.data.items.length === 0 && (
+        <EmptyState
+          icon="✦"
+          title="Nothing to track yet"
+          description="Once postings are scraped they show up here. Set a status on any job from the Jobs list and it moves onto this board."
+        />
       )}
 
       {jobs.isSuccess &&
+        jobs.data.items.length > 0 &&
         (mode === "kanban" ? <KanbanBoard jobs={jobs.data.items} /> : <ApplicationsList jobs={jobs.data.items} />)}
     </main>
   );

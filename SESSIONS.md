@@ -10590,3 +10590,47 @@ Playwright against the running app + real local Postgres):
   both states, `JobCard` employment-type / salary-label / sponsor-badge
   visibility, `JobTable` salary column + caption + employment-type
   line + sponsor badge). `tsc --noEmit` clean.
+
+---
+
+## 2026-09-07 — Real empty / loading / error states across the app
+
+**Before-state findings (Playwright, real running app):**
+- **Loading:** every page already used TanStack Query `isPending` with a
+  skeleton, so no blank flash on a normal load — this part was fine and
+  was left alone.
+- **Error (API unreachable / 4xx):** genuinely broken. The default
+  TanStack Query retry behaviour never surfaced the error under this
+  React version — a failed query stayed stuck on its loading skeleton
+  indefinitely (reproduced with the API stopped, and with a job detail
+  page for an id that does not exist — skeleton still spinning after a
+  minute). When the error path *was* forced, each page dumped the raw
+  error string (including the response body / JSON) into a red box, with
+  no way to retry.
+- **Empty (zero results, not an error):** the job list had a reasonable
+  message; the applications tracker and resume section showed only a
+  bare one-liner or nothing framing "why"; the job detail page had no
+  distinct "this posting does not exist" state (it fell into the broken
+  error path above).
+
+**Changed:**
+- Query client now does not auto-retry; retrying is an explicit "Try
+  again" button. This alone fixes the stuck-skeleton-forever bug.
+- Fetch client rejects with a typed `ApiError` carrying the status and,
+  separately, the raw body — and now times out instead of hanging
+  forever. Requests can no longer wedge a view.
+- New shared `ErrorState` and `EmptyState` components, used on every
+  page instead of per-page ad-hoc treatments. `ErrorState` words a 404
+  as "Not found" and anything else as a temporary server problem with a
+  working retry; the raw body is never shown.
+- Job list, job detail, dashboard, applications tracker and resume
+  section all wired to the shared components; job detail now has a real
+  "Not found" screen with a back link; the applications tracker and
+  resume section got context-specific empty copy.
+- No change to what data is fetched or how.
+
+**Verified:** before/after screenshots at desktop (1280) and mobile
+(390×844) for the invalid-job, zero-results, and API-down scenarios;
+"Try again" recovers once the API is back. Frontend suite 38 → 44 (new:
+`ErrorState` 404-vs-server-problem + retry, `EmptyState`, `ApiError`
+shape). Production build and `tsc --noEmit` clean.

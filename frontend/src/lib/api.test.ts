@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { getJob, getJobs, getLocations, uploadResume, updateApplicationStatus } from "./api";
+import { ApiError, getJob, getJobs, getLocations, uploadResume, updateApplicationStatus } from "./api";
 
 /**
  * Covers the fetch-client functions actually worth testing: URL/query-param
@@ -90,11 +90,26 @@ describe("api client", () => {
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:8000/jobs/42", expect.any(Object));
   });
 
-  it("throws an error including the status and response body when a request fails", async () => {
+  it("rejects with an ApiError carrying the status and raw body when a request fails", async () => {
     mockFetchOnce({ ok: false, status: 404, text: "job not found" });
 
-    await expect(getJob(999)).rejects.toThrow(/404/);
-    await expect(getJob(999)).rejects.toThrow(/job not found/);
+    const err = await getJob(999).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(404);
+    expect(err.detail).toBe("job not found");
+    // The user-facing message stays short - the raw body is not in it.
+    expect(err.message).not.toContain("job not found");
+  });
+
+  it("rejects with an ApiError (status null) when the server is unreachable", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(new TypeError("Failed to fetch")),
+    );
+
+    const err = await getJob(1).catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBeNull();
   });
 
   it("PATCHes application status with a JSON body", async () => {
