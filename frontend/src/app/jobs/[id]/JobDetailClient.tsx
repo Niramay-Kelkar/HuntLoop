@@ -77,8 +77,13 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
                       </span>
                     )}
                   </p>
-                  <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-sm text-text-subtle">
+                  <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-text-subtle">
                     <span>{detail.locations.length > 0 ? detail.locations.join(" / ") : "Location not listed"}</span>
+                    {detail.employment_type && (
+                      <span className="border border-border px-1.5 py-px font-mono text-2xs uppercase tracking-[0.04em] text-text-muted">
+                        {detail.employment_type}
+                      </span>
+                    )}
                     {postedDate && <span>Posted {postedDate}</span>}
                   </div>
                 </div>
