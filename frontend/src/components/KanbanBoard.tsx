@@ -9,11 +9,12 @@ import { STATUS_META, STATUS_ORDER, avatarColors, initials, scoreTier, timeAgo }
 import type { ApplicationStatus } from "@/types/api";
 
 /**
- * Drag-and-drop status board - uses native HTML5 drag events, matching
- * design/HuntLoop.dc.html's kanbanColumns exactly (draggable card,
- * onDragStart/onDragOver/onDrop), wired to the same
- * PATCH /jobs/{id}/application mutation (with optimistic update +
- * rollback-on-failure) as everywhere else status can be changed.
+ * Drag-and-drop status board - native HTML5 drag events (draggable
+ * card, onDragStart/onDragOver/onDrop), wired to the same
+ * PATCH /jobs/{id}/application mutation (optimistic + rollback) as
+ * everywhere else status can be changed. Behavior unchanged; the
+ * "Register" identity squares the columns and cards and drops the
+ * card shadows for hairline rules.
  */
 export function KanbanBoard({ jobs }: { jobs: JobSummary[] }) {
   const mutation = useApplicationStatusMutation();
@@ -27,7 +28,7 @@ export function KanbanBoard({ jobs }: { jobs: JobSummary[] }) {
   }
 
   return (
-    <div className="flex items-start gap-3.5 overflow-x-auto pb-2">
+    <div className="flex items-start gap-3 overflow-x-auto pb-2">
       {STATUS_ORDER.map((status) => {
         const meta = STATUS_META[status];
         const colJobs = jobs.filter((j) => j.application_status === status);
@@ -40,13 +41,13 @@ export function KanbanBoard({ jobs }: { jobs: JobSummary[] }) {
             }}
             onDragLeave={() => setDragOverCol((cur) => (cur === status ? null : cur))}
             onDrop={(e) => handleDrop(e, status)}
-            className={`flex min-w-[236px] flex-1 flex-col gap-2.5 rounded-xl bg-kanban-bg p-2.5 ${
-              dragOverCol === status ? "ring-2 ring-accent" : ""
+            className={`flex min-w-[236px] flex-1 flex-col gap-2 border border-border bg-kanban-bg p-2 ${
+              dragOverCol === status ? "outline outline-1 outline-accent" : ""
             }`}
           >
-            <div className="flex items-center gap-2 px-1.5 py-1">
-              <span className="h-2 w-2 rounded-full" style={{ backgroundColor: meta.dot }} />
-              <span className="text-[13px] font-semibold text-text">{meta.label}</span>
+            <div className="flex items-center gap-2 border-b border-border px-1 py-1.5">
+              <span className="h-2 w-2 flex-none" style={{ backgroundColor: meta.dot }} />
+              <span className="text-sm font-semibold text-text">{meta.label}</span>
               <span className="ml-auto font-mono text-xs text-text-faintest">{colJobs.length}</span>
             </div>
 
@@ -63,38 +64,35 @@ export function KanbanBoard({ jobs }: { jobs: JobSummary[] }) {
                     e.dataTransfer.setData("text/plain", String(job.id));
                     e.dataTransfer.effectAllowed = "move";
                   }}
-                  className="cursor-pointer rounded-lg border border-border bg-surface p-3 hover:shadow-[0_4px_14px_rgba(0,0,0,.08)]"
+                  className="cursor-pointer border border-border bg-surface p-2.5 hover:border-border-strong"
                 >
                   <div className="mb-2 flex items-center gap-2">
                     <div
-                      className="grid h-[30px] w-[30px] flex-none place-items-center rounded-lg font-mono text-[11px] font-bold"
+                      className="grid h-[28px] w-[28px] flex-none place-items-center rounded-sm font-mono text-2xs font-semibold"
                       style={{ backgroundColor: avatar.bg, color: avatar.color }}
                     >
                       {initials(job.company_name)}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <div className="truncate text-[13px] font-semibold text-text">{job.job_title}</div>
-                      <div className="text-[11px] text-text-subtle">{job.company_name}</div>
+                      <div className="truncate text-sm font-semibold text-text">{job.job_title}</div>
+                      <div className="text-xs text-text-subtle">{job.company_name}</div>
                     </div>
                   </div>
                   <div className="flex items-center justify-between">
                     {job.match_score !== null && tier ? (
-                      <span
-                        className="rounded-md px-2 py-0.5 font-mono text-xs font-bold"
-                        style={{ backgroundColor: tier.bg, color: tier.color }}
-                      >
-                        {Math.round(job.match_score * 100)}%
+                      <span className="font-mono text-xs font-semibold" style={{ color: tier.color }}>
+                        {Math.round(job.match_score * 100)}
                       </span>
                     ) : (
-                      <span className="font-mono text-xs text-text-faintest">—</span>
+                      <span className="font-mono text-xs text-text-faintest">--</span>
                     )}
-                    <span className="flex items-center gap-1 font-mono text-[11px] text-text-faintest">
+                    <span className="flex items-center gap-1 font-mono text-2xs text-text-faintest">
                       {job.application_notes ? (
                         <span title={job.application_notes} aria-label="Has a note">
                           ✎
                         </span>
                       ) : null}
-                      {updatedLabel ?? "—"}
+                      {updatedLabel ?? "--"}
                     </span>
                   </div>
                 </Link>
@@ -102,7 +100,9 @@ export function KanbanBoard({ jobs }: { jobs: JobSummary[] }) {
             })}
 
             {colJobs.length === 0 && (
-              <div className="py-3.5 text-center font-mono text-[11px] text-[#b8b1a7]">Drop here</div>
+              <div className="py-3 text-center font-mono text-2xs uppercase tracking-[0.08em] text-text-faintest">
+                Drop here
+              </div>
             )}
           </div>
         );

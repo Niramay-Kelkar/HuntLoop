@@ -58,9 +58,9 @@ export function NotesEditor({
             textareaRef.current?.blur();
           }
         }}
-        className="w-full resize-y rounded-lg border border-border bg-surface px-2.5 py-1.5 text-[13px] leading-relaxed text-text placeholder:text-text-faintest focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent"
+        className="w-full resize-y border border-border-strong bg-surface px-2.5 py-1.5 text-sm leading-relaxed text-text placeholder:text-text-faintest focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
       />
-      {mutation.isPending && <span className="font-mono text-[10px] text-text-faintest">Saving…</span>}
+      {mutation.isPending && <span className="font-mono text-2xs text-text-faintest">Saving…</span>}
     </div>
   );
 }

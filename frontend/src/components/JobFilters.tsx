@@ -105,26 +105,15 @@ function activeChips(value: JobFiltersValue): { key: string; label: string; next
 
 /**
  * Only the filters the real API supports get built here: company text
- * match, department, employment type, location (a simple case-insensitive
- * substring match - NOT radius/geocoding search, which stays out of
- * scope, see CLAUDE.md), min match score, estimated-salary range, and
- * sort.
+ * match, department, employment type, location (exact match on the
+ * canonical location groups, OR'd), min match score, estimated-salary
+ * range, and sort. This component is purely a UI/UX layer over
+ * `value`/`onChange` - it does not query the jobs list or shape API
+ * params itself.
  *
- * Department options are the canonical department CATEGORIES from GET
- * /jobs/departments (see huntloop.department_categorization) - the raw
- * scraped department strings (~4,800 messy per-company values) are
- * mapped onto a controlled set of ~18 categories, and only categories
- * actually present in the data are listed. Leaving the department filter
- * unset returns postings regardless of category, including ones with
- * none (NULL) - filtering is additive/optional, never silently
- * exclusionary. Selecting "Not specified" explicitly filters down to
- * only the postings with no category (see CLAUDE.md).
- *
- * This component is purely a UI/UX layer over `value`/`onChange` - it
- * does not query the jobs list or shape API params itself. The controls
- * live in a collapsible body; the header always shows how many filters
- * are active, the result count for the current combination, removable
- * chips for each active filter, and a single "Clear all" control.
+ * Visual identity: Direction A, "Register" - the panel is drawn with
+ * hairline rules, square-cornered ruled controls, and mono field
+ * labels; the active filters read as square ledger tags.
  */
 export function JobFilters({
   value,
@@ -146,25 +135,28 @@ export function JobFilters({
   const chips = activeChips(value);
   const anyFilterSet = chips.length > 0;
 
+  const selectClass =
+    "w-full appearance-none border border-border-strong bg-surface py-2 pl-3 pr-7 text-sm text-text focus:border-accent focus:outline-none sm:w-auto";
+
   return (
-    <div className="rounded-xl border border-border bg-surface">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-3">
+    <div className="border border-border bg-surface">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 px-4 py-2.5">
         <button
           type="button"
           onClick={() => setExpanded((e) => !e)}
           aria-expanded={expanded}
-          className="flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wide text-text-faint hover:text-text"
+          className="flex items-center gap-1.5 font-mono text-xs uppercase tracking-[0.1em] text-text-faint hover:text-text"
         >
-          <span className="text-[9px]">{expanded ? "▼" : "▶"}</span>
+          <span className="text-2xs">{expanded ? "▾" : "▸"}</span>
           Filters
           {anyFilterSet && (
-            <span className="rounded-full bg-accent-soft px-1.5 py-px text-[10px] font-semibold text-accent">
+            <span className="border border-accent px-1 py-px font-mono text-2xs font-semibold text-accent">
               {chips.length}
             </span>
           )}
         </button>
 
-        <span className="font-mono text-[11px] text-text-faintest" aria-live="polite">
+        <span className="font-mono text-xs text-text-faintest" aria-live="polite">
           {isLoading || resultCount === undefined
             ? "…"
             : `${resultCount.toLocaleString()} ${resultCount === 1 ? "result" : "results"}`}
@@ -176,9 +168,9 @@ export function JobFilters({
           <button
             type="button"
             onClick={() => onChange({ ...EMPTY_FILTERS, sort: value.sort })}
-            className="font-mono text-[11px] text-accent hover:text-accent-hover"
+            className="font-mono text-xs uppercase tracking-[0.04em] text-accent hover:text-accent-hover"
           >
-            Clear all ✕
+            Clear all
           </button>
         )}
       </div>
@@ -191,7 +183,7 @@ export function JobFilters({
               type="button"
               onClick={() => onChange(chip.next)}
               aria-label={`Remove filter ${chip.label}`}
-              className="flex items-center gap-1 rounded-full border border-border-strong bg-surface-alt py-1 pl-2.5 pr-2 text-[12px] text-text-subtle hover:border-accent hover:text-text"
+              className="flex items-center gap-1.5 border border-border-strong bg-surface-alt py-1 pl-2 pr-1.5 font-mono text-xs text-text-subtle hover:border-accent hover:text-text"
             >
               {chip.label}
               <span className="text-text-faintest">✕</span>
@@ -210,14 +202,14 @@ export function JobFilters({
                 placeholder="Search by company…"
                 value={value.company}
                 onChange={(e) => onChange({ ...value, company: e.target.value })}
-                className="w-full rounded-lg border border-border-strong bg-surface-alt py-2.5 pl-8 pr-3 text-[13px] text-text focus:border-accent focus:outline-none"
+                className="w-full border border-border-strong bg-surface-alt py-2.5 pl-8 pr-3 text-sm text-text focus:border-accent focus:outline-none"
               />
             </div>
             <div className="relative w-full sm:w-auto">
               <select
                 value={value.department}
                 onChange={(e) => onChange({ ...value, department: e.target.value })}
-                className="w-full appearance-none rounded-lg border border-border-strong bg-surface py-2 pl-3 pr-7 text-[13px] text-text"
+                className={selectClass}
               >
                 <option value="">All departments</option>
                 {departments.data?.map((department) => (
@@ -227,15 +219,15 @@ export function JobFilters({
                 ))}
                 <option value={UNSPECIFIED_DEPARTMENT}>Not specified</option>
               </select>
-              <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-faintest">
-                ▼
+              <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-2xs text-text-faintest">
+                ▾
               </span>
             </div>
             <div className="relative w-full sm:w-auto">
               <select
                 value={value.employmentType}
                 onChange={(e) => onChange({ ...value, employmentType: e.target.value })}
-                className="w-full appearance-none rounded-lg border border-border-strong bg-surface py-2 pl-3 pr-7 text-[13px] text-text"
+                className={selectClass}
               >
                 <option value="">All employment types</option>
                 {employmentTypes.data?.map((type) => (
@@ -245,8 +237,8 @@ export function JobFilters({
                 ))}
                 <option value={UNSPECIFIED_EMPLOYMENT_TYPE}>Not specified</option>
               </select>
-              <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-faintest">
-                ▼
+              <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-2xs text-text-faintest">
+                ▾
               </span>
             </div>
             <LocationMultiSelect
@@ -258,21 +250,21 @@ export function JobFilters({
               <select
                 value={value.sort}
                 onChange={(e) => onChange({ ...value, sort: e.target.value as JobFiltersValue["sort"] })}
-                className="w-full appearance-none rounded-lg border border-border-strong bg-surface py-2 pl-3 pr-7 text-[13px] text-text"
+                className={selectClass}
               >
                 <option value="-score">Sort: Best match</option>
                 <option value="-date">Sort: Most recent</option>
                 <option value="-salary">Sort: Highest salary</option>
               </select>
-              <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-faintest">
-                ▼
+              <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-2xs text-text-faintest">
+                ▾
               </span>
             </div>
           </div>
 
           <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-3 border-t border-divider pt-3">
             <div className="flex min-w-[230px] items-center gap-2.5">
-              <span className="whitespace-nowrap font-mono text-[11px] uppercase tracking-wide text-text-faintest">
+              <span className="whitespace-nowrap font-mono text-xs uppercase tracking-[0.08em] text-text-faint">
                 Min match
               </span>
               <input
@@ -284,10 +276,10 @@ export function JobFilters({
                 onChange={(e) => onChange({ ...value, minScore: String(Number(e.target.value) / 100) })}
                 className="min-w-[110px] flex-1"
               />
-              <span className="w-9 text-right font-mono text-[13px] font-semibold">{minScorePercent}%</span>
+              <span className="w-9 text-right font-mono text-sm font-semibold">{minScorePercent}%</span>
             </div>
             <div className="flex flex-wrap items-center gap-2.5">
-              <span className="whitespace-nowrap font-mono text-[11px] uppercase tracking-wide text-text-faintest">
+              <span className="whitespace-nowrap font-mono text-xs uppercase tracking-[0.08em] text-text-faint">
                 Est. salary
               </span>
               <input
@@ -298,7 +290,7 @@ export function JobFilters({
                 value={value.salaryMin}
                 disabled={value.salaryUnspecified}
                 onChange={(e) => onChange({ ...value, salaryMin: e.target.value })}
-                className="w-24 rounded-lg border border-border-strong bg-surface-alt py-1.5 px-2 text-[13px] text-text disabled:opacity-40"
+                className="w-24 border border-border-strong bg-surface-alt py-1.5 px-2 text-sm text-text focus:border-accent focus:outline-none disabled:opacity-40"
               />
               <span className="text-text-faintest">–</span>
               <input
@@ -309,9 +301,9 @@ export function JobFilters({
                 value={value.salaryMax}
                 disabled={value.salaryUnspecified}
                 onChange={(e) => onChange({ ...value, salaryMax: e.target.value })}
-                className="w-24 rounded-lg border border-border-strong bg-surface-alt py-1.5 px-2 text-[13px] text-text disabled:opacity-40"
+                className="w-24 border border-border-strong bg-surface-alt py-1.5 px-2 text-sm text-text focus:border-accent focus:outline-none disabled:opacity-40"
               />
-              <label className="flex items-center gap-1.5 text-[12px] text-text-subtle">
+              <label className="flex items-center gap-1.5 text-sm text-text-subtle">
                 <input
                   type="checkbox"
                   checked={value.salaryUnspecified}
@@ -320,7 +312,7 @@ export function JobFilters({
                 No estimate
               </label>
             </div>
-            <span className="font-mono text-[10px] text-text-faintest">
+            <span className="font-mono text-2xs text-text-faintest">
               Salary is an employer-level estimate from DOL filings, not a posted salary
             </span>
           </div>

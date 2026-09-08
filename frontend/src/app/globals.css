@@ -1,28 +1,50 @@
 @import "tailwindcss";
 
 /*
- * Palette extracted pixel-for-pixel from design/HuntLoop.dc.html (Claude
- * Design mockup - see CLAUDE.md for where the reference file lives). This
- * is a single fixed bright theme, matching the mockup, which hardcodes
- * colors rather than responding to prefers-color-scheme - no dark mode.
+ * Visual identity: Direction A, "Register" (see
+ * design/HuntLoop-visual-identity proposal + SESSIONS.md).
+ *
+ * A public-records / federal-forms register: cool paper, near-black
+ * ink, one deep form-blue for every interactive element, hairline
+ * rules instead of card chrome, square/minimal corners, no drop
+ * shadows. Structural type is Public Sans (the US federal typeface -
+ * this app runs on DOL filing data); every figure is IBM Plex Mono,
+ * tabular. Single fixed bright theme, no dark mode - the register is
+ * paper.
  */
 :root {
-  --color-bg: #f4f2ef;
+  /* --- surfaces --- */
+  --color-bg: #f4f5f6;
   --color-surface: #ffffff;
-  --color-surface-alt: #faf9f7;
-  --color-kanban-bg: #efece7;
-  --color-border: #e7e3dd;
-  --color-border-strong: #e0dcd5;
-  --color-divider: #f2efea;
-  --color-text: #1c1a17;
-  --color-text-secondary: #3a352f;
-  --color-text-muted: #5a544c;
-  --color-text-subtle: #78736c;
-  --color-text-faint: #8a837a;
-  --color-text-faintest: #a89f95;
-  --color-accent: #e0533d;
-  --color-accent-hover: #c8442f;
-  --color-accent-soft: #fdece7;
+  --color-surface-alt: #eef0f2;
+  --color-kanban-bg: #e9ebee;
+
+  /* --- rules --- */
+  --color-border: #d5d9dd;
+  --color-border-strong: #c6ccd2;
+  --color-divider: #e4e7ea;
+
+  /* --- ink --- */
+  --color-text: #16191d;
+  --color-text-secondary: #2b3038;
+  --color-text-muted: #3c434c;
+  --color-text-subtle: #5b6570;
+  --color-text-faint: #78818b;
+  --color-text-faintest: #929aa3;
+
+  /* --- the one accent: deep form-blue --- */
+  --color-accent: #1b4965;
+  --color-accent-hover: #14384f;
+  --color-accent-soft: #e7eef2;
+
+  /* --- semantic, cooled to sit beside the blue --- */
+  --color-good: #2f7d4f;
+  --color-good-bg: #ecf3ee;
+  --color-good-border: #cfe0d5;
+  --color-warn: #9a6a1c;
+  --color-warn-bg: #f4ede0;
+  --color-bad: #b0432f;
+  --color-bad-bg: #f4e9e6;
 }
 
 @theme inline {
@@ -42,23 +64,63 @@
   --color-accent: var(--color-accent);
   --color-accent-hover: var(--color-accent-hover);
   --color-accent-soft: var(--color-accent-soft);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-jetbrains-mono);
+  --color-good: var(--color-good);
+  --color-good-bg: var(--color-good-bg);
+  --color-good-border: var(--color-good-border);
+  --color-warn: var(--color-warn);
+  --color-warn-bg: var(--color-warn-bg);
+  --color-bad: var(--color-bad);
+  --color-bad-bg: var(--color-bad-bg);
+
+  /*
+   * Type scale: 24 / 20 / 16 / 13 / 11 (+ a 10 for micro-captions and a
+   * 30 for the dashboard's big figures). Tailwind's size utilities are
+   * remapped onto it so `text-sm` etc. mean the register's steps
+   * everywhere, and the old one-off `text-[13px]` pixel values are gone.
+   */
+  --text-2xs: 0.625rem;   /* 10px */
+  --text-2xs--line-height: 1.4;
+  --text-xs: 0.6875rem;   /* 11px */
+  --text-xs--line-height: 1.45;
+  --text-sm: 0.8125rem;   /* 13px */
+  --text-sm--line-height: 1.5;
+  --text-base: 1rem;      /* 16px */
+  --text-base--line-height: 1.55;
+  --text-lg: 1.25rem;     /* 20px */
+  --text-lg--line-height: 1.3;
+  --text-xl: 1.5rem;      /* 24px */
+  --text-xl--line-height: 1.2;
+  --text-2xl: 1.5rem;     /* 24px - alias, page titles */
+  --text-2xl--line-height: 1.2;
+  --text-3xl: 1.875rem;   /* 30px - big figures only */
+  --text-3xl--line-height: 1.05;
+
+  /* square-to-minimal corners; the register is drawn with rules */
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 3px;
+  --radius-xl: 4px;
+  --radius-2xl: 4px;
+
+  --font-sans: var(--font-public-sans), "Helvetica Neue", Arial, system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-/*
- * Everything below is in Tailwind's `base` layer, not the unlayered
- * cascade - unlayered CSS always wins over Tailwind's own (layered)
- * utilities regardless of specificity, which silently broke `text-white`
- * on the Apply button (its color kept losing to this file's plain `a`
- * rule) until this was scoped into @layer base.
- */
 @layer base {
   body {
     background: var(--color-bg);
     color: var(--color-text);
-    font-family: "Helvetica Neue", Helvetica, Arial, var(--font-sans), system-ui, sans-serif;
+    /* the declared font first, so it actually renders (the previous
+       stack led with Helvetica Neue and never reached the web font) */
+    font-family: var(--font-public-sans), "Helvetica Neue", Arial, system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
+    font-synthesis-weight: none;
+  }
+
+  /* every figure lines up in its column */
+  .font-mono {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
   }
 
   a {
@@ -80,14 +142,28 @@
     accent-color: var(--color-accent);
   }
 
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 1px;
+  }
+
   ::-webkit-scrollbar {
     height: 10px;
     width: 10px;
   }
   ::-webkit-scrollbar-thumb {
-    background: #d9d3cb;
-    border-radius: 6px;
+    background: #c6ccd2;
+    border-radius: 0;
     border: 2px solid var(--color-bg);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      transition-duration: 0.001ms !important;
+    }
   }
 }
 

@@ -16,8 +16,11 @@ export function Pagination({
   const rangeStart = total === 0 ? 0 : offset + 1;
   const rangeEnd = Math.min(offset + limit, total);
 
+  const buttonClass =
+    "border border-border-strong px-3 py-1.5 font-mono text-xs font-medium uppercase tracking-[0.04em] text-text-muted disabled:cursor-not-allowed disabled:opacity-40 enabled:hover:border-accent enabled:hover:text-accent";
+
   return (
-    <div className="flex items-center justify-between gap-4 text-sm">
+    <div className="flex items-center justify-between gap-4">
       <p className="font-mono text-xs text-text-faintest">
         {total === 0 ? "0 results" : `${rangeStart}-${rangeEnd} of ${total}`}
       </p>
@@ -27,7 +30,7 @@ export function Pagination({
           type="button"
           disabled={currentPage <= 1}
           onClick={() => onOffsetChange(Math.max(0, offset - limit))}
-          className="rounded-lg border border-border-strong px-3 py-1.5 font-medium text-text-muted disabled:cursor-not-allowed disabled:opacity-40 enabled:hover:bg-surface-alt"
+          className={buttonClass}
         >
           Previous
         </button>
@@ -38,7 +41,7 @@ export function Pagination({
           type="button"
           disabled={currentPage >= totalPages}
           onClick={() => onOffsetChange(offset + limit)}
-          className="rounded-lg border border-border-strong px-3 py-1.5 font-medium text-text-muted disabled:cursor-not-allowed disabled:opacity-40 enabled:hover:bg-surface-alt"
+          className={buttonClass}
         >
           Next
         </button>

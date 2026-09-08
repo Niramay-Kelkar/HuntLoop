@@ -75,14 +75,16 @@ export default function JobsPage() {
 
   return (
     <main className="flex flex-1 flex-col gap-4">
-      <div className="flex flex-wrap items-end justify-between gap-3">
+      <div className="flex flex-wrap items-end justify-between gap-3 border-b border-border pb-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-text">Jobs</h1>
-          <p className="mt-0.5 text-[13px] text-text-subtle">
+          <h1 className="text-xl font-bold tracking-tight text-text">Jobs</h1>
+          <p className="mt-1 text-sm text-text-subtle">
             {jobs.isSuccess ? (
               <>
-                <span className="font-mono font-semibold text-text">{jobs.data.total}</span> postings · scored
-                against your active resume
+                <span className="font-mono font-semibold text-text">
+                  {jobs.data.total.toLocaleString()}
+                </span>{" "}
+                postings scored against your active resume
               </>
             ) : (
               "Scored against your active resume"
@@ -109,7 +111,7 @@ export default function JobsPage() {
       {jobs.isPending && (
         <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
           {Array.from({ length: 6 }).map((_, i) => (
-            <div key={i} className="h-40 animate-pulse rounded-xl border border-border bg-surface-alt" />
+            <div key={i} className="h-40 animate-pulse border border-border bg-surface-alt" />
           ))}
         </div>
       )}

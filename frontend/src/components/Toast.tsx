@@ -47,9 +47,11 @@ export function ToastProvider({ children }: { children: React.ReactNode }) {
           <div
             key={t.id}
             role="status"
-            className={`pointer-events-auto rounded-lg px-4 py-2.5 text-sm font-medium text-white shadow-lg ${
-              t.variant === "success" ? "bg-emerald-600" : "bg-red-600"
-            }`}
+            className="pointer-events-auto border-l-2 px-4 py-2.5 text-sm font-medium text-white shadow-[0_6px_20px_rgba(20,30,40,.22)]"
+            style={{
+              backgroundColor: t.variant === "success" ? "var(--color-good)" : "var(--color-bad)",
+              borderColor: "rgba(255,255,255,.5)",
+            }}
           >
             {t.message}
           </div>

@@ -8,14 +8,18 @@ export function SegmentedToggle<T extends string>({
   onChange: (value: T) => void;
 }) {
   return (
-    <div className="flex overflow-hidden rounded-lg border border-border-strong bg-surface">
-      {options.map((opt) => (
+    <div className="flex border border-border-strong">
+      {options.map((opt, i) => (
         <button
           key={opt.value}
           type="button"
           onClick={() => onChange(opt.value)}
-          className={`px-3.5 py-2 font-mono text-xs font-semibold ${
-            value === opt.value ? "bg-accent text-white" : "text-text-subtle hover:text-text"
+          className={`px-3 py-1.5 font-mono text-xs font-medium uppercase tracking-[0.04em] ${
+            i > 0 ? "border-l border-border-strong" : ""
+          } ${
+            value === opt.value
+              ? "bg-accent text-white"
+              : "bg-surface text-text-subtle hover:text-text"
           }`}
         >
           {opt.label}

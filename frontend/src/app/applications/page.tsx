@@ -58,10 +58,10 @@ export default function ApplicationsPage() {
 
   return (
     <main className="flex flex-1 flex-col gap-4">
-      <div className="flex flex-wrap items-end justify-between gap-3">
+      <div className="flex flex-wrap items-end justify-between gap-3 border-b border-border pb-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-text">Applications</h1>
-          <p className="mt-0.5 text-[13px] text-text-subtle">
+          <h1 className="text-xl font-bold tracking-tight text-text">Applications</h1>
+          <p className="mt-1 text-sm text-text-subtle">
             Every job you&apos;ve set a status on. Drag cards between columns to update status.
           </p>
         </div>
@@ -76,7 +76,7 @@ export default function ApplicationsPage() {
       </div>
 
       {jobs.isPending && (
-        <div className="h-64 animate-pulse rounded-xl border border-border bg-surface-alt" />
+        <div className="h-64 animate-pulse border border-border bg-surface-alt" />
       )}
 
       {jobs.isError && (
@@ -99,7 +99,7 @@ export default function ApplicationsPage() {
             onChange={(e) => setSearch(e.target.value)}
             placeholder="Search your applications by role or company…"
             aria-label="Search applications"
-            className="w-full max-w-sm rounded-lg border border-border bg-surface px-3 py-1.5 text-[13px] text-text placeholder:text-text-faintest focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent"
+            className="w-full max-w-sm border border-border-strong bg-surface px-3 py-1.5 text-sm text-text placeholder:text-text-faintest focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
           />
           {filtered.length === 0 ? (
             <EmptyState

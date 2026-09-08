@@ -11240,3 +11240,154 @@ groq_120b,groq,gemini`, the default since the 2026-09-04 promotion):
   open (one data point).
 - Boot-catchup real-world firing: **still open** — no reboot-through-3am
   has occurred since it was built.
+
+---
+
+## 2026-09-07 — Frontend visual identity: implement Direction A, "Register" (`visual-identity-register`)
+
+**Context:** The frontend had grown screen-by-screen on top of a ported
+Claude Design mockup with no deliberate design pass. A proposal
+(published as an Artifact — "HuntLoop Visual Identity", 2026-09-07)
+assessed the current state as intentional-looking but templated (warm
+cream + terracotta accent, all-caps eyebrows, arrow-suffixed actions,
+middle-dot meta strings, one radius + one shadow on everything, no type
+scale, and a font-stack bug where the declared Geist never rendered on
+macOS) and offered three directions. This session implements the
+recommended one, **Direction A ("Register")** — a public-records /
+federal-forms register: cool paper, near-black ink, one deep form-blue
+accent, hairline rules, square corners, no shadows; structural type in
+Public Sans (the US federal typeface — the app runs on DOL filing data),
+every figure in IBM Plex Mono; score shown as a horizontal gauge with
+the raw number in mono; sponsor status shown as a ruled "stamp".
+
+**Pre-flight:** `ps aux` — no scraper / backfill / orchestrator process
+running; both launchd jobs registered but idle (last exit 0). Postgres
+`pg_locks` — no advisory lock held. Safe to proceed.
+
+**Did (frontend only — no backend / API / scraper code touched):**
+- **Fonts, done properly.** `next/font/google` `Public_Sans` (variable)
+  + `IBM_Plex_Mono` (explicit weights 400/500/600), each exposed as a
+  CSS variable. The previous bug — body stack led with `"Helvetica
+  Neue"` so the web font never won on macOS — is fixed by putting
+  `var(--font-public-sans)` **first** in the stack, in both `body` and
+  the Tailwind `--font-sans`/`--font-mono` tokens. Verified live via
+  `document.fonts`: `Public Sans` and `IBM Plex Mono` report `loaded`,
+  `document.fonts.check()` true for both, and the rendered `<h1>`
+  computed `font-family` resolves to `"Public Sans", …` first. Geist
+  import removed.
+- **Palette + type scale** in `globals.css` + `lib/theme.ts`: cool
+  paper `#f4f5f6`, ink `#16191d`, one accent `#1b4965` (+ hover), a
+  cooled semantic set (`--color-good #2f7d4f` etc.) so score-gradient
+  and sponsor greens harmonize with the blue instead of the old
+  terracotta. Tailwind's size utilities remapped onto a real
+  24/20/16/13/11 scale (`--text-*` tokens); every one-off `text-[Npx]`
+  across components/pages replaced with scale classes. Radius tokens
+  cut to 2-4px. `.font-mono` now sets `tabular-nums` globally.
+- **Density:** card `border` + hairline dividers replace the
+  `rounded-xl` + soft-shadow-on-everything pattern; job cards / stat
+  cards / job-detail header gain a 2px form-blue top rule; the jobs
+  table, applications list and kanban are drawn with rules, not stacked
+  shadowed cards.
+- **ScoreIndicator** rewritten from the conic ring to a horizontal
+  gauge (raw percent in mono + a tier-colored fill bar calibrated to
+  `SCORE_CEILING`), consistent across job cards (`sm`), table (`sm`)
+  and job detail (`lg`, with a "match score" caption). Name and `size`
+  prop unchanged so every call site switched over untouched.
+- **SponsorBadge** rewritten to the ruled stamp: solid form-blue rule
+  "H-1B on file", dashed neutral rule "No LCA record" (the list
+  endpoint carries only the boolean; the detail page still shows the
+  real filing figures).
+- **Small tokens:** filter chips → square, hairline-ruled, mono;
+  `StatusControl` → square ruled mono select (semantic status colors
+  kept); `SegmentedToggle`, `Pagination`, `NotesEditor`,
+  `LocationMultiSelect` trigger, `EmptyState`/`ErrorState`,
+  `Toast` all squared and de-shadowed.
+- **Generic-pattern removal:** the "OVERVIEW" eyebrow over "Dashboard",
+  "Open tracker →" / "Apply ↗" arrow suffixes, "Back to jobs" arrow,
+  and the middle-dot meta strings ("Pune · Pune, IN", "company ·
+  Full-time", "company · department") are gone — replaced with plain
+  headings, plain action labels, `" / "` location joins, and
+  employment-type / department rendered as their own ruled mono tokens.
+- Applied consistently across **every** page: dashboard, jobs (cards +
+  table), job detail, applications (board + list), filters, resume,
+  empty/error/loading states.
+- **Tests:** updated `SponsorBadge` / `JobCard` / `JobTable` tests for
+  the new stamp wording and the table's role-line layout (behavior
+  asserted is unchanged — text/markup only); added
+  `ScoreIndicator.test.tsx` (5 tests) for the gauge's raw-vs-calibrated
+  split and null handling.
+
+**Verified:**
+- `npm run build` — clean (Public Sans + IBM Plex Mono fetched at build
+  with no error). `tsc --noEmit` — clean. `eslint src` — clean.
+- Frontend test suite: **before 10 files / 63 tests passing → after 11
+  files / 68 tests passing**, 0 failures.
+- Real interaction checks against the running app + API (not just
+  visual review): company text filter (99,043 → 320), min-match slider
+  (→ 141), sort change, location multi-select (adds a 3rd chip, OR
+  semantics, → 0 for palantir+Toronto+40%), clear-all resets every
+  chip; status change via the card select (toast + `GET /jobs/{id}`
+  shows `applied`), via kanban drag-and-drop (Applied → Interviewing,
+  persisted), via the list; note edit saves on blur (persisted,
+  "Note saved" toast). All test application rows reset to `not_applied`
+  and the note cleared afterward — the tracker is back to empty.
+- Before/after screenshots captured for every major page at desktop
+  (1440) and narrow (≈500, this browser's floor — below the `sm`
+  breakpoint, so it exercises the real single-column mobile layout).
+  Mobile: filters stack, dashboard/stat cards stack, job detail stacks
+  with the gauge beside the wrapping title, the kanban scrolls
+  horizontally — all legible.
+
+**Backend:** untouched. Its pytest suite was not run (no backend files
+changed); CI's `frontend-test` job runs the vitest suite that is green
+here.
+
+**Branch:** `visual-identity-register` off `master`. Not merged.
+
+**Deferred / not done:** the two unchosen directions (Console, Field
+Guide) from the proposal; any responsive refinement of the job-detail
+header gauge at true ~390px (legible now, just dense); pure-presentation
+component tests beyond the new ScoreIndicator one.
+
+## 2026-09-07 — Bring back the ring score indicator + fix the mobile job-detail header (`visual-identity-register`)
+
+**Did:** Two visual follow-ups on the same branch/PR as the Register
+identity above, closing out its "known follow-up" item.
+
+- **`ScoreIndicator` back to a ring.** The reviewer found the circular
+  dial easier to read and more appealing than the flat gauge bar. It's
+  now a conic dial again — the raw match percent in mono at the centre,
+  a tier-colored arc around it — but reskinned onto Register's palette,
+  not reverted: the arc uses the cooled semantic score-tier colors from
+  `lib/theme.ts`, the track and outer edge are the neutral hairline
+  border rule (`--color-border`), no drop shadow. The real calibration
+  is unchanged — the arc sweep is the score's fraction of
+  `SCORE_CEILING` while the printed number stays the true raw percent —
+  and the `size` prop / name / null handling are all preserved, so
+  every call site (job cards `sm`, table `sm`, job detail `lg` with its
+  "match score" caption) switched over untouched. The mono numeric
+  readout kept from the gauge version lives at the centre of the ring.
+- **Mobile job-detail header.** At the narrow single-column width the
+  large indicator packed tightly against a wrapping title. The header
+  row is now `flex-col` below the `sm` breakpoint and `flex-row` at and
+  above it: the avatar + title + meta group takes the full width and
+  the indicator drops to its own row beneath, left-aligned. Desktop
+  layout is unchanged (indicator beside the title as before).
+- **Tests:** `ScoreIndicator.test.tsx` wording updated from "gauge" to
+  "ring"; the behavioral assertions (raw-vs-calibrated split, cap above
+  ceiling, null → dash, large-size caption + "not scored") are
+  unchanged.
+
+**Verified:**
+- Frontend test suite green, same count before and after; `eslint`,
+  `tsc --noEmit`, and `npm run build` all clean.
+- Before/after screenshots of the score indicator across job cards,
+  table view, and the job-detail header (desktop 1440 + narrow), and
+  before/after of the mobile job-detail header. True 390px is still
+  below this machine's Chrome minimum window width (~500px, same limit
+  noted in the entry above), so the narrow captures are at 500px, which
+  renders the identical sub-`sm` mobile layout the fix targets. Before:
+  the title wrapped to four cramped lines beside the gauge; after: it
+  wraps to two full-width lines with the ring on its own row below.
+
+**Branch:** `visual-identity-register`, same PR. Not merged.

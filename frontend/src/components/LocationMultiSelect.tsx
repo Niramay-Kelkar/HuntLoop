@@ -92,17 +92,17 @@ export function LocationMultiSelect({
         aria-expanded={open}
         aria-haspopup="listbox"
         aria-label="Filter by location"
-        className="flex w-full items-center justify-between gap-2 rounded-lg border border-border-strong bg-surface py-2 pl-3 pr-2.5 text-[13px] text-text sm:w-[220px]"
+        className="flex w-full items-center justify-between gap-2 border border-border-strong bg-surface py-2 pl-3 pr-2.5 text-sm text-text focus:border-accent focus:outline-none sm:w-[220px]"
       >
         <span className="truncate">{label}</span>
-        <span className="text-[10px] text-text-faintest">▼</span>
+        <span className="text-2xs text-text-faintest">▾</span>
       </button>
 
       {open && (
         <div
           role="listbox"
           aria-multiselectable="true"
-          className="absolute left-0 z-20 mt-1 max-h-[min(60vh,340px)] w-[min(320px,calc(100vw-2rem))] overflow-y-auto rounded-lg border border-border-strong bg-surface shadow-lg"
+          className="absolute left-0 z-20 mt-1 max-h-[min(60vh,340px)] w-[min(320px,calc(100vw-2rem))] overflow-y-auto border border-border-strong bg-surface shadow-[0_6px_16px_rgba(20,30,40,.12)]"
         >
           <div className="sticky top-0 flex items-center gap-2 border-b border-divider bg-surface px-2.5 py-2">
             <input
@@ -110,13 +110,13 @@ export function LocationMultiSelect({
               value={filterText}
               onChange={(e) => setFilterText(e.target.value)}
               placeholder="Filter locations…"
-              className="w-full rounded-md border border-border-strong bg-surface-alt px-2 py-1.5 text-[12px] text-text focus:border-accent focus:outline-none"
+              className="w-full border border-border-strong bg-surface-alt px-2 py-1.5 text-xs text-text focus:border-accent focus:outline-none"
             />
             {selected.length > 0 && (
               <button
                 type="button"
                 onClick={() => onChange([])}
-                className="whitespace-nowrap font-mono text-[11px] text-accent hover:text-accent-hover"
+                className="whitespace-nowrap font-mono text-xs text-accent hover:text-accent-hover"
               >
                 Clear
               </button>
@@ -125,7 +125,7 @@ export function LocationMultiSelect({
 
           <ul className="py-1">
             <li>
-              <label className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-[12px] text-text-subtle hover:bg-surface-alt">
+              <label className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs text-text-subtle hover:bg-surface-alt">
                 <input
                   type="checkbox"
                   checked={selectedSet.has(UNSPECIFIED_LOCATION)}
@@ -136,13 +136,13 @@ export function LocationMultiSelect({
             </li>
             {filteredGroups.map((group) => (
               <li key={group.country}>
-                <p className="px-3 pb-1 pt-2 font-mono text-[10px] uppercase tracking-wide text-text-faintest">
+                <p className="px-3 pb-1 pt-2 font-mono text-2xs uppercase tracking-[0.08em] text-text-faintest">
                   {group.country}
                 </p>
                 {group.locations.map((loc) => (
                   <label
                     key={loc}
-                    className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-[13px] text-text hover:bg-surface-alt"
+                    className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm text-text hover:bg-surface-alt"
                   >
                     <input
                       type="checkbox"
@@ -155,7 +155,7 @@ export function LocationMultiSelect({
               </li>
             ))}
             {groups !== undefined && filteredGroups.length === 0 && (
-              <li className="px-3 py-2 text-[12px] text-text-faintest">No matching locations</li>
+              <li className="px-3 py-2 text-xs text-text-faintest">No matching locations</li>
             )}
           </ul>
         </div>
