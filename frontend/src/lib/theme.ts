@@ -48,17 +48,15 @@ export function initials(companyName: string): string {
 }
 
 /**
- * Highest score seen across real backfills so far (~0.593, Palantir
- * "Software Engineer" roles) - a job scoring at or above this reads as a
- * full gauge. Shared so the gauge (ScoreGauge) and any other
- * score-colored UI stay calibrated identically. A generic 0-100 scale
- * would render almost every real job in the same tier.
+ * `match_score` from the API is the composite match score (see
+ * huntloop.match_scoring) - already a calibrated value in [0, 1], so
+ * this is just a clamp to a 0-100 percent. Calibration (embedding
+ * similarity against its ceiling, skills ratio against its ceiling)
+ * moved server-side with composite-match-score-v1; the frontend used to
+ * divide the raw similarity by SCORE_CEILING here.
  */
-export const SCORE_CEILING = 0.6;
-
-/** 0-100 percent, calibrated against SCORE_CEILING - not the raw percent. */
 export function calibratedPercent(score: number): number {
-  return Math.max(0, Math.min(1, score / SCORE_CEILING)) * 100;
+  return Math.max(0, Math.min(1, score)) * 100;
 }
 
 export function scoreTier(score: number): { color: string; bg: string } {

@@ -252,13 +252,19 @@ conventions" and SESSIONS.md for the real current state).
   after the `JobSight`→`HuntLoop` rename — run the API via
   `PYTHONPATH=src .venv/bin/python -m uvicorn huntloop.api.main:app`,
   not the `uvicorn` script directly, until the venv is recreated.
-  `ScoreIndicator` is a **horizontal gauge** as of the Register identity
-  (2026-09-07) — the raw match percent in mono next to a tier-colored
-  fill bar — not the old conic-gradient ring. Its fill is still
-  calibrated to `SCORE_CEILING` (0.6, not 1.0 — green pinned there, see
-  SESSIONS.md's Step 3 histogram) while the printed number stays the
-  real raw percent; don't "fix" the calibration back to a naive 0-1
-  scale, nearly every real job would render in one tier.
+  `ScoreIndicator` is a conic-gradient **ring** again (2026-09-07 revert
+  of a short-lived horizontal gauge) — the match percent in mono at its
+  centre, a tier-colored arc around it. As of composite-match-score-v1
+  (2026-09-08) **`score` is the calibrated composite `match_score` in
+  `[0, 1]`** (see the match-scoring bullet below) — the ring prints
+  `score * 100` and sweeps the same fraction, both straight off it;
+  calibration moved server-side, so `lib/theme.ts` no longer rescales
+  (`calibratedPercent` is now just `clamp(score) * 100`, `SCORE_CEILING`
+  export removed). Don't reintroduce a frontend `/ SCORE_CEILING`.
+  `ScoreIndicator` also takes a `provisional` prop (score_basis
+  `"partial"`) — an accent-blue `*` on the small ring, a "score
+  provisional · skills analysis pending" line under the large one — and
+  `ProvisionalScoreNote` is the matching list/table legend.
   `SponsorBadge` is a ruled "stamp" ("H-1B on file" in form-blue /
   dashed "No LCA record"), not a filled pill. Both changes are applied
   at every call site (job cards, table, job detail, kanban).
@@ -947,13 +953,52 @@ conventions" and SESSIONS.md for the real current state).
   Postgres via `docker compose run --rm -e
   DATABASE_URL="...@host.docker.internal:5432/<db>" app python
   scripts/backfill_embeddings.py` — not the docker-compose `db` on 5433.
-  Match *scores* are **computed at query time** via pgvector's `<=>`
-  cosine-distance operator (`similarity = 1 - distance`), deliberately
+  Match *scores* are **computed at query time**, deliberately
   **not stored** — a stored score would need an invalidation mechanism
   (on every scrape/resume update) that doesn't exist; revisit only if
   live scoring ever becomes measurably slow. (The per-job *embedding* IS
   stored — it doesn't change unless the description does; only the
-  score, which depends on the active resume, is left to query time.) Verified end-to-end against the
+  score, which depends on the active resume, is left to query time.)
+  **As of composite-match-score-v1 (2026-09-08, see SESSIONS.md + the
+  reviewed "Composite Match Score" proposal), `match_score` is NOT raw
+  cosine similarity — it is a calibrated blend of two signals** in
+  `huntloop.match_scoring`: `EMBEDDING_WEIGHT (0.65) * clamp(sim /
+  SCORE_CEILING, 0, 1) + SKILLS_WEIGHT (0.35) * min(ratio /
+  SKILLS_CEILING, 1)` where `ratio = matched_skills / (matched_skills +
+  missing_skills)`, `SCORE_CEILING = 0.6` (moved out of the frontend —
+  calibration is now server-side), `SKILLS_CEILING = 0.66` (~p95 of the
+  real ratio distribution). Weights/ceilings are the already-reviewed
+  proposal values — don't retune without re-reviewing it. A posting
+  gets that full blend ("full" basis) only when `matched_skills` and
+  `missing_skills` are both real JSON arrays totalling ≥
+  `MIN_SKILLS_DENOM` (3) entries; otherwise ("partial" basis — no active
+  skills analysis, ~86% of postings and shrinking only ~1k/day)
+  `match_score` is the calibrated embedding term alone. **`matched_skills
+  = []` alongside a populated `missing_skills` is a real "matches
+  nothing here" signal → full basis, skills term 0, score = `0.65 *
+  emb_cal` (a genuine penalty)** — NOT the same as no-data; only `[]`/`[]`
+  or a total < 3 drops to the fallback. Partial-basis scores are honest
+  best estimates on the same 0-1 scale: they sort and `min_score`-filter
+  interleaved with full-basis scores, never bottom-sorted or excluded
+  for lacking skills data. The API exposes `score_basis`
+  (`"full"`/`"partial"`/`null`) on `GET /jobs` + `GET /jobs/{id}` so the
+  frontend can show a neutral accent-blue "score provisional — skills
+  analysis pending" marker (a compact `*` on the ring in list/table, a
+  spelled-out line under the job-detail ring, plus a list/table legend —
+  `ScoreIndicator` `provisional` prop + `ProvisionalScoreNote`).
+  `match_score_expr(None)` (no active resume) returns `cast(null() AS
+  float)` — a bare untyped NULL literal 500s psycopg's Float processor.
+  **Deferred/dropped, deliberately, per the proposal:**
+  years-of-experience matching is **v1.1** (pending v1 measurement;
+  resume-side YOE is unstructured text, job-side coverage ~40-55% and
+  source-skewed — when built it rides the existing skills-matching batch
+  call as a bounded penalty multiplier, gated on re-validating skills
+  quality per provider); education matching is **dropped** (~40%
+  job-side coverage and the resume satisfies nearly every stated
+  requirement, so it can't re-rank — display-only if ever surfaced); the
+  Groq/Gemini free-tier backlog-spend question is a separate decision,
+  untouched.
+  The original embedding-only scoring was verified end-to-end against the
   real resume + all 605 real job postings: healthy, non-degenerate score
   distribution (min 0.033, max 0.593, mean 0.372) and a by-eye-sane
   top/bottom-5 ranking (top 5 all Palantir "Software Engineer" roles;
@@ -1040,6 +1085,12 @@ conventions" and SESSIONS.md for the real current state).
   with a stable deterministic `id ASC` fallback when the active resume
   has no embedding); `backfill_skills_matching.py` and
   `huntloop.api.routers.jobs` both call that module so they can't drift.
+  **`match_score_expr` returns the composite score as of
+  composite-match-score-v1 (2026-09-08) — see the match-scoring bullet
+  above. For the backfill this is a no-op change: it selects
+  `matched_skills IS NULL` rows, which are all partial-basis, whose
+  composite == the calibrated embedding term, monotonic in raw
+  similarity — same relative order as before.**
   Pacing/`TokenPacer`, provider routing, batch building, and the
   advisory lock were untouched by that change. This is the only
   mechanism now — it both works down

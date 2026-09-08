@@ -84,7 +84,7 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
                 </div>
               </div>
               <div className="flex-none self-start sm:self-auto">
-                <ScoreIndicator score={detail.match_score} size="lg" />
+                <ScoreIndicator score={detail.match_score} size="lg" provisional={detail.score_basis === "partial"} />
               </div>
             </div>
 

@@ -35,7 +35,15 @@ export interface JobSummary {
   department_category: string | null;
   employment_type: string | null;
   date_posted: string | null;
+  // Composite match score in [0, 1] against the active resume (see
+  // huntloop.match_scoring): a calibrated blend of embedding similarity
+  // and, when available, the matched/missing skills ratio. null with no
+  // active resume.
   match_score: number | null;
+  // "full" = match_score is the full composite; "partial" = the
+  // embedding-only fallback (no skills analysis yet), shown with a
+  // "score provisional" marker; null = no score at all.
+  score_basis: "full" | "partial" | null;
   matched_skills: string[] | null;
   missing_skills: string[] | null;
   locations: string[];

@@ -5,6 +5,7 @@ makes /docs' OpenAPI schema section actually describe the response
 shape instead of just "object".
 """
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -63,9 +64,22 @@ class JobSummary(BaseModel):
     match_score: float | None = Field(
         default=None,
         description=(
-            "Cosine similarity (1 - pgvector cosine distance) between this job's "
-            "embedding and the currently active resume's embedding. null if either "
-            "embedding is missing (e.g. not yet backfilled) or there's no active resume."
+            "Composite match score in [0, 1] against the active resume (see "
+            "huntloop.match_scoring): a calibrated blend of embedding cosine "
+            "similarity and, when available, the matched/missing skills ratio. "
+            "Postings without a usable skills signal fall back to the calibrated "
+            "embedding term alone (see score_basis). null if there's no active "
+            "resume or the job has no embedding. Computed at query time, not stored."
+        ),
+    )
+    score_basis: Literal["full", "partial"] | None = Field(
+        default=None,
+        description=(
+            "'full' when match_score is the full composite (embedding + skills), "
+            "'partial' when it's the embedding-only fallback because the job has no "
+            "usable skills analysis yet - the frontend shows a neutral 'score "
+            "provisional - skills analysis pending' marker for these. null when "
+            "there's no score at all (no active resume)."
         ),
     )
     matched_skills: list[str] | None = None

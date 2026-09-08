@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 import type { JobSummary } from "@/types/api";
-import { ScoreIndicator } from "./ScoreIndicator";
+import { ProvisionalScoreNote, ScoreIndicator } from "./ScoreIndicator";
 import { SponsorBadge } from "./SponsorBadge";
 import { StatusControl } from "./StatusControl";
 import { avatarColors, formatWage, initials } from "@/lib/theme";
@@ -27,7 +27,7 @@ export function JobTable({ jobs }: { jobs: JobSummary[] }) {
               return (
                 <tr key={job.id} className="border-t border-divider hover:bg-surface-alt">
                   <td className="px-4 py-2.5">
-                    <ScoreIndicator score={job.match_score} size="sm" />
+                    <ScoreIndicator score={job.match_score} size="sm" provisional={job.score_basis === "partial"} />
                   </td>
                   <td className="px-2 py-2.5">
                     <Link href={`/jobs/${job.id}`} className="flex items-center gap-2.5">
@@ -75,8 +75,9 @@ export function JobTable({ jobs }: { jobs: JobSummary[] }) {
       {jobs.length === 0 ? (
         <div className="px-5 py-12 text-center text-sm text-text-faintest">No jobs match these filters.</div>
       ) : (
-        <div className="border-t border-divider px-4 py-2 font-mono text-2xs text-text-faintest">
-          Est. salary is an employer-level estimate from DOL filings, not a posted salary
+        <div className="flex flex-col gap-1 border-t border-divider px-4 py-2 font-mono text-2xs text-text-faintest">
+          <span>Est. salary is an employer-level estimate from DOL filings, not a posted salary</span>
+          <ProvisionalScoreNote jobs={jobs} />
         </div>
       )}
     </div>

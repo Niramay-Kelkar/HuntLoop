@@ -7,6 +7,7 @@ import { getJobs } from "@/lib/api";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorState } from "@/components/ErrorState";
 import { JobCard } from "@/components/JobCard";
+import { ProvisionalScoreNote } from "@/components/ScoreIndicator";
 import { JobFilters, type JobFiltersValue } from "@/components/JobFilters";
 import { JobTable } from "@/components/JobTable";
 import { Pagination } from "@/components/Pagination";
@@ -131,10 +132,13 @@ export default function JobsPage() {
       {jobs.isSuccess && jobs.data.items.length > 0 && (
         <>
           {viewMode === "cards" ? (
-            <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
-              {jobs.data.items.map((job) => (
-                <JobCard key={job.id} job={job} />
-              ))}
+            <div className="flex flex-col gap-3.5">
+              <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
+                {jobs.data.items.map((job) => (
+                  <JobCard key={job.id} job={job} />
+                ))}
+              </div>
+              <ProvisionalScoreNote jobs={jobs.data.items} />
             </div>
           ) : (
             <JobTable jobs={jobs.data.items} />
