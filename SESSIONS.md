@@ -11391,3 +11391,34 @@ identity above, closing out its "known follow-up" item.
   wraps to two full-width lines with the ring on its own row below.
 
 **Branch:** `visual-identity-register`, same PR. Not merged.
+
+## 2026-09-07 — Get the Next.js branding out of the app (`visual-identity-register`)
+
+**Did:** Chased down the "N" logo showing in the app. It was two
+separate things, both left over from `create-next-app`:
+
+- **The dark circular "N" in the bottom-left corner is the Next.js
+  dev-mode indicator.** It only renders under `next dev` — a real
+  `next build && next start` shows nothing there (verified with
+  screenshots of both). So it would never have appeared once deployed.
+  Disabled it in dev too anyway, since there's no reason to show the
+  framework's badge over our own UI: `devIndicators: false` in
+  `next.config.ts` (the documented switch for this Next version;
+  compile/runtime errors still surface on screen).
+- **`src/app/favicon.ico` was still the default Next.js "N" favicon**
+  (committed way back in the MVP and never replaced). Unlike the dev
+  indicator, a favicon *does* ship to production — it's the browser-tab
+  icon. Replaced it with `src/app/icon.svg`, a small HuntLoop "H" mark
+  matching the nav logo (form-blue rounded square, white H), and
+  removed the default `favicon.ico`. Next's App Router picks up
+  `icon.svg` automatically; `/favicon.ico` now 404s, `/icon.svg` is
+  served as the icon.
+
+**Verified:** frontend test suite green, same count before and after.
+Screenshots: dev vs. production build (no bottom-left "N" in
+production, and now none in dev either), and the new "H" favicon.
+
+**Branch:** `visual-identity-register`. PR #20 (the original Register
+identity) had already been merged and its remote branch deleted by the
+time this landed, so this commit sits on the local branch on top of
+that merge — it needs a fresh PR.
