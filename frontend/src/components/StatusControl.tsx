@@ -8,13 +8,9 @@ import { STATUS_META, STATUS_ORDER } from "@/lib/theme";
  * Interactive status control wired to the real PATCH /jobs/{id}/application
  * endpoint (mutation logic lives in useApplicationStatus, shared with the
  * kanban board and applications list) with optimistic updates and
- * rollback-on-failure - unchanged behavior from before the reskin, only the
- * visual styling changed to the mockup's pill-select ("rowSelectStyle" in
- * design/HuntLoop.dc.html - the mockup only shows an editable status select
- * on its applications tracker; the job list/table there is read-only. This
- * app keeps status editable everywhere it was editable before the reskin,
- * so JobCard/JobTable use this same pill styling instead of a truly
- * read-only badge).
+ * rollback-on-failure. Behavior is unchanged; only the styling follows
+ * the "Register" identity - a square, hairline-ruled mono select rather
+ * than a rounded pill.
  */
 export function StatusControl({
   jobId,
@@ -34,10 +30,10 @@ export function StatusControl({
       disabled={mutation.isPending}
       onChange={(e) => mutation.mutate({ jobId, status: e.target.value as ApplicationStatus })}
       aria-label="Application status"
-      className={`appearance-none rounded-full border font-semibold focus:outline-none focus:ring-2 focus:ring-accent disabled:opacity-60 ${
-        size === "sm" ? "px-2.5 py-1 text-[11px]" : "px-3 py-1.5 text-xs"
+      className={`appearance-none border font-mono font-medium uppercase tracking-[0.04em] focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-60 ${
+        size === "sm" ? "px-1.5 py-0.5 text-2xs" : "px-2 py-1 text-xs"
       }`}
-      style={{ backgroundColor: meta.bg, color: meta.color, borderColor: `${meta.color}44` }}
+      style={{ backgroundColor: meta.bg, color: meta.color, borderColor: `${meta.color}55` }}
     >
       {STATUS_ORDER.map((option) => (
         <option key={option} value={option}>

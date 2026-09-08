@@ -67,16 +67,17 @@ describe("JobTable scannable columns", () => {
       "title",
       expect.stringContaining("not job-specific"),
     );
-    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("--").length).toBeGreaterThan(0);
   });
 
-  it("appends the employment type to the company line when present", () => {
+  it("shows the employment type alongside the company on the role line when present", () => {
     renderTable([makeJob({ employment_type: "Full-time" })]);
-    expect(screen.getByText(/palantir · Full-time/i)).toBeInTheDocument();
+    expect(screen.getByText("Palantir")).toBeInTheDocument();
+    expect(screen.getByText("Full-time")).toBeInTheDocument();
   });
 
   it("shows the sponsor badge per row", () => {
     renderTable([makeJob({ has_sponsor_history: true })]);
-    expect(screen.getByText("Sponsors H-1B")).toBeInTheDocument();
+    expect(screen.getByText("H-1B on file")).toBeInTheDocument();
   });
 });

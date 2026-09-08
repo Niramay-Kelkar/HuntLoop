@@ -75,6 +75,6 @@ describe("JobCard scannable meta", () => {
 
   it("always shows the sponsor badge", () => {
     renderCard(makeJob({ has_sponsor_history: true }));
-    expect(screen.getByText("Sponsors H-1B")).toBeInTheDocument();
+    expect(screen.getByText("H-1B on file")).toBeInTheDocument();
   });
 });

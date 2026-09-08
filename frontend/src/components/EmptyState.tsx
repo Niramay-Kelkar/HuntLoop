@@ -20,16 +20,16 @@ export function EmptyState({
 }) {
   return (
     <div
-      className={`flex flex-col items-center rounded-xl border border-dashed border-border-strong bg-surface-alt text-center ${
+      className={`flex flex-col items-center border border-dashed border-border-strong bg-surface-alt text-center ${
         compact ? "gap-1.5 px-5 py-8" : "gap-2 px-6 py-12"
       }`}
     >
-      <span aria-hidden className="text-xl text-text-faintest">
+      <span aria-hidden className="text-lg text-text-faintest">
         {icon}
       </span>
       <p className="text-sm font-semibold text-text">{title}</p>
       {description && (
-        <p className="max-w-sm text-[13px] leading-relaxed text-text-subtle">{description}</p>
+        <p className="max-w-sm text-sm leading-relaxed text-text-subtle">{description}</p>
       )}
       {action && <div className="mt-1">{action}</div>}
     </div>

@@ -204,6 +204,29 @@ conventions" and SESSIONS.md for the real current state).
   TanStack Query), added 2026-08-22, real job-list UI added 2026-08-23,
   reskinned + extended with a job detail page and an applications tracker
   2026-08-23 (see below and SESSIONS.md).**
+  **VISUAL IDENTITY as of 2026-09-07: Direction A, "Register"
+  (`visual-identity-register`, see SESSIONS.md "Frontend visual
+  identity" + the "HuntLoop Visual Identity" proposal Artifact).** The
+  2026-08-23 reskin below took the Claude Design mockup's warm-cream +
+  terracotta house style; this replaced it deliberately with a
+  public-records / federal-forms register: cool paper (`#f4f5f6`),
+  near-black ink, ONE deep form-blue accent (`#1b4965`), hairline rules
+  instead of card chrome, square/minimal corners (2-4px radius), NO drop
+  shadows. **Structural type is Public Sans** (the US federal typeface —
+  the app runs on DOL filing data); **every figure is IBM Plex Mono**,
+  tabular. Both are `next/font/google` with the font CSS variable placed
+  FIRST in `body`/`--font-sans`/`--font-mono` — the earlier setup led
+  its stack with `"Helvetica Neue"` and the declared web font never
+  rendered on macOS; don't reintroduce that ordering. Type is a real
+  24/20/16/13/11 scale mapped onto Tailwind's size utilities in
+  `globals.css` — don't add one-off `text-[Npx]`. Semantic
+  score-gradient / sponsor / status colors were cooled one notch to sit
+  with the blue (`--color-good #2f7d4f` etc. in `globals.css`;
+  `STATUS_META` in `lib/theme.ts`) — they stay red/amber/green, just
+  cooler. `globals.css` is a single fixed bright theme (the register is
+  paper — no dark mode). The reskin paragraph further down and the
+  "Palette extracted pixel-for-pixel from design/HuntLoop.dc.html" note
+  are HISTORY now — that mockup is no longer the visual spec.
   `frontend/src/types/api.ts` hand-mirrors the backend's Pydantic
   schemas (no shared codegen — kept manually in sync, a known gap);
   `frontend/src/lib/api.ts` is a real fetch client (`getHealth`/
@@ -229,10 +252,16 @@ conventions" and SESSIONS.md for the real current state).
   after the `JobSight`→`HuntLoop` rename — run the API via
   `PYTHONPATH=src .venv/bin/python -m uvicorn huntloop.api.main:app`,
   not the `uvicorn` script directly, until the venv is recreated.
-  `ScoreIndicator`'s color gradient is calibrated to this app's real
-  observed score range (green pinned at 0.6, not 1.0 — see SESSIONS.md's
-  Step 3 histogram) — don't "fix" this back to a naive 0-1 scale, it
-  would make nearly every real job render the same dull color.
+  `ScoreIndicator` is a **horizontal gauge** as of the Register identity
+  (2026-09-07) — the raw match percent in mono next to a tier-colored
+  fill bar — not the old conic-gradient ring. Its fill is still
+  calibrated to `SCORE_CEILING` (0.6, not 1.0 — green pinned there, see
+  SESSIONS.md's Step 3 histogram) while the printed number stays the
+  real raw percent; don't "fix" the calibration back to a naive 0-1
+  scale, nearly every real job would render in one tier.
+  `SponsorBadge` is a ruled "stamp" ("H-1B on file" in form-blue /
+  dashed "No LCA record"), not a filled pill. Both changes are applied
+  at every call site (job cards, table, job detail, kanban).
   `JobSummary`/`JobDetail` also carry `locations: list[str]` (populated
   via the existing `JobPosting.locations` relationship, no migration
   needed).
@@ -2913,7 +2942,12 @@ reskin against the Claude Design mockup" entry) against
 runtime format; read it as the visual/layout spec (colors ported into
 `frontend/src/lib/theme.ts`, typography via `next/font/google`'s
 JetBrains Mono, Tailwind theme tokens in `globals.css`), not as literal
-code. **Two screens that didn't exist before this reskin were built as
+code. **SUPERSEDED 2026-09-07 by the Register visual identity (see the
+top of the frontend bullet above and SESSIONS.md "Frontend visual
+identity") — this mockup's warm-cream/terracotta palette, JetBrains
+Mono, and rounded-card look are no longer current; the page structure
+and the two screens it added are.**
+  **Two screens that didn't exist before this reskin were built as
 part of it**, reusing only the existing three API endpoints: a job detail
 page (`frontend/src/app/jobs/[id]/`, matched skills shown first in green,
 missing second in dashed muted styling) and an applications tracker

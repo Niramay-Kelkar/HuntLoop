@@ -1,21 +1,29 @@
 import type { Metadata } from "next";
-import { Geist, JetBrains_Mono } from "next/font/google";
+import { Public_Sans, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 import { NavBar } from "@/components/NavBar";
 import { Providers } from "./providers";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+// Visual identity: Direction A, "Register". Public Sans carries all
+// structural type - it is the typeface of US federal websites, and this
+// app runs on DOL wage-filing data. The font variable is put FIRST in
+// the CSS stack (see globals.css) so it actually renders; the previous
+// setup led its stack with "Helvetica Neue" and the declared web font
+// never reached the page on macOS.
+const publicSans = Public_Sans({
   subsets: ["latin"],
+  variable: "--font-public-sans",
+  display: "swap",
 });
 
-// The mockup (design/HuntLoop.dc.html) uses JetBrains Mono throughout for
-// nav items, numerics, labels and badges, alongside a plain sans body font -
-// replaces Geist Mono, which the mockup never uses.
-const jetbrainsMono = JetBrains_Mono({
-  variable: "--font-jetbrains-mono",
+// IBM Plex Mono for every figure: match scores, filing counts, dates,
+// all tabular. Not a variable font on Google Fonts, so weights are
+// explicit.
+const plexMono = IBM_Plex_Mono({
   subsets: ["latin"],
-  weight: ["400", "500", "600", "700"],
+  weight: ["400", "500", "600"],
+  variable: "--font-plex-mono",
+  display: "swap",
 });
 
 export const metadata: Metadata = {
@@ -27,9 +35,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${jetbrainsMono.variable} h-full antialiased`}
+      className={`${publicSans.variable} ${plexMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col bg-bg text-text">
+      <body className="min-h-full flex flex-col bg-bg text-text font-sans">
         <Providers>
           <NavBar />
           <div className="mx-auto w-full max-w-6xl flex-1 px-6 py-7">{children}</div>

@@ -67,17 +67,17 @@ export default function ResumesPage() {
 
   return (
     <main className="flex flex-1 flex-col gap-4">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight text-text">Resume</h1>
-        <p className="mt-0.5 text-[13px] text-text-subtle">
+      <div className="border-b border-border pb-4">
+        <h1 className="text-xl font-bold tracking-tight text-text">Resume</h1>
+        <p className="mt-1 text-sm text-text-subtle">
           The active version is what every job is scored against.
         </p>
       </div>
 
-      <div className="mx-auto flex w-full max-w-[420px] flex-col gap-4">
+      <div className="mx-auto flex w-full max-w-[440px] flex-col gap-4">
         {/* upload */}
         <div
-          className={`rounded-2xl border-2 border-dashed p-6 text-center transition-colors ${
+          className={`border-2 border-dashed p-6 text-center transition-colors ${
             isDragOver ? "border-accent bg-accent-soft" : "border-border-strong bg-surface"
           } ${isUploading ? "pointer-events-none opacity-70" : ""}`}
           onDragOver={(e) => {
@@ -93,7 +93,7 @@ export default function ResumesPage() {
         >
           {isUploading ? (
             <>
-              <div className="mx-auto mb-3 h-11 w-11 animate-spin rounded-full border-[3px] border-accent-soft border-t-accent" />
+              <div className="mx-auto mb-3 h-10 w-10 animate-spin rounded-full border-2 border-accent-soft border-t-accent" />
               <div className="text-sm font-semibold text-text">Uploading &amp; processing…</div>
               <div className="mx-auto mt-1 max-w-[280px] text-xs text-text-faintest">
                 Extracting text and computing an embedding for this resume — this can take a few seconds.
@@ -101,15 +101,15 @@ export default function ResumesPage() {
             </>
           ) : (
             <>
-              <div className="mx-auto mb-3 grid h-11 w-11 place-items-center rounded-xl bg-accent-soft">
-                <span className="text-xl text-accent">↑</span>
+              <div className="mx-auto mb-3 grid h-10 w-10 place-items-center border border-border-strong bg-accent-soft">
+                <span className="font-mono text-base font-semibold text-accent">PDF</span>
               </div>
               <div className="text-sm font-semibold text-text">Upload a new version</div>
               <div className="mb-3.5 mt-1 text-xs text-text-faintest">Drop a PDF or browse</div>
               <button
                 type="button"
                 onClick={() => fileInputRef.current?.click()}
-                className="rounded-lg bg-accent px-4.5 py-2 text-[13px] font-semibold text-white shadow-[0_2px_6px_rgba(224,83,61,.3)] hover:bg-accent-hover"
+                className="bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-accent-hover"
               >
                 Choose file
               </button>
@@ -128,15 +128,13 @@ export default function ResumesPage() {
         </div>
 
         {/* version history */}
-        <div className="rounded-2xl border border-border bg-surface p-5">
-          <h3 className="mb-3.5 font-mono text-xs font-semibold uppercase tracking-wide text-text-faintest">
-            Version history
-          </h3>
+        <div className="border border-border bg-surface p-5">
+          <h3 className="mb-3 text-sm font-semibold text-text">Version history</h3>
 
           {resumes.isPending && (
             <div className="flex flex-col gap-3">
               {Array.from({ length: 2 }).map((_, i) => (
-                <div key={i} className="h-20 animate-pulse rounded-lg border border-border bg-surface-alt" />
+                <div key={i} className="h-20 animate-pulse border border-border bg-surface-alt" />
               ))}
             </div>
           )}
@@ -152,7 +150,7 @@ export default function ResumesPage() {
 
           {resumes.isSuccess && resumes.data.length === 0 && (
             <EmptyState
-              icon="↑"
+              icon="◦"
               title="No resume uploaded yet"
               description="Upload a PDF above — it becomes the active version every job is scored against."
               compact
@@ -160,25 +158,31 @@ export default function ResumesPage() {
           )}
 
           {resumes.isSuccess && resumes.data.length > 0 && (
-            <div className="flex flex-col gap-3">
+            <div className="flex flex-col gap-2.5">
               {resumes.data.map((version) => (
                 <div
                   key={version.id}
-                  className="rounded-lg border p-3.5"
+                  className="border p-3.5"
                   style={
                     version.is_active
-                      ? { borderColor: "#cfe8d8", backgroundColor: "#f4faf6" }
-                      : { borderColor: "#eee7df", backgroundColor: "#ffffff" }
+                      ? { borderColor: "var(--color-good-border)", backgroundColor: "var(--color-good-bg)" }
+                      : { borderColor: "var(--color-border)", backgroundColor: "var(--color-surface)" }
                   }
                 >
                   <div className="mb-1.5 flex items-center gap-2">
-                    <span className="font-mono text-[13px] font-bold text-text">v{version.version_number}</span>
+                    <span className="font-mono text-sm font-bold text-text">v{version.version_number}</span>
                     {version.is_active && (
-                      <span className="rounded-md bg-[#e8f4ec] px-1.5 py-0.5 font-mono text-[10px] tracking-wide text-[#1f8f4e]">
-                        ACTIVE
+                      <span
+                        className="border px-1.5 py-px font-mono text-2xs uppercase tracking-[0.06em]"
+                        style={{
+                          borderColor: "var(--color-good-border)",
+                          color: "var(--color-good)",
+                        }}
+                      >
+                        Active
                       </span>
                     )}
-                    <span className="ml-auto font-mono text-[11px] text-text-faintest">
+                    <span className="ml-auto font-mono text-2xs text-text-faintest">
                       {formatDate(version.uploaded_at)}
                     </span>
                   </div>
@@ -188,7 +192,7 @@ export default function ResumesPage() {
                       type="button"
                       disabled={activateMutation.isPending}
                       onClick={() => activateMutation.mutate(version.id)}
-                      className="mt-2.5 w-full rounded-md border border-border-strong bg-surface-alt py-1.5 text-xs font-semibold text-text hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-60"
+                      className="mt-2.5 w-full border border-border-strong bg-surface-alt py-1.5 text-xs font-semibold text-text hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       {activateMutation.isPending && activateMutation.variables === version.id
                         ? "Activating…"

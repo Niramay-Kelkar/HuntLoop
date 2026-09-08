@@ -1,20 +1,21 @@
 import type { ApplicationStatus } from "@/types/api";
 
 /**
- * Colors/logic ported 1:1 from design/HuntLoop.dc.html's `META`/`PALETTE`/
- * `tier()` (see CLAUDE.md for where that reference file lives) - the
- * mockup computes these as plain JS rather than Tailwind classes, so this
- * module mirrors that instead of forcing them into the Tailwind theme.
+ * Visual identity: Direction A, "Register" (see the visual-identity
+ * proposal + SESSIONS.md). Status, score and avatar colors are cooled
+ * to sit beside the single deep form-blue accent instead of the old
+ * warm terracotta scheme. The score/sponsor greens stay green - they
+ * carry meaning - but shift a notch cooler.
  */
 export const STATUS_META: Record<
   ApplicationStatus,
   { label: string; color: string; bg: string; dot: string }
 > = {
-  not_applied: { label: "Not applied", color: "#78736c", bg: "#efece7", dot: "#b0a89d" },
-  applied: { label: "Applied", color: "#2f6bb0", bg: "#e9f1fa", dot: "#3f7fca" },
-  interviewing: { label: "Interviewing", color: "#b07817", bg: "#fbf1dd", dot: "#d98324" },
-  offer: { label: "Offer", color: "#1f8f4e", bg: "#e6f4ea", dot: "#1f9d55" },
-  rejected: { label: "Rejected", color: "#b0463a", bg: "#f8e9e6", dot: "#d64c3c" },
+  not_applied: { label: "Not applied", color: "#5b6570", bg: "#eef0f2", dot: "#9aa1a8" },
+  applied: { label: "Applied", color: "#2f6bb0", bg: "#e7eef6", dot: "#3f7fca" },
+  interviewing: { label: "Interviewing", color: "#8a5f18", bg: "#f4ede0", dot: "#c08a2a" },
+  offer: { label: "Offer", color: "#1f7a45", bg: "#e9f2ec", dot: "#2f9d57" },
+  rejected: { label: "Rejected", color: "#a83f2e", bg: "#f3e8e5", dot: "#c0503c" },
 };
 
 export const STATUS_ORDER: ApplicationStatus[] = [
@@ -26,13 +27,13 @@ export const STATUS_ORDER: ApplicationStatus[] = [
 ];
 
 const AVATAR_PALETTE: [string, string][] = [
-  ["#fdece7", "#c8442f"],
-  ["#e9eef7", "#3560a8"],
-  ["#e7f2ec", "#2b8a56"],
-  ["#f3ecf7", "#7346a8"],
-  ["#fbf0dd", "#a5701a"],
-  ["#e7f1f0", "#2b7a72"],
-  ["#f5ece2", "#8a6528"],
+  ["#e9edf1", "#33475c"],
+  ["#eceef1", "#3c434c"],
+  ["#e8f0ec", "#2f6a4a"],
+  ["#eeedf2", "#4d4560"],
+  ["#f0ede7", "#6b5a3a"],
+  ["#e7f0ef", "#2f6a63"],
+  ["#f1ebe8", "#6b4a3c"],
 ];
 
 export function avatarColors(id: number): { bg: string; color: string } {
@@ -48,10 +49,10 @@ export function initials(companyName: string): string {
 
 /**
  * Highest score seen across real backfills so far (~0.593, Palantir
- * "Software Engineer" roles - see ScoreIndicator's original comment /
- * SESSIONS.md) - a job scoring at or above this renders fully green.
- * Shared here so the ring (ScoreIndicator) and any other score-colored UI
- * (table pills, kanban cards) stay calibrated identically.
+ * "Software Engineer" roles) - a job scoring at or above this reads as a
+ * full gauge. Shared so the gauge (ScoreGauge) and any other
+ * score-colored UI stay calibrated identically. A generic 0-100 scale
+ * would render almost every real job in the same tier.
  */
 export const SCORE_CEILING = 0.6;
 
@@ -62,9 +63,9 @@ export function calibratedPercent(score: number): number {
 
 export function scoreTier(score: number): { color: string; bg: string } {
   const p = calibratedPercent(score);
-  if (p >= 80) return { color: "#1f9d55", bg: "#e6f4ea" };
-  if (p >= 60) return { color: "#d98324", bg: "#fbf1dd" };
-  return { color: "#d64c3c", bg: "#f8e9e6" };
+  if (p >= 80) return { color: "#2f7d4f", bg: "#ecf3ee" };
+  if (p >= 60) return { color: "#9a6a1c", bg: "#f4ede0" };
+  return { color: "#b0432f", bg: "#f4e9e6" };
 }
 
 export function formatDate(dateString: string | null): string | null {
@@ -97,8 +98,7 @@ export function timeAgo(dateString: string | null): string | null {
   return `${Math.round(months / 12)}y ago`;
 }
 
-/** Whole-dollar wage/salary amounts as compact "$168k" strings, matching
- * design/HuntLoop.dc.html's mock sponsor/salary figures. */
+/** Whole-dollar wage/salary amounts as compact "$168k" strings. */
 export function formatWage(amount: number): string {
   return `$${Math.round(amount / 1000)}k`;
 }

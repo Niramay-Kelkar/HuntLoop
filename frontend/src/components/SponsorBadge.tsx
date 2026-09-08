@@ -1,19 +1,23 @@
 /**
  * H-1B sponsor indicator for the job list (cards + table). Sponsorship
- * awareness is one of this app's core differentiators versus a generic
- * job board, so it gets a real badge here rather than a line of muted
- * text - green when the company has a resolved DOL sponsor match,
- * neutral when there's no LCA history on file. Mirrors the dot + wording
- * the job detail page's sponsor card already uses.
+ * awareness is one of this app's core differentiators, so it gets a
+ * real mark rather than a line of muted text.
+ *
+ * Visual identity: Direction A, "Register" - a ruled "stamp": solid
+ * form-blue rule when the employer has a resolved DOL sponsor match,
+ * a dashed neutral rule when there's no LCA history on file. The list
+ * endpoint only carries the boolean (no per-row filing count, by
+ * design), so the stamp reads "on file" / "no record"; the job detail
+ * page shows the actual filing figures.
  */
 export function SponsorBadge({ hasSponsorHistory }: { hasSponsorHistory: boolean }) {
   return (
     <span
-      className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-medium"
+      className="inline-flex items-center gap-1.5 border px-1.5 py-0.5 font-mono text-2xs font-medium uppercase tracking-[0.06em]"
       style={
         hasSponsorHistory
-          ? { backgroundColor: "#e6f4ea", color: "#1f7a45" }
-          : { backgroundColor: "#efece7", color: "#8a837a" }
+          ? { borderColor: "var(--color-accent)", color: "var(--color-accent)" }
+          : { borderColor: "var(--color-border-strong)", color: "var(--color-text-faint)", borderStyle: "dashed" }
       }
       title={
         hasSponsorHistory
@@ -21,11 +25,7 @@ export function SponsorBadge({ hasSponsorHistory }: { hasSponsorHistory: boolean
           : "No H-1B LCA disclosures found for this employer in recent DOL data"
       }
     >
-      <span
-        className="h-1.5 w-1.5 rounded-full"
-        style={{ backgroundColor: hasSponsorHistory ? "#1f9d55" : "#c9c2b8" }}
-      />
-      {hasSponsorHistory ? "Sponsors H-1B" : "No H-1B data"}
+      {hasSponsorHistory ? "H-1B on file" : "No LCA record"}
     </span>
   );
 }
