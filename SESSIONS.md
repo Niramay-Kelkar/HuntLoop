@@ -11348,3 +11348,46 @@ here.
 Guide) from the proposal; any responsive refinement of the job-detail
 header gauge at true ~390px (legible now, just dense); pure-presentation
 component tests beyond the new ScoreIndicator one.
+
+## 2026-09-07 — Bring back the ring score indicator + fix the mobile job-detail header (`visual-identity-register`)
+
+**Did:** Two visual follow-ups on the same branch/PR as the Register
+identity above, closing out its "known follow-up" item.
+
+- **`ScoreIndicator` back to a ring.** The reviewer found the circular
+  dial easier to read and more appealing than the flat gauge bar. It's
+  now a conic dial again — the raw match percent in mono at the centre,
+  a tier-colored arc around it — but reskinned onto Register's palette,
+  not reverted: the arc uses the cooled semantic score-tier colors from
+  `lib/theme.ts`, the track and outer edge are the neutral hairline
+  border rule (`--color-border`), no drop shadow. The real calibration
+  is unchanged — the arc sweep is the score's fraction of
+  `SCORE_CEILING` while the printed number stays the true raw percent —
+  and the `size` prop / name / null handling are all preserved, so
+  every call site (job cards `sm`, table `sm`, job detail `lg` with its
+  "match score" caption) switched over untouched. The mono numeric
+  readout kept from the gauge version lives at the centre of the ring.
+- **Mobile job-detail header.** At the narrow single-column width the
+  large indicator packed tightly against a wrapping title. The header
+  row is now `flex-col` below the `sm` breakpoint and `flex-row` at and
+  above it: the avatar + title + meta group takes the full width and
+  the indicator drops to its own row beneath, left-aligned. Desktop
+  layout is unchanged (indicator beside the title as before).
+- **Tests:** `ScoreIndicator.test.tsx` wording updated from "gauge" to
+  "ring"; the behavioral assertions (raw-vs-calibrated split, cap above
+  ceiling, null → dash, large-size caption + "not scored") are
+  unchanged.
+
+**Verified:**
+- Frontend test suite green, same count before and after; `eslint`,
+  `tsc --noEmit`, and `npm run build` all clean.
+- Before/after screenshots of the score indicator across job cards,
+  table view, and the job-detail header (desktop 1440 + narrow), and
+  before/after of the mobile job-detail header. True 390px is still
+  below this machine's Chrome minimum window width (~500px, same limit
+  noted in the entry above), so the narrow captures are at 500px, which
+  renders the identical sub-`sm` mobile layout the fix targets. Before:
+  the title wrapped to four cramped lines beside the gauge; after: it
+  wraps to two full-width lines with the ring on its own row below.
+
+**Branch:** `visual-identity-register`, same PR. Not merged.

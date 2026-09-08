@@ -4,14 +4,14 @@ import { describe, expect, it } from "vitest";
 import { ScoreIndicator } from "./ScoreIndicator";
 
 /**
- * The gauge prints the real raw percent (score * 100), while the bar
- * fills to the score's fraction of SCORE_CEILING (0.6) so real scores,
- * which cluster ~0.03-0.59, still use most of the bar's range.
+ * The ring prints the real raw percent (score * 100) at its centre,
+ * while the arc sweeps to the score's fraction of SCORE_CEILING (0.6) so
+ * real scores, which cluster ~0.03-0.59, still use most of the dial.
  */
-describe("ScoreIndicator gauge", () => {
-  it("prints the raw percent, not the calibrated fill", () => {
+describe("ScoreIndicator ring", () => {
+  it("prints the raw percent, not the calibrated sweep", () => {
     render(<ScoreIndicator score={0.3} />);
-    // 0.3 -> 30% printed; the bar would be 50% filled (0.3 / 0.6).
+    // 0.3 -> 30 printed; the arc would sweep 50% (0.3 / 0.6).
     expect(screen.getByText("30")).toBeInTheDocument();
   });
 
@@ -25,13 +25,13 @@ describe("ScoreIndicator gauge", () => {
     expect(screen.getByText("--")).toBeInTheDocument();
   });
 
-  it("labels the large gauge and still shows a dash when unscored", () => {
+  it("labels the large ring and still shows a dash when unscored", () => {
     render(<ScoreIndicator score={null} size="lg" />);
     expect(screen.getByText("not scored")).toBeInTheDocument();
     expect(screen.getByText("--")).toBeInTheDocument();
   });
 
-  it("captions the large gauge with the raw percent when scored", () => {
+  it("captions the large ring with the raw percent when scored", () => {
     render(<ScoreIndicator score={0.52} size="lg" />);
     expect(screen.getByText("52")).toBeInTheDocument();
     expect(screen.getByText("match score")).toBeInTheDocument();

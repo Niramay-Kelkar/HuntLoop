@@ -57,31 +57,35 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
         {/* main column */}
         <div className="flex flex-col gap-4">
           <div className="border border-border border-t-2 border-t-accent bg-surface p-6">
-            <div className="flex items-start gap-4">
-              <div
-                className="grid h-12 w-12 flex-none place-items-center rounded-sm font-mono text-base font-semibold"
-                style={{ backgroundColor: avatar.bg, color: avatar.color }}
-              >
-                {initials(detail.company_name)}
-              </div>
-              <div className="min-w-0 flex-1">
-                <h1 className="text-xl font-bold leading-tight tracking-tight text-text">
-                  {detail.job_title}
-                </h1>
-                <p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-text-muted">
-                  <span>{detail.company_name}</span>
-                  {detail.department && (
-                    <span className="border border-border px-1.5 py-px font-mono text-2xs uppercase tracking-[0.04em] text-text-muted">
-                      {detail.department}
-                    </span>
-                  )}
-                </p>
-                <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-sm text-text-subtle">
-                  <span>{detail.locations.length > 0 ? detail.locations.join(" / ") : "Location not listed"}</span>
-                  {postedDate && <span>Posted {postedDate}</span>}
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start">
+              <div className="flex min-w-0 flex-1 items-start gap-4">
+                <div
+                  className="grid h-12 w-12 flex-none place-items-center rounded-sm font-mono text-base font-semibold"
+                  style={{ backgroundColor: avatar.bg, color: avatar.color }}
+                >
+                  {initials(detail.company_name)}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <h1 className="text-xl font-bold leading-tight tracking-tight text-text">
+                    {detail.job_title}
+                  </h1>
+                  <p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-text-muted">
+                    <span>{detail.company_name}</span>
+                    {detail.department && (
+                      <span className="border border-border px-1.5 py-px font-mono text-2xs uppercase tracking-[0.04em] text-text-muted">
+                        {detail.department}
+                      </span>
+                    )}
+                  </p>
+                  <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-sm text-text-subtle">
+                    <span>{detail.locations.length > 0 ? detail.locations.join(" / ") : "Location not listed"}</span>
+                    {postedDate && <span>Posted {postedDate}</span>}
+                  </div>
                 </div>
               </div>
-              <ScoreIndicator score={detail.match_score} size="lg" />
+              <div className="flex-none self-start sm:self-auto">
+                <ScoreIndicator score={detail.match_score} size="lg" />
+              </div>
             </div>
 
             <div className="mt-5 flex flex-wrap items-center gap-2.5">
