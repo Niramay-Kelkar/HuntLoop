@@ -38,7 +38,7 @@ from huntloop.db_models import (
     LcaDisclosure,
     ResumeVersion,
 )
-from huntloop.match_scoring import match_score_expr, match_score_order_by
+from huntloop.match_scoring import match_score_expr, match_score_order_by, score_basis_expr
 
 logger = logging.getLogger(__name__)
 
@@ -118,15 +118,18 @@ def _active_resume_embedding(db: Session):
 
 
 def _score_and_status_columns(resume_embedding):
-    """The two computed columns every /jobs query needs: match_score
-    (null if there's no active resume - see huntloop.match_scoring) and
-    application_status (defaults to not_applied when no job_applications
-    row exists - see ApplicationStatus)."""
+    """The computed columns every /jobs query needs: match_score (the
+    composite score, null if there's no active resume - see
+    huntloop.match_scoring), score_basis ('full' / 'partial' / null -
+    tells the frontend which postings show the "score provisional"
+    marker), and application_status (defaults to not_applied when no
+    job_applications row exists - see ApplicationStatus)."""
     score_expr = match_score_expr(resume_embedding)
+    basis_expr = score_basis_expr(resume_embedding)
     status_expr = func.coalesce(JobApplication.status, ApplicationStatus.NOT_APPLIED.value).label(
         "application_status"
     )
-    return score_expr, status_expr
+    return score_expr, basis_expr, status_expr
 
 
 # The application-row columns (notes + last-updated timestamp) that both
@@ -150,6 +153,7 @@ def _row_to_summary(row) -> JobSummary:
         employment_type=job.employment_type,
         date_posted=job.date_posted,
         match_score=row.match_score,
+        score_basis=row.score_basis,
         matched_skills=job.matched_skills,
         missing_skills=job.missing_skills,
         locations=[loc.location_name for loc in job.locations],
@@ -332,7 +336,7 @@ def list_jobs(
     if min_score is not None and resume_embedding is None:
         raise HTTPException(400, "min_score filter requires an active resume with a computed embedding")
 
-    score_expr, status_expr = _score_and_status_columns(resume_embedding)
+    score_expr, basis_expr, status_expr = _score_and_status_columns(resume_embedding)
     salary_expr = _salary_estimate_expr()
 
     query = (
@@ -341,6 +345,7 @@ def list_jobs(
             Company.name.label("company_name"),
             Company.matched_sponsor_employer_name,
             score_expr,
+            basis_expr,
             status_expr,
             *_APPLICATION_DETAIL_COLUMNS,
             salary_expr.label("salary_estimate_amount"),
@@ -419,10 +424,10 @@ def list_jobs(
 @router.get("/{job_id}", response_model=JobDetail)
 def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
     resume_embedding = _active_resume_embedding(db)
-    score_expr, status_expr = _score_and_status_columns(resume_embedding)
+    score_expr, basis_expr, status_expr = _score_and_status_columns(resume_embedding)
 
     query = (
-        select(JobPosting, Company, score_expr, status_expr, *_APPLICATION_DETAIL_COLUMNS)
+        select(JobPosting, Company, score_expr, basis_expr, status_expr, *_APPLICATION_DETAIL_COLUMNS)
         .join(Company, JobPosting.company_id == Company.id)
         .outerjoin(JobApplication, JobApplication.job_posting_id == JobPosting.id)
         .where(JobPosting.id == job_id)
@@ -450,6 +455,7 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
         employment_type=job.employment_type,
         date_posted=job.date_posted,
         match_score=row.match_score,
+        score_basis=row.score_basis,
         matched_skills=job.matched_skills,
         missing_skills=job.missing_skills,
         locations=[loc.location_name for loc in job.locations],

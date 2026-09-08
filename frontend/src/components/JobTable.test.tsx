@@ -17,6 +17,7 @@ function makeJob(overrides: Partial<JobSummary> = {}): JobSummary {
     employment_type: null,
     date_posted: null,
     match_score: 0.5,
+    score_basis: "partial",
     matched_skills: null,
     missing_skills: null,
     locations: ["New York, NY"],

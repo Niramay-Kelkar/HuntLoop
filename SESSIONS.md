@@ -11422,3 +11422,113 @@ production, and now none in dev either), and the new "H" favicon.
 identity) had already been merged and its remote branch deleted by the
 time this landed, so this commit sits on the local branch on top of
 that merge — it needs a fresh PR.
+
+---
+
+## 2026-09-08 — Composite match score v1: embedding + skills-match (`composite-match-score-v1`)
+
+**Did:** Implemented v1 of the reviewed "Composite Match Score" proposal
+(see the proposal Artifact + the earlier investigation session). The
+per-posting match score is no longer raw embedding cosine similarity —
+it is a query-time blend of two calibrated signals, still with no stored
+column and no backfill:
+
+- **`huntloop.match_scoring`** rewritten. `match_score_expr()` now
+  returns, for postings with a usable skills signal ("full" basis):
+  `EMBEDDING_WEIGHT * clamp(sim / SCORE_CEILING, 0, 1) + SKILLS_WEIGHT *
+  min(ratio / SKILLS_CEILING, 1)` where `ratio = matched / (matched +
+  missing)`; for everything else ("partial" basis) the calibrated
+  embedding term alone. Constants: `EMBEDDING_WEIGHT = 0.65`,
+  `SKILLS_WEIGHT = 0.35`, `SCORE_CEILING = 0.6` (moved here from the
+  frontend — calibration is now server-side), `SKILLS_CEILING = 0.66`
+  (~p95 of the real ratio distribution), `MIN_SKILLS_DENOM = 3`. New
+  `score_basis_expr()` returns `'full'` / `'partial'` / `NULL`.
+  `match_score_order_by()` unchanged in shape — sorts by the composite,
+  NULLS LAST; partial-basis scores interleave with full-basis ones by
+  value, never bottom-sorted.
+- **"full" vs "partial":** a posting is "full" only when `matched_skills`
+  and `missing_skills` are both real JSON arrays totalling at least
+  `MIN_SKILLS_DENOM` entries (`json_typeof = 'array'` guard). Key case
+  per the proposal: `matched_skills = []` **alongside a populated
+  `missing_skills`** is a genuine "matches nothing here" signal — full
+  basis, skills term 0, score = `0.65 * emb_cal` (a real penalty). Only
+  `[]` / `[]` (or any total < 3) is treated as no-data and drops to the
+  fallback.
+- Two latent bugs fixed while in here: `greatest(NULL, 0.0)` is `0.0` in
+  Postgres (ignores NULLs), so a not-yet-embedded posting would have
+  scored 0 instead of NULL — added an explicit `embedding IS NULL ->
+  NULL` guard; and `match_score_expr(None)` returned a bare untyped NULL
+  literal, which psycopg reports as OID 25 (text) and SQLAlchemy's Float
+  processor then rejects — `GET /jobs` with no active resume would 500.
+  Now `cast(null() AS float/text)`.
+- **API:** `GET /jobs` and `GET /jobs/{id}` gained `score_basis`
+  (`"full"` / `"partial"` / `null`). `match_score`'s meaning changed
+  from raw cosine similarity to the calibrated composite in `[0, 1]`;
+  its schema description updated. `min_score` and `sort=-score` now use
+  the composite; `min_score` still `ge=0, le=1` (composite is always in
+  range) and still requires an active resume.
+- **Frontend:** calibration removed from `lib/theme.ts`
+  (`calibratedPercent` is now just `clamp(score) * 100`; `SCORE_CEILING`
+  export dropped). `ScoreIndicator` prints and sweeps straight off the
+  composite and takes a `provisional` prop — a compact accent-blue `*`
+  on the small ring (cards/table), a spelled-out "score provisional ·
+  skills analysis pending" line under the large ring (job detail). New
+  `ProvisionalScoreNote` legend renders under the job list / in the
+  table footer when any visible posting is on the fallback. Wired at
+  every ring call site: `JobCard`, `JobTable`, `JobDetailClient`,
+  `jobs/page.tsx`. `types/api.ts` gained `score_basis`.
+
+**Deliberately deferred / dropped (per the proposal, not in this task):**
+
+- **Years-of-experience matching — deferred to v1.1**, pending real
+  measurement of v1. Resume-side YOE is unstructured (raw text only) and
+  needs its own LLM parse; job-side coverage is ~40–55% and
+  source-skewed (Lever ~9%). When built it rides the existing
+  skills-matching batch call (near-zero marginal tokens) as a bounded
+  penalty multiplier, gated on re-validating skills quality across every
+  provider in the chain.
+- **Education matching — dropped.** ~40% job-side coverage and the
+  resume satisfies essentially every requirement it does state, so it
+  cannot re-rank anything. Display-only if ever surfaced.
+- **Groq/Gemini backlog-spend / free-tier ceiling — untouched**, a
+  separate decision. Composite quality is capped by skills coverage
+  (~14.5% of relevant postings and growing ~1k/day); the fallback is
+  designed for that being the steady state, not a backlog that clears.
+
+**Re-confirmed real data (live `jobsight`, 2026-09-08):** 96,460
+relevant postings; 14,035 with `matched_skills` populated (14.5%),
+82,934 still NULL; 2,603 with `matched_skills = []` (populated missing);
+107 with both empty; 163 with total skills < 3; skills-ratio p50 0.333 /
+p90 0.625 / p95 0.696. Composite distribution over relevant postings:
+p10 0.27 / p50 0.49 / p90 0.70 / max 1.0 — distribution-neutral vs. the
+calibrated-embedding median, as intended, so only signal *disagreement*
+moves a posting.
+
+**Verified:** real live API — a full-composite posting
+(`checkr` "Software Engineer", `match_score` ~0.77, `score_basis`
+`"full"`), a partial posting (`digicert` id 29001, `match_score`
+~0.93, `score_basis` `"partial"`, "score provisional" marker on the
+detail page), `matched_skills = []` posting scoring `0.65 * emb_cal`
+with `score_basis` `"full"`, and a partial posting interleaving between
+full-basis postings by score at rank ~207 of the default sort.
+`min_score = 0.80` returns 2,522 postings, 26 of them partial-basis —
+the filter includes partials on their fallback value, doesn't exclude
+them. Screenshots: ring + `*` marker on cards and table, "score
+provisional · skills analysis pending" on the job detail page, and the
+list-view legend, before/after.
+
+**Tests:** backend `tests/test_match_scoring.py` rewritten (composite
+formula across the range, both empty-array cases, denominator floor,
+the `[]`-is-a-real-zero case, partial-outranks-weak-full interleaving,
+NULL score/basis with no resume); `tests/test_api_jobs.py` updated
+where pure-embedding values genuinely changed, plus `score_basis`
+assertions. Frontend `ScoreIndicator.test.tsx` rewritten (composite
+percent, provisional marker on both sizes, `ProvisionalScoreNote`);
+`score_basis` added to the test job factories. Full suites: backend
+446 → 456 passing (the 3 `test_backfill_lock` tests were blocked
+throughout by the live scheduled `backfill_skills_matching.py` run
+holding the advisory lock — confirmed identical failure on clean
+`master`, not a regression); frontend 68 → 73 passing; `tsc --noEmit`
+clean.
+
+**Branch:** `composite-match-score-v1` off `master`.

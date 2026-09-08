@@ -250,11 +250,20 @@ def test_list_jobs_returns_scores_sorted_descending_by_default(api_client, db_se
     # sorts last under NULLS LAST-by-default descending order.
     assert titles_in_order == ["High Match Job", "Mid Match Job", "Low Match Job", "Not Yet Embedded Job"]
 
-    scores = {item["job_title"]: item["match_score"] for item in body["items"]}
-    assert scores["High Match Job"] == pytest.approx(1.0, abs=1e-6)
-    assert scores["Mid Match Job"] == pytest.approx(0.70710678, abs=1e-4)
-    assert scores["Low Match Job"] == pytest.approx(0.0, abs=1e-6)
-    assert scores["Not Yet Embedded Job"] is None
+    # match_score is now the composite, calibrated to [0, 1] (see
+    # huntloop.match_scoring). High has no skills data -> partial basis,
+    # score = clamp(sim 1.0 / 0.6, 1) = 1.0. Mid has matched 2 / missing
+    # 1 -> full basis, calibrated embedding and skills ratio both clamp
+    # to 1.0 so the composite is 1.0 too. Low -> partial, sim 0.0.
+    by_title = {item["job_title"]: item for item in body["items"]}
+    assert by_title["High Match Job"]["match_score"] == pytest.approx(1.0, abs=1e-6)
+    assert by_title["High Match Job"]["score_basis"] == "partial"
+    assert by_title["Mid Match Job"]["match_score"] == pytest.approx(1.0, abs=1e-6)
+    assert by_title["Mid Match Job"]["score_basis"] == "full"
+    assert by_title["Low Match Job"]["match_score"] == pytest.approx(0.0, abs=1e-6)
+    assert by_title["Low Match Job"]["score_basis"] == "partial"
+    assert by_title["Not Yet Embedded Job"]["match_score"] is None
+    assert by_title["Not Yet Embedded Job"]["score_basis"] is None
 
 
 def test_list_jobs_rejects_removed_and_unknown_sort_values(api_client, db_session):
@@ -413,8 +422,11 @@ def test_list_jobs_filters_by_min_score(api_client, db_session):
     assert response.status_code == 200
     body = response.json()
     titles = {item["job_title"] for item in body["items"]}
-    # High (1.0) and Mid (~0.707) pass; Low (0.0) and the null-score job
-    # (excluded - null comparisons never satisfy >=) do not.
+    # min_score compares against the composite. High (partial, 1.0) and
+    # Mid (full, 1.0) pass; Low (0.0) and the null-score job (excluded -
+    # null comparisons never satisfy >=) do not. Partial-basis postings
+    # are filtered on their fallback value, not excluded for lacking
+    # skills data.
     assert titles == {"High Match Job", "Mid Match Job"}
 
 

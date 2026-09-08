@@ -28,7 +28,7 @@ export function JobCard({ job }: { job: JobSummary }) {
           </p>
           <p className="mt-0.5 text-sm text-text-subtle">{job.company_name}</p>
         </div>
-        <ScoreIndicator score={job.match_score} size="sm" />
+        <ScoreIndicator score={job.match_score} size="sm" provisional={job.score_basis === "partial"} />
       </div>
 
       <div className="pointer-events-none relative z-[1]">
