@@ -44,6 +44,7 @@ function DraftingSection({ jobId }: { jobId: number }) {
   const [answer, setAnswer] = useState<string | null>(null);
   const [error, setError] = useState<DraftError | null>(null);
   const [showErrorDetails, setShowErrorDetails] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   // Whether the user has typed into the API key field THIS session -
   // once true, an external settings change (another tab/the settings
@@ -83,6 +84,7 @@ function DraftingSection({ jobId }: { jobId: number }) {
     setError(null);
     setShowErrorDetails(false);
     setAnswer(null);
+    setCopied(false);
     try {
       const result = await draftAnswer(jobId, { prompt, provider, api_key: apiKey });
       setAnswer(result.answer);
@@ -90,6 +92,19 @@ function DraftingSection({ jobId }: { jobId: number }) {
     } catch (err) {
       setStatus("error");
       setError(describeDraftError(err));
+    }
+  }
+
+  async function handleCopy() {
+    if (!answer) return;
+    try {
+      await navigator.clipboard.writeText(answer);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard access can fail (permissions, insecure context) - not
+      // worth surfacing as a full error state, the text is still visible
+      // and selectable for a manual copy.
     }
   }
 
@@ -164,8 +179,15 @@ function DraftingSection({ jobId }: { jobId: number }) {
         </div>
       )}
       {status === "success" && answer && (
-        <div className="whitespace-pre-wrap border-l-2 border-accent bg-surface px-3 py-2 text-sm leading-relaxed text-text-secondary">
-          {answer}
+        <div className="flex flex-col gap-2 border-l-2 border-accent bg-surface px-3 py-2">
+          <div className="whitespace-pre-wrap text-sm leading-relaxed text-text-secondary">{answer}</div>
+          <button
+            type="button"
+            onClick={handleCopy}
+            className="self-start border border-border px-2.5 py-1 text-xs font-medium text-text hover:border-accent hover:text-accent"
+          >
+            {copied ? "Copied!" : "Copy"}
+          </button>
         </div>
       )}
     </div>

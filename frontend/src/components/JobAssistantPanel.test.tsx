@@ -244,6 +244,34 @@ describe("JobAssistantPanel", () => {
       await waitFor(() => expect(screen.getByText("Second drafted answer.")).toBeInTheDocument());
       expect(screen.queryByText("First drafted answer.")).not.toBeInTheDocument();
     });
+
+    it("copies the drafted answer to the clipboard and shows a brief confirmation", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.assign(navigator, { clipboard: { writeText } });
+      vi.spyOn(api, "draftAnswer").mockResolvedValue({ answer: "Drafted answer text.", provider: "groq" });
+
+      renderOpen(makeDetail());
+      fireEvent.change(screen.getByPlaceholderText(/Groq API key|Gemini API key/i), {
+        target: { value: "some-key" },
+      });
+      fireEvent.change(screen.getByPlaceholderText(/why-this-company/i), {
+        target: { value: "Draft a why-this-company answer." },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /draft answer/i }));
+      await waitFor(() => expect(screen.getByText("Drafted answer text.")).toBeInTheDocument());
+
+      const copyButton = screen.getByRole("button", { name: /^copy$/i });
+      fireEvent.click(copyButton);
+
+      await waitFor(() => expect(writeText).toHaveBeenCalledWith("Drafted answer text."));
+      expect(await screen.findByRole("button", { name: /copied!/i })).toBeInTheDocument();
+
+      vi.advanceTimersByTime(2000);
+      await waitFor(() => expect(screen.getByRole("button", { name: /^copy$/i })).toBeInTheDocument());
+
+      vi.useRealTimers();
+    });
   });
 
   describe("drafting section - saved settings auto-fill", () => {
