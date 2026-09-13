@@ -23,12 +23,18 @@ Safe to re-run: it recomputes and overwrites every company's value each
 time, so a re-run after sponsor_name_overrides changes (e.g. a new
 override added) or after more LCA data is ingested will pick up the
 updated match.
+
+Also stamps `companies.sponsor_checked_at` with the current time for
+every row it processes, whether or not a match is found - this is what
+distinguishes "checked, no match" from "never checked" downstream (see
+migration d4e5f6a7b8c9).
 """
 
 import logging
 import os
 import sys
 import time
+from datetime import datetime, timezone
 
 SRC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
 sys.path.insert(0, SRC_DIR)
@@ -62,8 +68,10 @@ def main():
 
         resolved = 0
         unresolved = 0
+        checked_at = datetime.now(timezone.utc)
         for company in companies:
             matches = find_matching_employers(session, company.name)
+            company.sponsor_checked_at = checked_at
             if matches:
                 top = matches[0]
                 company.matched_sponsor_employer_name = top.employer_name_normalized

@@ -102,6 +102,12 @@ class Company(Base):
     # forced to a low-confidence guess. Populated by
     # scripts/resolve_sponsor_matches.py, not automatically kept fresh.
     matched_sponsor_employer_name = Column(String(255), nullable=True)
+    # When scripts/resolve_sponsor_matches.py last checked this company -
+    # set every time it processes a row, whether or not a match cleared
+    # the threshold. NULL means the matcher has never run against this
+    # company at all, which is a distinct state from "checked, no match"
+    # (matched_sponsor_employer_name NULL but sponsor_checked_at set).
+    sponsor_checked_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now())
 

@@ -484,6 +484,55 @@ def test_get_job_detail_sponsor_is_null_when_company_has_no_match(api_client, db
     assert body["salary_estimate"] is None
 
 
+def test_get_job_detail_sponsor_check_status_confirmed(api_client, db_session):
+    """palantir has a resolved matched_sponsor_employer_name -> 'confirmed',
+    regardless of whether sponsor_checked_at happens to be set."""
+    seeded = _seed(db_session)
+
+    response = api_client.get(f"/jobs/{seeded['high'].id}")
+    assert response.json()["sponsor_check_status"] == "confirmed"
+
+
+def test_get_job_detail_sponsor_check_status_not_checked_when_never_run(api_client, db_session):
+    """checkr has no matched_sponsor_employer_name AND no sponsor_checked_at
+    (the matcher has never run against it) -> 'not_checked', never
+    conflated with 'checked_no_match'."""
+    seeded = _seed(db_session)
+
+    response = api_client.get(f"/jobs/{seeded['low'].id}")
+    assert response.json()["sponsor_check_status"] == "not_checked"
+
+
+def test_get_job_detail_sponsor_check_status_checked_no_match(api_client, db_session):
+    """A company the matcher HAS run against but found nothing above
+    threshold for - matched_sponsor_employer_name is NULL but
+    sponsor_checked_at is set - must report 'checked_no_match', distinct
+    from a company that was simply never checked."""
+    company = Company(
+        name="gemcorp",
+        matched_sponsor_employer_name=None,
+        sponsor_checked_at=datetime(2026, 9, 1, 12, 0, 0),
+    )
+    source = JobSource(name="gem_api")
+    db_session.add_all([company, source])
+    db_session.commit()
+
+    job = JobPosting(
+        job_title="Checked, No Sponsor Match Job",
+        job_url="https://example.com/jobs/gemcorp",
+        job_description="a job at a company the matcher has checked",
+        company_id=company.id,
+        source_id=source.id,
+    )
+    db_session.add(job)
+    db_session.commit()
+
+    response = api_client.get(f"/jobs/{job.id}")
+    body = response.json()
+    assert body["sponsor"] is None
+    assert body["sponsor_check_status"] == "checked_no_match"
+
+
 def test_get_job_detail_sponsor_summary_and_salary_estimate(api_client, db_session):
     seeded = _seed(db_session)
     _seed_palantir_lca_rows(db_session)

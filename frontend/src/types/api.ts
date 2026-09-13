@@ -70,10 +70,21 @@ export interface SponsorSummary {
   latest_case_status: string | null;
 }
 
+// Three honest states for a job's company, distinct from the bare
+// has_sponsor_history boolean - mirrors
+// huntloop.api.schemas.jobs.JobDetail.sponsor_check_status. "not_checked"
+// must never be presented as "no sponsor history" - most companies (734
+// of 743 as of this field's introduction) fall into that state simply
+// because scripts/resolve_sponsor_matches.py hasn't been (re-)run against
+// them since they were onboarded, not because they were checked and found
+// wanting.
+export type SponsorCheckStatus = "confirmed" | "checked_no_match" | "not_checked";
+
 export interface JobDetail extends JobSummary {
   job_description: string | null;
   ats_platform: string | null;
   sponsor: SponsorSummary | null;
+  sponsor_check_status: SponsorCheckStatus;
   // salary_estimate is inherited from JobSummary.
 }
 
