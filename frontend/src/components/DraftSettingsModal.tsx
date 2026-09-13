@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { readApiKey, readDraftSettings, writeDraftSettings } from "@/lib/draftSettings";
 import type { DraftAnswerProvider } from "@/types/api";
@@ -29,13 +29,21 @@ export function DraftSettingsModal() {
   const [apiKey, setApiKey] = useState("");
   const [savedAt, setSavedAt] = useState<number | null>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    const settings = readDraftSettings();
-    setProvider(settings.provider);
-    setApiKey(settings.apiKey);
-    setSavedAt(null);
-  }, [open]);
+  // Re-reads the shared settings the moment the modal opens (rather than
+  // in an effect keyed on `open`) - an "adjust state in response to a
+  // prop/state change" update, done during render per
+  // https://react.dev/learn/you-might-not-need-an-effect, not after
+  // commit. Same result, just without the extra effect-triggered render.
+  const [prevOpen, setPrevOpen] = useState(open);
+  if (open !== prevOpen) {
+    setPrevOpen(open);
+    if (open) {
+      const settings = readDraftSettings();
+      setProvider(settings.provider);
+      setApiKey(settings.apiKey);
+      setSavedAt(null);
+    }
+  }
 
   function handleProviderChange(next: DraftAnswerProvider) {
     setProvider(next);

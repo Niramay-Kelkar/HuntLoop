@@ -35,8 +35,10 @@ const DRAFT_PROVIDERS: { value: DraftAnswerProvider; label: string }[] = [
 ];
 
 function DraftingSection({ jobId }: { jobId: number }) {
-  const [provider, setProvider] = useState<DraftAnswerProvider>("groq");
-  const [apiKey, setApiKey] = useState<string>("");
+  const [provider, setProvider] = useState<DraftAnswerProvider>(
+    () => readDraftSettings().provider,
+  );
+  const [apiKey, setApiKey] = useState<string>(() => readDraftSettings().apiKey);
   const [prompt, setPrompt] = useState("");
   const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
   const [answer, setAnswer] = useState<string | null>(null);
@@ -50,10 +52,6 @@ function DraftingSection({ jobId }: { jobId: number }) {
   const keyTouchedRef = useRef(false);
 
   useEffect(() => {
-    const settings = readDraftSettings();
-    setProvider(settings.provider);
-    setApiKey(settings.apiKey);
-
     function handleSettingsChanged() {
       if (keyTouchedRef.current) return;
       const next = readDraftSettings();
