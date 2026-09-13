@@ -306,35 +306,68 @@ function answerScoreBasis(detail: JobDetail): string {
   );
 }
 
-type Exchange = { id: string; question: string; answer: string };
+type Exchange = { question: string; answer: string };
 
+/**
+ * Floating chat-widget-style launcher (bottom-right icon -> drawer),
+ * replacing the old always-embedded panel. Both the lookup-based FAQ
+ * buttons and the drafting form live together in one drawer now,
+ * instead of two separate on-page surfaces.
+ *
+ * Only one answer/draft result is ever shown at a time - asking a new
+ * FAQ question replaces the previous answer rather than appending to a
+ * growing list (same for the drafting form, in DraftingSection above).
+ * Full replacement, no collapsed "N earlier questions" history: the
+ * underlying lookups are cheap/instant and re-askable with one click,
+ * so keeping old answers around adds clutter without saving the user
+ * anything real.
+ */
 export function JobAssistantPanel({ detail }: { detail: JobDetail }) {
-  const [open, setOpen] = useState(true);
-  const [history, setHistory] = useState<Exchange[]>([]);
+  const [open, setOpen] = useState(false);
+  const [exchange, setExchange] = useState<Exchange | null>(null);
 
   function ask(question: Question) {
-    setHistory((prev) => [
-      ...prev,
-      { id: `${question.id}-${prev.length}`, question: question.label, answer: question.answer(detail) },
-    ]);
+    setExchange({ question: question.label, answer: question.answer(detail) });
   }
 
   return (
-    <div className="border border-border bg-surface p-6">
+    <>
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="flex w-full items-center justify-between text-left"
+        aria-label={open ? "Collapse job assistant" : "Open job assistant"}
+        aria-expanded={open}
+        className="fixed bottom-6 right-6 z-40 grid h-14 w-14 place-items-center rounded-full border border-accent-hover bg-accent text-white shadow-[0_6px_20px_rgba(20,30,40,.28)] hover:bg-accent-hover"
       >
-        <h2 className="text-base font-semibold text-text">Ask about this job</h2>
-        <span className="font-mono text-xs text-text-subtle">{open ? "hide" : "show"}</span>
+        <span aria-hidden className="text-xl leading-none">
+          {open ? "✕" : "💬"}
+        </span>
       </button>
-      <p className="mt-1 text-sm text-text-subtle">
-        Quick answers looked up directly from this job&apos;s data — no AI generation in this version.
-      </p>
 
       {open && (
-        <div className="mt-4 flex flex-col gap-4">
+        <div
+          role="dialog"
+          aria-label="Job assistant"
+          className="fixed bottom-24 right-6 z-40 flex max-h-[75vh] w-[min(24rem,calc(100vw-2rem))] flex-col gap-4 overflow-y-auto border border-border-strong bg-surface p-5 shadow-[0_10px_30px_rgba(20,30,40,.3)]"
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <h2 className="text-base font-semibold text-text">Ask about this job</h2>
+              <p className="mt-1 text-sm text-text-subtle">
+                Quick answers looked up directly from this job&apos;s data, plus resume-grounded
+                drafting below.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setOpen(false)}
+              aria-label="Close job assistant"
+              className="shrink-0 text-text-subtle hover:text-text"
+            >
+              ✕
+            </button>
+          </div>
+
           <div className="flex flex-wrap gap-2">
             {QUESTIONS.map((q) => (
               <button
@@ -348,24 +381,20 @@ export function JobAssistantPanel({ detail }: { detail: JobDetail }) {
             ))}
           </div>
 
-          {history.length > 0 && (
-            <div className="flex flex-col gap-3 border-t border-divider pt-4">
-              {history.map((exchange) => (
-                <div key={exchange.id} className="flex flex-col gap-1.5">
-                  <div className="self-start bg-surface-alt px-3 py-1.5 text-sm font-medium text-text">
-                    {exchange.question}
-                  </div>
-                  <div className="self-start border-l-2 border-accent bg-surface px-3 py-2 text-sm leading-relaxed text-text-secondary">
-                    {exchange.answer}
-                  </div>
-                </div>
-              ))}
+          {exchange && (
+            <div className="flex flex-col gap-1.5 border-t border-divider pt-4">
+              <div className="self-start bg-surface-alt px-3 py-1.5 text-sm font-medium text-text">
+                {exchange.question}
+              </div>
+              <div className="self-start border-l-2 border-accent bg-surface px-3 py-2 text-sm leading-relaxed text-text-secondary">
+                {exchange.answer}
+              </div>
             </div>
           )}
 
           <DraftingSection jobId={detail.id} />
         </div>
       )}
-    </div>
+    </>
   );
 }
