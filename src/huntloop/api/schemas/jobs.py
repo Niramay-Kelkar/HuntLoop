@@ -152,6 +152,20 @@ class JobDetail(JobSummary):
     job_description: str | None = None
     ats_platform: str | None = None
     sponsor: SponsorSummary | None = None
+    sponsor_check_status: Literal["confirmed", "checked_no_match", "not_checked"] = Field(
+        description=(
+            "Three honest states for this job's company, distinct from the bare "
+            "has_sponsor_history boolean: 'confirmed' (companies.matched_sponsor_employer_name "
+            "is set - a real resolved match, independent of whether the sponsor "
+            "aggregate happens to have LCA rows to show), 'checked_no_match' "
+            "(scripts/resolve_sponsor_matches.py "
+            "has run against this company - companies.sponsor_checked_at is set - "
+            "but found nothing above threshold), or 'not_checked' (the matcher has "
+            "never run against this company at all, sponsor_checked_at is NULL - "
+            "true for most companies onboarded after the matcher's one historical "
+            "run). Callers must not treat 'not_checked' as 'no sponsor history'."
+        )
+    )
 
 
 class JobListResponse(BaseModel):

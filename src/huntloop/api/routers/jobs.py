@@ -444,6 +444,12 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
     salary_estimate = (
         SalaryEstimate(amount=sponsor.median_wage) if sponsor is not None and sponsor.median_wage is not None else None
     )
+    if company.matched_sponsor_employer_name is not None:
+        sponsor_check_status = "confirmed"
+    elif company.sponsor_checked_at is not None:
+        sponsor_check_status = "checked_no_match"
+    else:
+        sponsor_check_status = "not_checked"
 
     return JobDetail(
         id=job.id,
@@ -466,6 +472,7 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
         job_description=job.job_description,
         ats_platform=company.ats_platform,
         sponsor=sponsor_response,
+        sponsor_check_status=sponsor_check_status,
         salary_estimate=salary_estimate,
     )
 

@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { getJob } from "@/lib/api";
 import { ErrorState } from "@/components/ErrorState";
+import { JobAssistantPanel } from "@/components/JobAssistantPanel";
 import { NotesEditor } from "@/components/NotesEditor";
 import { ScoreIndicator } from "@/components/ScoreIndicator";
 import { StatusControl } from "@/components/StatusControl";
@@ -178,6 +179,8 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
               )}
             </div>
           </div>
+
+          <JobAssistantPanel detail={detail} />
 
           {description && (
             <div className="border border-border bg-surface p-6">
