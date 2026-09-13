@@ -159,3 +159,22 @@ export interface ResumeVersionSummary {
   is_active: boolean;
   text_preview: string;
 }
+
+// POST /jobs/{id}/draft-answer (huntloop.api.routers.drafting) - slice 2
+// of the job-detail chat assistant. BYOK: api_key is the user's OWN
+// third-party provider key, sent per-request, never stored by this app
+// (not in this type, not anywhere server-side - see CLAUDE.md's TLS
+// warning on this endpoint before ever pointing this at a non-localhost
+// API).
+export type DraftAnswerProvider = "groq" | "gemini";
+
+export interface DraftAnswerRequest {
+  prompt: string;
+  provider: DraftAnswerProvider;
+  api_key: string;
+}
+
+export interface DraftAnswerResponse {
+  answer: string;
+  provider: DraftAnswerProvider;
+}

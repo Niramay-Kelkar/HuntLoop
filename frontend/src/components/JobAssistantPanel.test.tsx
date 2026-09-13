@@ -1,6 +1,8 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import * as api from "@/lib/api";
+import { writeDraftSettings } from "@/lib/draftSettings";
 import type { JobDetail } from "@/types/api";
 import { JobAssistantPanel } from "./JobAssistantPanel";
 
@@ -33,6 +35,14 @@ function makeDetail(overrides: Partial<JobDetail> = {}): JobDetail {
 }
 
 describe("JobAssistantPanel", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+  afterEach(() => {
+    window.localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
   it("renders all four question buttons", () => {
     render(<JobAssistantPanel detail={makeDetail()} />);
     expect(screen.getByText("Does this company sponsor visas?")).toBeInTheDocument();
@@ -134,5 +144,100 @@ describe("JobAssistantPanel", () => {
     fireEvent.click(screen.getByText("Does this company sponsor visas?"));
     expect(screen.getAllByText("What's the salary estimate?").length).toBeGreaterThanOrEqual(1);
     expect(screen.getAllByText("Does this company sponsor visas?").length).toBeGreaterThanOrEqual(1);
+  });
+
+  describe("drafting section - error messages", () => {
+    async function submitDraftRequest() {
+      fireEvent.change(screen.getByPlaceholderText(/Groq API key|Gemini API key/i), {
+        target: { value: "some-key" },
+      });
+      fireEvent.change(screen.getByPlaceholderText(/why-this-company/i), {
+        target: { value: "Draft a why-this-company answer." },
+      });
+      fireEvent.click(screen.getByRole("button", { name: /draft answer/i }));
+      await waitFor(() => expect(screen.getByText(/rejected as invalid|didn't respond|rate limit|invalid/i)).toBeInTheDocument());
+    }
+
+    it("shows a plain-language message for a 401, not the raw provider error, with details collapsed by default", async () => {
+      const rawGroqError =
+        "Error code: 401 - {'error': {'message': 'Invalid API Key', 'type': 'invalid_request_error', 'code': 'invalid_api_key'}}";
+      vi.spyOn(api, "draftAnswer").mockRejectedValue(
+        new api.ApiError(
+          "POST failed with 401",
+          401,
+          JSON.stringify({ detail: `The provider rejected this API key: ${rawGroqError}` }),
+        ),
+      );
+
+      render(<JobAssistantPanel detail={makeDetail()} />);
+      await submitDraftRequest();
+
+      expect(screen.getByText(/your api key was rejected as invalid/i)).toBeInTheDocument();
+      expect(screen.queryByText(new RegExp(rawGroqError.slice(0, 20)))).not.toBeInTheDocument();
+
+      // Raw detail is still reachable, just collapsed until asked for.
+      const toggle = screen.getByRole("button", { name: /show details/i });
+      expect(screen.queryByText(/invalid_api_key/i)).not.toBeInTheDocument();
+      fireEvent.click(toggle);
+      expect(screen.getByText(/invalid_api_key/i)).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /hide details/i })).toBeInTheDocument();
+    });
+
+    it("shows a plain-language message for a 429 provider rate limit", async () => {
+      vi.spyOn(api, "draftAnswer").mockRejectedValue(
+        new api.ApiError(
+          "POST failed with 429",
+          429,
+          JSON.stringify({ detail: "The provider reported a rate limit: too many requests" }),
+        ),
+      );
+      render(<JobAssistantPanel detail={makeDetail()} />);
+      await submitDraftRequest();
+      expect(screen.getByText(/hit this provider's rate limit/i)).toBeInTheDocument();
+    });
+
+    it("shows a plain-language message for a 502 provider failure", async () => {
+      vi.spyOn(api, "draftAnswer").mockRejectedValue(
+        new api.ApiError("POST failed with 502", 502, JSON.stringify({ detail: "The provider call failed: boom" })),
+      );
+      render(<JobAssistantPanel detail={makeDetail()} />);
+      await submitDraftRequest();
+      expect(screen.getByText(/didn't respond correctly/i)).toBeInTheDocument();
+    });
+  });
+
+  describe("drafting section - saved settings auto-fill", () => {
+    it("pre-fills provider and API key from the shared settings on mount", () => {
+      writeDraftSettings({ provider: "gemini", apiKey: "saved-gemini-key" });
+      render(<JobAssistantPanel detail={makeDetail()} />);
+
+      expect(screen.getByDisplayValue("saved-gemini-key")).toBeInTheDocument();
+      expect(screen.getByRole("combobox")).toHaveValue("gemini");
+    });
+
+    it("persists across a simulated navigation (unmount + remount, as happens between job pages)", () => {
+      writeDraftSettings({ provider: "groq", apiKey: "saved-groq-key" });
+
+      const { unmount } = render(<JobAssistantPanel detail={makeDetail({ id: 1 })} />);
+      expect(screen.getByDisplayValue("saved-groq-key")).toBeInTheDocument();
+      unmount();
+
+      render(<JobAssistantPanel detail={makeDetail({ id: 2 })} />);
+      expect(screen.getByDisplayValue("saved-groq-key")).toBeInTheDocument();
+    });
+
+    it("lets the user override the key for just one request without changing the saved default", () => {
+      writeDraftSettings({ provider: "groq", apiKey: "saved-groq-key" });
+      render(<JobAssistantPanel detail={makeDetail()} />);
+
+      const input = screen.getByDisplayValue("saved-groq-key");
+      fireEvent.change(input, { target: { value: "one-off-override-key" } });
+
+      expect(screen.getByDisplayValue("one-off-override-key")).toBeInTheDocument();
+      // The shared saved default is untouched by this local edit - this
+      // form's own changes are session-local, never written back to
+      // localStorage (only DraftSettingsModal's Save button does that).
+      expect(window.localStorage.getItem("huntloop.draftAnswer.apiKey.groq")).toBe("saved-groq-key");
+    });
   });
 });
