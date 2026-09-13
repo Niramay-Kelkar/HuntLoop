@@ -225,6 +225,16 @@ docker-compose up --build   # run the scraper (and keep db running)
 `docker-compose down -v` tears everything down, including the `pgdata`
 volume, for a clean slate.
 
+**As of this entry, `docker compose up` (no extra flags, no `--profile`)
+also brings up the `api` and `frontend` services** — the full stack
+(backend + frontend), not just the scraper/db above, with no separate
+`npm run dev`/`uvicorn --reload` step required. See "API service" and
+"Frontend" below for what each one is; this section's `app`/`db`
+instructions are unchanged by that — `app` is still a run-to-completion
+batch job (the scraper), not a long-running service, so it still needs
+`alembic upgrade head` run once against a fresh `pgdata` volume before it
+can insert anything, same as before.
+
 ## API service
 
 A FastAPI backend, `src/huntloop/api/main.py` - a separate service from
@@ -282,17 +292,29 @@ job-list UI yet. `frontend/src/types/api.ts` and `frontend/src/lib/api.ts`
 mirror the backend's real Pydantic schemas/endpoints already, ready for
 that UI; `frontend/src/components/` is an empty placeholder for it.
 
-**Not containerized (yet) - deliberately.** At this skeleton stage the
-frontend has no stable build to containerize and will iterate on every
-run for a while; `npm run dev`'s hot reload (via Turbopack) is
-meaningfully faster to develop against than a Docker image rebuild loop
-would be, with no compensating benefit yet (nothing depends on it being
-containerized, and it isn't part of the cron/scraper pipeline). Revisit
-once there's a real UI and/or this needs to run somewhere Docker
-actually helps (a deploy, a teammate's machine without Node installed).
+**Now containerized** (`frontend/Dockerfile`, a `frontend` service in
+`docker-compose.yml`) - `docker compose up` alone runs a production-style
+build (`next build && next start`) and serves it on host port `3000`,
+so a stranger's first run needs no local Node/npm install at all:
 
-Run it locally, alongside the API (which must already be running -
-either via Docker, per above, or `uvicorn ... --reload`):
+```bash
+docker compose up --build -d api frontend   # or just `docker compose up --build` for the full stack
+open http://localhost:3000
+```
+
+`NEXT_PUBLIC_API_URL` is baked in at build time (`next build` inlines
+`NEXT_PUBLIC_`-prefixed vars into the browser bundle - see
+`src/lib/api.ts`), passed as a Docker build arg in `docker-compose.yml`
+rather than a runtime `environment:` entry. It defaults to
+`http://localhost:8000` there too, matching the `api` service's own
+host-mapped port - the browser talks to that port directly regardless of
+whether either service is containerized, since none of this runs
+container-to-container.
+
+This doesn't replace local development - `npm run dev`'s hot reload (via
+Turbopack) is still meaningfully faster to iterate against than a Docker
+image rebuild loop, and remains the right way to actively work on the
+frontend:
 
 ```bash
 cd frontend
@@ -303,7 +325,9 @@ open http://localhost:3000
 
 By default it talks to `http://localhost:8000` - override with
 `NEXT_PUBLIC_API_URL` in `frontend/.env.local` (see
-`frontend/.env.local.example`) if the API is running somewhere else.
+`frontend/.env.local.example`) if the API is running somewhere else. The
+API must already be running for either workflow above - via Docker (per
+"Run with Docker"/"API service") or `uvicorn ... --reload`.
 
 ## Observability stack (optional, opt-in)
 

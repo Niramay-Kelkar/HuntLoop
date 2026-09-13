@@ -106,6 +106,38 @@ services:
       timeout: 5s
       retries: 5
 
+  # Next.js frontend, added so a plain `docker compose up` brings up the
+  # full stack (backend + frontend) with no separate `npm run dev` step -
+  # see frontend/Dockerfile and README.md's Frontend section. This is a
+  # production-style `next build && next start` image, not the dev
+  # server with hot reload; `npm run dev` (see the Frontend section)
+  # stays the faster loop for active local development and isn't
+  # replaced by this.
+  #
+  # NEXT_PUBLIC_API_URL is a BUILD arg, not a runtime `environment:` var -
+  # the frontend runs entirely in the user's own browser regardless of
+  # whether it's containerized, so this is the URL the browser itself
+  # will call, not a container-to-container address. That's the same
+  # host-mapped port (localhost:8000) the api service already publishes
+  # below, matching src/lib/api.ts's own http://localhost:8000 default -
+  # not overridden here since the default is already correct for this
+  # setup, but spelled out via build.args for clarity/future overrides.
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   # Observability stack (Prometheus + Pushgateway + Grafana), gated behind
   # the "observability" profile so a plain `docker-compose up` for regular
   # dev work doesn't start any of it. Infrastructure only, per design:
