@@ -3,6 +3,8 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
+import { DraftSettingsModal } from "@/components/DraftSettingsModal";
+
 const NAV_ITEMS = [
   { href: "/dashboard", label: "Dashboard" },
   { href: "/jobs", label: "Jobs" },
@@ -41,6 +43,9 @@ export function NavBar() {
             );
           })}
         </nav>
+        <div className="ml-auto">
+          <DraftSettingsModal />
+        </div>
       </div>
     </div>
   );
