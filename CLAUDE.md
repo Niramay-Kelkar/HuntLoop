@@ -38,7 +38,61 @@ conventions" and SESSIONS.md for the real current state).
   real endpoints now: `GET /health`, `GET /jobs`, `GET /jobs/{id}`,
   `GET /jobs/departments`, `PATCH /jobs/{id}/application`, `GET
   /dashboard/stats`, `GET /resumes`, `POST /resumes/upload`, `PATCH
-  /resumes/{id}/activate`.**
+  /resumes/{id}/activate`, `POST /jobs/{id}/draft-answer`.**
+  **>>> SECURITY / DEPLOYMENT WARNING — READ THIS BEFORE DEPLOYING THIS
+  API ANYWHERE PUBLIC. `POST /jobs/{id}/draft-answer`
+  (`huntloop.api.routers.drafting`, `huntloop.drafting`, added
+  2026-09-13 — slice 2 of the job-detail chat assistant, BYOK
+  resume-grounded answer drafting) accepts a user-supplied third-party
+  LLM API key with every request and forwards it to that provider. That
+  key travels over whatever transport this API is served on. This
+  stack, per `docker-compose.yml`, currently runs the `api`/`app`/`db`
+  services over PLAIN HTTP with NO TLS TERMINATION ANYWHERE — there is
+  no TLS layer in this project at all as of this entry. DO NOT expose
+  this endpoint (or this API generally, but this endpoint specifically
+  handles a third-party credential) on a public/non-localhost deployment
+  until a real TLS terminator (reverse proxy, managed load balancer,
+  etc.) is put in front of it. This is a real pre-launch blocker, not a
+  someday nice-to-have — treat it as one before any non-local deploy.
+  Also see the identical warning in `huntloop/drafting.py`'s and
+  `huntloop/api/routers/drafting.py`'s module docstrings. <<<**
+  **`POST /jobs/{id}/draft-answer` itself (added 2026-09-13, see
+  SESSIONS.md "Slice 2: resume-grounded application-answer drafting" —
+  builds on the read-only Q&A panel from slice 1, `JobAssistantPanel.tsx`)
+  drafts free-form text (e.g. "draft a why this company answer"), NOT
+  the structured matched/missing-skills JSON slices 1-8's
+  `huntloop.skills_matching*` modules produce — genuinely different
+  shape, different module, different key-handling model.** Request:
+  `{"prompt": str, "provider": "groq"|"gemini", "api_key": str}` -
+  `job_id` is a path param; the frontend sends ONLY these three fields -
+  the job description and the active resume's `extracted_text` are
+  looked up server-side (`huntloop.api.routers.drafting.
+  _lookup_job_and_active_resume`, reusing the exact "fresh
+  `is_active=true` query per request" pattern
+  `huntloop.api.routers.jobs._active_resume_embedding()` already
+  established). **`api_key` is BYOK end to end — never read from
+  `GROQ_API_KEY`/`GEMINI_API_KEY`, never persisted, never logged; a
+  request with no key is a 400, never a silent fallback to any
+  server-side key.** One provider per request, no failover — this
+  module never imports `huntloop.skills_matching_router` or any
+  `skills_matching_*` module; that router's failover exists to solve
+  *this project's own* quota scarcity across its own accounts, an
+  unrelated problem to a visitor bringing one key of their own. Errors
+  are real and distinct, never a generic 500 or a silent 200: 400 (no
+  `api_key`, or no active resume on file), 401 (provider rejected the
+  key), 429 (provider-reported rate limit — **not distinguished in the
+  response shape from this endpoint's own separate per-IP rate limiter's
+  429, which caps this specific unauthenticated endpoint at 10
+  requests/60s/client purely to bound server compute/bandwidth exposure,
+  not to protect any shared LLM quota since the user's own key means
+  this project bears no LLM cost here; the two 429s differ only in their
+  `detail` text — a real, minor, flagged gap, not fixed in this slice**),
+  502 (provider unreachable/malformed response), 404 (job not found).
+  The rate limiter is a bare in-process sliding-window counter (no new
+  dependency — `requirements.txt` has no `slowapi`/Redis) — per-process
+  memory only, resets on restart, does not share state across multiple
+  workers; fine for today's single-process deployment, would need a
+  shared store behind multiple workers.
   **`GET /jobs` gained a `department` query param, and `GET
   /jobs/departments` (added 2026-09-02, see SESSIONS.md's "Add a
   department filter to job search") was added alongside it. **As of

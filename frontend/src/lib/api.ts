@@ -14,6 +14,8 @@ import type {
   ApplicationStatusResponse,
   ApplicationStatusUpdate,
   DashboardStats,
+  DraftAnswerRequest,
+  DraftAnswerResponse,
   HealthResponse,
   JobDetail,
   JobListResponse,
@@ -139,6 +141,19 @@ export function getLocations(): Promise<LocationGroup[]> {
 
 export function getJob(id: number): Promise<JobDetail> {
   return apiFetch<JobDetail>(`/jobs/${id}`);
+}
+
+// api_key here is the user's OWN third-party provider key (BYOK) -
+// sent per-request, never persisted by this app (localStorage in
+// JobAssistantPanel.tsx is the only place it's kept, per-browser, and
+// only so the user doesn't have to retype it every question). See
+// CLAUDE.md's TLS warning on this endpoint before pointing this at
+// anything other than a localhost API.
+export function draftAnswer(jobId: number, payload: DraftAnswerRequest): Promise<DraftAnswerResponse> {
+  return apiFetch<DraftAnswerResponse>(`/jobs/${jobId}/draft-answer`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 }
 
 export function getDashboardStats(): Promise<DashboardStats> {

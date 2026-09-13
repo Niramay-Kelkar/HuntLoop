@@ -1,21 +1,175 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 
-import type { JobDetail } from "@/types/api";
+import { draftAnswer } from "@/lib/api";
 import { formatWage } from "@/lib/theme";
+import type { DraftAnswerProvider, JobDetail } from "@/types/api";
 
 /**
  * Slice 1 of the page-scoped job-detail chat assistant: a factual Q&A
  * panel answered entirely by structured lookup against fields already on
  * `detail` (the same JobDetail the page already fetched via GET
  * /jobs/{id}) - no LLM call, no new network request, no free-text input.
- * Free-text NLU and resume-grounded drafting are a separate, later slice
- * (see the BYOK-shaped provider interface work tracked for it).
  *
  * Every answer is written to be honest about data gaps rather than
  * printing a raw null - see each answer* function below.
+ *
+ * Slice 2 (below, DraftingSection): resume-grounded free-text drafting
+ * via POST /jobs/{id}/draft-answer (huntloop.api.routers.drafting) -
+ * BYOK, the user's own provider API key. The key is kept ONLY in this
+ * browser's localStorage (per provider, so switching providers doesn't
+ * lose the other one's key) so the user doesn't have to retype it every
+ * question - it is never sent anywhere except in the request body of
+ * this one endpoint, and this app never persists it server-side. See
+ * CLAUDE.md's TLS warning on this endpoint before pointing
+ * NEXT_PUBLIC_API_URL at anything other than a localhost API.
  */
+
+const DRAFT_PROVIDERS: { value: DraftAnswerProvider; label: string }[] = [
+  { value: "groq", label: "Groq" },
+  { value: "gemini", label: "Gemini" },
+];
+
+function apiKeyStorageKey(provider: DraftAnswerProvider): string {
+  return `huntloop.draftAnswer.apiKey.${provider}`;
+}
+
+function readStoredApiKey(provider: DraftAnswerProvider): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return window.localStorage.getItem(apiKeyStorageKey(provider)) ?? "";
+  } catch {
+    // Private-browsing / blocked storage - fall back to an empty field
+    // rather than throwing.
+    return "";
+  }
+}
+
+function DraftingSection({ jobId }: { jobId: number }) {
+  const [provider, setProvider] = useState<DraftAnswerProvider>("groq");
+  const [apiKey, setApiKey] = useState<string>(() => readStoredApiKey("groq"));
+  const [prompt, setPrompt] = useState("");
+  const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [answer, setAnswer] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  function handleProviderChange(next: DraftAnswerProvider) {
+    setProvider(next);
+    setApiKey(readStoredApiKey(next));
+  }
+
+  function handleApiKeyChange(next: string) {
+    setApiKey(next);
+    if (typeof window === "undefined") return;
+    try {
+      if (next) window.localStorage.setItem(apiKeyStorageKey(provider), next);
+      else window.localStorage.removeItem(apiKeyStorageKey(provider));
+    } catch {
+      // Ignore storage failures - the in-memory value still works for
+      // this session.
+    }
+  }
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    if (!prompt.trim() || !apiKey.trim() || status === "loading") return;
+
+    setStatus("loading");
+    setErrorMessage(null);
+    setAnswer(null);
+    try {
+      const result = await draftAnswer(jobId, { prompt, provider, api_key: apiKey });
+      setAnswer(result.answer);
+      setStatus("success");
+    } catch (err) {
+      setStatus("error");
+      setErrorMessage(describeDraftError(err));
+    }
+  }
+
+  return (
+    <div className="mt-6 flex flex-col gap-3 border-t border-divider pt-4">
+      <div>
+        <h3 className="text-sm font-semibold text-text">Draft an application answer</h3>
+        <p className="mt-1 text-xs text-text-subtle">
+          Uses your own API key, grounded in this job&apos;s description and your active resume.
+          Your key is stored only in this browser and sent only to your chosen provider - never
+          saved on our servers.
+        </p>
+      </div>
+
+      <form onSubmit={handleSubmit} className="flex flex-col gap-2">
+        <div className="flex flex-wrap gap-2">
+          <select
+            value={provider}
+            onChange={(e) => handleProviderChange(e.target.value as DraftAnswerProvider)}
+            className="border border-border bg-surface px-2 py-1.5 text-sm text-text"
+          >
+            {DRAFT_PROVIDERS.map((p) => (
+              <option key={p.value} value={p.value}>
+                {p.label}
+              </option>
+            ))}
+          </select>
+          <input
+            type="password"
+            value={apiKey}
+            onChange={(e) => handleApiKeyChange(e.target.value)}
+            placeholder={`Your ${provider === "groq" ? "Groq" : "Gemini"} API key`}
+            className="min-w-0 flex-1 border border-border bg-surface px-2 py-1.5 text-sm text-text"
+          />
+        </div>
+        <textarea
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          placeholder="e.g. Draft a why-this-company answer"
+          rows={2}
+          className="border border-border bg-surface px-2 py-1.5 text-sm text-text"
+        />
+        <button
+          type="submit"
+          disabled={!prompt.trim() || !apiKey.trim() || status === "loading"}
+          className="self-start border border-border px-3 py-1.5 text-sm text-text hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {status === "loading" ? "Drafting…" : "Draft answer"}
+        </button>
+      </form>
+
+      {status === "error" && errorMessage && (
+        <div className="border-l-2 border-bad bg-surface px-3 py-2 text-sm text-bad">{errorMessage}</div>
+      )}
+      {status === "success" && answer && (
+        <div className="whitespace-pre-wrap border-l-2 border-accent bg-surface px-3 py-2 text-sm leading-relaxed text-text-secondary">
+          {answer}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function describeDraftError(err: unknown): string {
+  if (err instanceof Error && "status" in err) {
+    const status = (err as { status: number | null }).status;
+    const detail = (err as { detail?: string }).detail;
+    let parsedDetail: string | undefined;
+    if (detail) {
+      try {
+        const parsed = JSON.parse(detail);
+        parsedDetail = typeof parsed?.detail === "string" ? parsed.detail : undefined;
+      } catch {
+        parsedDetail = detail;
+      }
+    }
+    if (status === 400) return parsedDetail ?? "Missing or invalid request - check your API key and prompt.";
+    if (status === 401) return parsedDetail ?? "The provider rejected this API key.";
+    if (status === 429) return parsedDetail ?? "Rate limited - try again shortly.";
+    if (status === 404) return parsedDetail ?? "This job could not be found.";
+    if (status === 502) return parsedDetail ?? "The provider call failed. Try again in a moment.";
+    return parsedDetail ?? "Something went wrong drafting this answer.";
+  }
+  return "Could not reach the server.";
+}
 
 type Question = {
   id: string;
@@ -153,6 +307,8 @@ export function JobAssistantPanel({ detail }: { detail: JobDetail }) {
               ))}
             </div>
           )}
+
+          <DraftingSection jobId={detail.id} />
         </div>
       )}
     </div>
