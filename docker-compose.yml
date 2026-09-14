@@ -122,11 +122,21 @@ services:
   # below, matching src/lib/api.ts's own http://localhost:8000 default -
   # not overridden here since the default is already correct for this
   # setup, but spelled out via build.args for clarity/future overrides.
+  #
+  # `${NEXT_PUBLIC_API_URL:-http://localhost:8000}` - reads the same-named
+  # env var if set, otherwise keeps the plain-Docker default above
+  # completely unchanged. Only relevant for the optional "proxy" profile
+  # below: a self-hoster using Caddy sets NEXT_PUBLIC_API_URL=/api in
+  # .env before building, so the browser calls the same-origin /api path
+  # Caddy proxies through, instead of a fixed localhost:8000 (see
+  # README.md's "Reverse proxy / HTTPS for self-hosting" section). Nobody
+  # not using that profile needs to set this - unset behaves exactly as
+  # before.
   frontend:
     build:
       context: ./frontend
       args:
-        NEXT_PUBLIC_API_URL: http://localhost:8000
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     ports:
       - "3000:3000"
     depends_on:
@@ -137,6 +147,49 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+  # Optional reverse proxy / automatic HTTPS for anyone self-hosting this
+  # stack beyond localhost - see README.md's "Reverse proxy / HTTPS for
+  # self-hosting" section for the full writeup (evaluated against
+  # nginx+certbot and Traefik first; Caddy won on config size, native
+  # Docker Compose fit, and footprint for a solo self-hoster's scale).
+  #
+  # Behind the "proxy" Compose profile, same pattern as `observability`
+  # below - a plain `docker compose up` never starts this, so it changes
+  # nothing for anyone running locally. Opt in with:
+  #   docker compose --profile proxy up -d
+  #
+  # Caddy terminates real Let's Encrypt HTTPS for HUNTLOOP_DOMAIN (see
+  # caddy/Caddyfile - required env var, no example/placeholder domain
+  # baked in) and reverse-proxies to the existing `frontend`/`api`
+  # services over the compose network - it does not replace their own
+  # published ports, which stay available for direct/local access
+  # exactly as before.
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["proxy"]
+    restart: unless-stopped
+    environment:
+      HUNTLOOP_DOMAIN: ${HUNTLOOP_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates + the ACME account key live here. This MUST persist
+      # across restarts/recreates - losing it makes Caddy re-request a
+      # fresh certificate on next boot, and Let's Encrypt's real rate
+      # limits (5 failures per account/hostname/hour, 5 duplicate certs
+      # per exact hostname set per week) mean repeatedly losing this
+      # volume can get a domain temporarily rate-limited. Never run this
+      # service with `-v`/`down -v` unless you genuinely intend to throw
+      # the certificate away.
+      - caddy_data:/data
+    depends_on:
+      api:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
 
   # Observability stack (Prometheus + Pushgateway + Grafana), gated behind
   # the "observability" profile so a plain `docker-compose up` for regular
@@ -221,5 +274,6 @@ services:
 
 volumes:
   pgdata:
+  caddy_data:
   prometheus_data:
   grafana_data:

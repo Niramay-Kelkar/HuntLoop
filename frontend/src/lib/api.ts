@@ -6,9 +6,21 @@
  *
  * Base URL comes from NEXT_PUBLIC_API_URL (must be NEXT_PUBLIC_-prefixed
  * to reach the browser, since these calls run client-side via
- * TanStack Query - see src/app/providers.tsx), defaulting to
- * http://localhost:8000 to match both `uvicorn`'s default local port and
- * docker-compose's `api` service's published port.
+ * TanStack Query - see src/app/providers.tsx). When that's unset, the
+ * fallback depends on how this was built: `npm run dev` (NODE_ENV
+ * "development") falls back to http://localhost:8000, matching
+ * `uvicorn`'s default local port and docker-compose's `api` service's
+ * published port - unchanged, since dev never goes through a reverse
+ * proxy. A production build (`next build`, NODE_ENV "production" -
+ * `next dev`/`next build` set this automatically, regardless of Docker)
+ * falls back to the relative path "/api" instead, for the optional Caddy
+ * reverse-proxy deployment shape (see docker-compose.yml's "proxy"
+ * profile and README.md) where the frontend and a same-origin "/api/*"
+ * path are served behind one HTTPS domain - a relative path needs no
+ * public domain baked in at Docker build time. The plain (no-proxy)
+ * Docker Compose deployment is unaffected: `docker-compose.yml` still
+ * explicitly passes NEXT_PUBLIC_API_URL=http://localhost:8000 as a build
+ * arg by default, which takes precedence over this fallback either way.
  */
 import type {
   ApplicationStatusResponse,
@@ -23,7 +35,9 @@ import type {
   ResumeVersionSummary,
 } from "@/types/api";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_URL ??
+  (process.env.NODE_ENV === "production" ? "/api" : "http://localhost:8000");
 
 // How long any single request is allowed to hang before we give up and
 // surface an error, rather than leaving a view stuck on its loading

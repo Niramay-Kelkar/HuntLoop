@@ -1,0 +1,36 @@
+# Caddyfile for the optional `proxy` Compose profile (see docker-compose.yml
+# and README.md's "Reverse proxy / HTTPS for self-hosting" section).
+#
+# Not used by plain `docker compose up` at all - this file, and the
+# `caddy` service that reads it, only run when a self-hoster explicitly
+# opts in with `docker compose --profile proxy up`. Local/localhost use
+# is completely unaffected either way.
+#
+# {$HUNTLOOP_DOMAIN} is an env-driven Caddyfile placeholder - set
+# HUNTLOOP_DOMAIN in your .env to your own real domain name (the one you
+# pointed a DNS A-record at this server's public IP for) before bringing
+# the proxy profile up. Caddy then requests and auto-renews a real Let's
+# Encrypt certificate for that exact hostname - no manual `certbot`/cert
+# file wrangling. Leaving HUNTLOOP_DOMAIN unset makes this an invalid
+# Caddyfile (Caddy errors out immediately rather than silently trying to
+# get a certificate for a literal "{$HUNTLOOP_DOMAIN}" hostname), so
+# there's no way to accidentally run this against nothing.
+{$HUNTLOOP_DOMAIN} {
+	# /api/* -> the `api` service (huntloop.api.main), same-origin so the
+	# frontend can call a plain relative "/api" path instead of needing
+	# to know its own public domain at Docker build time (see
+	# frontend/src/lib/api.ts and README.md's proxy section for why that
+	# matters). The api service's own routes are all rooted at "/"
+	# (/health, /jobs, /dashboard/stats, /resumes, ...) - it has no "/api"
+	# prefix of its own - so that prefix must be stripped here, not
+	# passed through.
+	handle /api/* {
+		uri strip_prefix /api
+		reverse_proxy api:8000
+	}
+
+	# Everything else -> the `frontend` service (Next.js, `next start`).
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

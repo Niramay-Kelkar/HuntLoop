@@ -329,6 +329,94 @@ By default it talks to `http://localhost:8000` - override with
 API must already be running for either workflow above - via Docker (per
 "Run with Docker"/"API service") or `uvicorn ... --reload`.
 
+## Reverse proxy / HTTPS for self-hosting (optional, opt-in)
+
+**Not needed for local/localhost use - everything above this section is
+completely unaffected by it.** Plain `docker compose up` never starts
+this; it exists only for anyone who wants to run this stack on a real
+server, reachable at a real domain, over real HTTPS instead of plain
+HTTP. (The stack has no TLS anywhere on its own - see
+`src/huntloop/drafting.py`'s and `src/huntloop/api/routers/drafting.py`'s
+module docstrings for why that specifically matters before exposing
+`POST /jobs/{id}/draft-answer`, which handles a user-supplied third-party
+API key, on any public/non-localhost deployment.)
+
+This uses [Caddy](https://caddyserver.com/) as an optional reverse proxy
+in front of the existing `api`/`frontend` services, behind a `proxy`
+Compose profile (same pattern as the `observability` profile above -
+nothing starts unless you opt in). Caddy was chosen over nginx+certbot
+and Traefik for this project specifically: automatic HTTPS needs only a
+domain name in a Caddyfile (no separate certbot/acme-companion container,
+no per-service ACME labels), it's a single ~24MB container, and that
+matches a solo self-hoster's scale better than Traefik's per-service
+label config or nginx-proxy's two-container/shared-volume setup.
+
+### What you provide
+
+- **A real domain name** (or subdomain) you own.
+- **A DNS A-record** for that domain pointing at your server's public IP
+  address.
+- **Ports 80 and 443 reachable** on that server - open in any firewall,
+  and forwarded if the server is behind NAT. Port 80 is required even
+  though everything ends up served over HTTPS - Let's Encrypt's HTTP-01
+  domain-validation challenge and Caddy's own HTTP→HTTPS redirect both
+  need it.
+
+### What the repo provides
+
+- The `caddy` service in `docker-compose.yml` (behind `profiles:
+  ["proxy"]`) and `caddy/Caddyfile`.
+- A `caddy_data` named volume for Caddy's certificates and ACME account
+  key. **This must persist** - repeatedly losing it and re-issuing risks
+  Let's Encrypt's real rate limits (5 failed validations per
+  account/hostname/hour, 5 duplicate certificates for the same hostname
+  set per week), so don't tear it down with `down -v` unless you
+  genuinely want to throw the certificate away.
+- `caddy/Caddyfile` itself reads `{$HUNTLOOP_DOMAIN}` from the
+  environment rather than a hardcoded example domain - Caddy refuses to
+  start with it unset, so there's no way to accidentally run this
+  against a placeholder hostname.
+- Path-based same-origin routing: Caddy serves the frontend at `/` and
+  reverse-proxies `/api/*` (prefix stripped) to the `api` service, whose
+  own routes are all rooted at `/` (`/health`, `/jobs`,
+  `/dashboard/stats`, ...) with no `/api` prefix of their own. Serving
+  both under one HTTPS origin means the frontend can call a plain
+  relative `/api` path instead of needing to know its own public domain
+  baked in at Docker build time (`NEXT_PUBLIC_API_URL` is otherwise a
+  `next build`-time constant - see the Frontend section above).
+
+### How to enable it
+
+```bash
+# in .env:
+HUNTLOOP_DOMAIN=yourdomain.com
+NEXT_PUBLIC_API_URL=/api    # so the frontend calls the proxied same-origin path
+
+docker compose --profile proxy up --build -d
+```
+
+`NEXT_PUBLIC_API_URL=/api` only matters for this profile - it changes
+what gets baked into the `frontend` image at build time, so it must be
+set *before* `--build` runs, and only when you're actually fronting the
+stack with Caddy. Leaving it unset (the plain no-proxy path covered
+earlier in this README) keeps building the frontend against
+`http://localhost:8000` exactly as before.
+
+CORS (`CORS_ALLOWED_ORIGINS`, see "API service" above) does not need any
+change for this setup - same-origin path-routing means the browser never
+makes a cross-origin request to the API in the first place, so CORS is
+moot for traffic that goes through Caddy. Direct calls to the `api`
+service's own published port (still available, same as always) are
+unaffected either way.
+
+### None of this replaces the plain-HTTP setup
+
+`docker compose up` (no `--profile proxy`) still behaves exactly as
+documented above - `api`/`frontend` still publish their own ports
+directly, with no Caddy involved and no HTTPS. This section only adds an
+opt-in HTTPS front door for a real-domain deployment; it changes nothing
+for local/dev use.
+
 ## Observability stack (optional, opt-in)
 
 Prometheus + Pushgateway + Grafana, for local metrics on scraping
