@@ -390,6 +390,74 @@ also drop the `prometheus_data`/`grafana_data` volumes). This doesn't
 touch `db`/`app` or their `pgdata` volume — the two stacks are
 independent.
 
+## H-1B sponsorship data (optional)
+
+**None of this is required to use HuntLoop.** Job scraping, matching, and
+the rest of the app work fully with zero H-1B/LCA data loaded — sponsor
+status just shows as "not checked" and salary estimates are simply absent
+until you set this up. Nothing crashes or degrades in any other way
+without it. Think of this section as an optional enhancement layer, not a
+setup requirement.
+
+With it, HuntLoop can additionally show whether a company has recent DOL
+H-1B (LCA) sponsorship history and a rough salary estimate derived from
+that company's own wage filings, by matching scraped companies against
+real DOL LCA disclosure data in the `lca_disclosures` table
+(`scripts/ingest_lca_disclosures.py` → `scripts/resolve_sponsor_matches.py`).
+
+There is no automated fetching of this data anywhere in this repo, and
+there won't be — DOL's disclosure files are downloaded manually, by
+design, so nothing in this codebase ever crawls or scrapes a government
+website. Two ways to get data in:
+
+### Option A — real, current, full DOL data
+
+1. Go to DOL's Foreign Labor Certification Data Center performance page:
+   https://www.dol.gov/agencies/eta/foreign-labor/performance — the "LCA
+   Disclosure Data" accordion section lists one Excel file per fiscal
+   year/quarter (H-1B, H-1B1, and E-3 combined).
+2. Download the most recent quarterly file. As of this writing the latest
+   is FY2026 Q3, named `LCA_Disclosure_Data_FY2026_Q3.xlsx`, linked
+   directly at `https://www.dol.gov/media/LCA_Disclosure_Data_FY2026_Q3.xlsx`
+   (an `.xlsx` file, currently ~240 MB). Download whichever quarter(s) you
+   want — more quarters means more historical sponsorship data, but even
+   one quarter is enough to get sponsor matching working.
+3. Place the downloaded file(s) in `data/raw/dol_lca/` (create the
+   directory if it doesn't exist — it's gitignored, since these are large
+   raw downloads, not something this repo ships). Keep the original
+   filename exactly as downloaded (`LCA_Disclosure_Data_FY<YYYY>_Q<N>.xlsx`)
+   — the ingestion script parses the fiscal year and quarter from the
+   filename itself.
+4. Run the ingestion script:
+   ```bash
+   python scripts/ingest_lca_disclosures.py
+   ```
+   This is idempotent (safe to re-run, e.g. after adding a new quarter's
+   file) and only ingests `Certified`/`Certified - Withdrawn` (i.e.
+   actually-approved) rows.
+5. Link scraped companies to this data:
+   ```bash
+   python scripts/resolve_sponsor_matches.py
+   ```
+   Re-run this after ingesting more LCA data or scraping new companies.
+
+### Option B — bundled sample dataset (quick demo, no download)
+
+For a quick first look without downloading anything from DOL, load the
+small real sample dataset committed at `data/samples/`:
+
+```bash
+python scripts/seed_sample_lca_disclosures.py
+python scripts/resolve_sponsor_matches.py
+```
+
+This is a genuine subset of real DOL LCA disclosure data (not synthetic),
+already ingested from DOL's own files — see `data/samples/README.md` for
+exactly how it was built and what it contains (~7,200 rows, ~300 KB
+compressed). It's meant to make a fresh install look populated and
+demonstrate the sponsor-status/salary-estimate features quickly, not to
+replace Option A's real/current/full dataset for actual job-hunting use.
+
 ## Adding a company to scrape
 
 Not yet configurable. Companies are a hardcoded list in
