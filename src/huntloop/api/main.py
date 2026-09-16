@@ -31,6 +31,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from huntloop.api.routers import dashboard, drafting, health, jobs, resumes
+from huntloop.api.routers.resumes import MAX_UPLOAD_BYTES, MaxUploadSizeMiddleware
 
 app = FastAPI(title="HuntLoop API")
 
@@ -43,6 +44,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# See MaxUploadSizeMiddleware's own docstring (huntloop.api.routers.resumes)
+# for why this has to be ASGI-layer middleware rather than a check inside
+# upload_resume() itself.
+app.add_middleware(MaxUploadSizeMiddleware, path="/resumes/upload", max_bytes=MAX_UPLOAD_BYTES)
 
 app.include_router(health.router)
 app.include_router(jobs.router)

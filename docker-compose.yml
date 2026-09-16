@@ -96,8 +96,20 @@ services:
       - ./data/resumes:/app/data/resumes
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Bound to loopback only, not every interface - this API is
+    # unauthenticated (see huntloop/api/routers/drafting.py's own
+    # security warning) and was previously reachable from anywhere on
+    # the LAN/internet that could route to this host's port 8000, not
+    # just from this machine. 127.0.0.1 is loopback-only and reachable
+    # from the host exactly like the old "localhost" default was (same
+    # loopback interface, confirmed live - see the port-binding audit in
+    # SESSIONS.md), so plain local/Docker use is unaffected. The `caddy`
+    # service (proxy profile, below) is unaffected too - it reaches this
+    # service over the internal Docker network via the service name
+    # (http://api:8000, see caddy/Caddyfile), which has nothing to do
+    # with this host-side port's bind address.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     healthcheck:
       # python, not curl/wget - the python:3.13-slim base image this
       # shares with `app` doesn't include either.
@@ -137,8 +149,13 @@ services:
       context: ./frontend
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    # Loopback-only, same reasoning as `api`'s port binding above - this
+    # closes the same class of gap on the frontend's own host port.
+    # Caddy (proxy profile) is unaffected, reaching this over the
+    # internal Docker network via http://frontend:3000 (see
+    # caddy/Caddyfile), not via this host-side binding.
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on:
       api:
         condition: service_healthy

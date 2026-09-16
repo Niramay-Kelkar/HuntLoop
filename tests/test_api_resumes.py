@@ -34,8 +34,21 @@ import types
 
 import pytest
 
+from huntloop.api.routers.resumes import MAX_UPLOAD_BYTES, _activate_rate_limiter, _upload_rate_limiter
 from huntloop.db_models import Company, JobPosting, JobSource, ResumeVersion
 from huntloop.resume_ingestion import RESUMES_DIR
+
+
+@pytest.fixture(autouse=True)
+def _reset_resume_rate_limiters():
+    """Same reasoning as test_api_drafting.py's _reset_rate_limiter - the
+    FastAPI `app` (and therefore these limiters, module-level singletons)
+    is shared across the whole test session."""
+    _upload_rate_limiter.reset()
+    _activate_rate_limiter.reset()
+    yield
+    _upload_rate_limiter.reset()
+    _activate_rate_limiter.reset()
 
 EMBEDDING_DIM = 384
 
@@ -277,8 +290,14 @@ def test_upload_422_when_no_text_extracted(api_client, db_session, _uploaded_pat
 
 
 def test_activate_switches_active_version_and_resets_skills(api_client, db_session):
-    version_a = _seed_resume(db_session, 1, is_active=True, embedding=EMBEDDING_A)
-    version_b = _seed_resume(db_session, 2, is_active=False, embedding=EMBEDDING_B)
+    # Distinct text (not just distinct embeddings) - the new content-hash
+    # no-op check (see huntloop.api.routers.resumes) compares extracted
+    # text, so two versions sharing the same seeded default text would
+    # incorrectly look like a no-op re-upload and this test's whole
+    # premise (activating a genuinely different resume DOES reset
+    # matched/missing_skills) wouldn't be exercised.
+    version_a = _seed_resume(db_session, 1, is_active=True, embedding=EMBEDDING_A, text="resume text AAA")
+    version_b = _seed_resume(db_session, 2, is_active=False, embedding=EMBEDDING_B, text="resume text BBB")
     company = Company(name="checkr")
     source = JobSource(name="greenhouse_api")
     db_session.add_all([company, source])
@@ -398,3 +417,161 @@ def test_activating_a_different_resume_changes_live_match_scores(api_client, db_
     scores_reverted = {item["job_title"]: item["match_score"] for item in reverted["items"]}
     assert scores_reverted["Matches A"] == pytest.approx(1.0, abs=1e-6)
     assert scores_reverted["Matches B"] == pytest.approx(0.0, abs=1e-6)
+
+
+# ---------------------------------------------------------------------
+# Content-hash no-op check (huntloop.api.routers.resumes) - repeated
+# uploads of byte-identical content must not repeatedly wipe
+# matched_skills/missing_skills across the whole job_postings table.
+# ---------------------------------------------------------------------
+
+
+def test_reuploading_identical_resume_content_skips_the_skills_reset(
+    api_client, db_session, stub_embed_text, _uploaded_paths
+):
+    _seed_resume(db_session, 1, is_active=True, embedding=EMBEDDING_A, text="AAA original")
+    company = Company(name="checkr")
+    source = JobSource(name="greenhouse_api")
+    db_session.add_all([company, source])
+    db_session.commit()
+    job = _seed_job(
+        db_session, company, source, "Backend Engineer", EMBEDDING_A,
+        matched=["Python", "AWS"], missing=["Go"],
+    )
+
+    # Same extracted-text content as the currently-active version 1
+    # ("AAA original") - a real duplicate upload, e.g. the user
+    # re-submitting the same file.
+    pdf_bytes = _minimal_pdf_bytes("AAA original")
+    response = api_client.post("/resumes/upload", files={"file": ("resume.pdf", pdf_bytes, "application/pdf")})
+    assert response.status_code == 201
+    assert response.json()["version_number"] == 2
+
+    db_session.expire_all()
+    # The reset must NOT have run - this job's real, previously-computed
+    # skills-match data should be completely untouched.
+    reloaded_job = db_session.get(JobPosting, job.id)
+    assert reloaded_job.matched_skills == ["Python", "AWS"]
+    assert reloaded_job.missing_skills == ["Go"]
+
+    # A genuinely new, different resume version should still have been
+    # created and marked active - only the reset is skipped, nothing else.
+    new_active = db_session.query(ResumeVersion).filter_by(version_number=2).one()
+    assert new_active.is_active is True
+    old = db_session.query(ResumeVersion).filter_by(version_number=1).one()
+    assert old.is_active is False
+
+
+def test_reuploading_genuinely_different_resume_content_still_resets_skills(
+    api_client, db_session, stub_embed_text, _uploaded_paths
+):
+    _seed_resume(db_session, 1, is_active=True, embedding=EMBEDDING_A, text="AAA original")
+    company = Company(name="checkr")
+    source = JobSource(name="greenhouse_api")
+    db_session.add_all([company, source])
+    db_session.commit()
+    job = _seed_job(
+        db_session, company, source, "Backend Engineer", EMBEDDING_A,
+        matched=["Python", "AWS"], missing=["Go"],
+    )
+
+    pdf_bytes = _minimal_pdf_bytes("BBB completely different content")
+    response = api_client.post("/resumes/upload", files={"file": ("resume2.pdf", pdf_bytes, "application/pdf")})
+    assert response.status_code == 201
+
+    db_session.expire_all()
+    reloaded_job = db_session.get(JobPosting, job.id)
+    assert reloaded_job.matched_skills is None
+    assert reloaded_job.missing_skills is None
+
+
+def test_reactivating_a_version_with_identical_content_skips_the_skills_reset(api_client, db_session):
+    # Two DB rows, deliberately given the SAME extracted text (e.g. the
+    # same file uploaded twice at different times, each creating its own
+    # resume_versions row) - reactivating the older one should be
+    # recognized as a content no-op even though it's a different row id
+    # than the one currently active.
+    _seed_resume(db_session, 1, is_active=False, embedding=EMBEDDING_A, text="identical content")
+    active = _seed_resume(db_session, 2, is_active=True, embedding=EMBEDDING_A, text="identical content")
+    older = db_session.query(ResumeVersion).filter_by(version_number=1).one()
+
+    company = Company(name="checkr")
+    source = JobSource(name="greenhouse_api")
+    db_session.add_all([company, source])
+    db_session.commit()
+    job = _seed_job(
+        db_session, company, source, "Backend Engineer", EMBEDDING_A,
+        matched=["Python"], missing=["Go"],
+    )
+
+    response = api_client.patch(f"/resumes/{older.id}/activate")
+    assert response.status_code == 200
+
+    db_session.expire_all()
+    reloaded_job = db_session.get(JobPosting, job.id)
+    assert reloaded_job.matched_skills == ["Python"]
+    assert reloaded_job.missing_skills == ["Go"]
+    assert db_session.get(ResumeVersion, older.id).is_active is True
+    assert db_session.get(ResumeVersion, active.id).is_active is False
+
+
+# ---------------------------------------------------------------------
+# Per-IP rate limiting (reuses huntloop.api.routers.drafting._RateLimiter)
+# ---------------------------------------------------------------------
+
+
+def test_upload_rate_limit_triggers_after_threshold(api_client, db_session, stub_embed_text, _uploaded_paths):
+    statuses = []
+    for i in range(_upload_rate_limiter.max_requests):
+        pdf_bytes = _minimal_pdf_bytes(f"AAA content {i}")
+        resp = api_client.post("/resumes/upload", files={"file": (f"r{i}.pdf", pdf_bytes, "application/pdf")})
+        statuses.append(resp.status_code)
+    assert all(s == 201 for s in statuses), statuses
+
+    pdf_bytes = _minimal_pdf_bytes("AAA one too many")
+    over_limit = api_client.post("/resumes/upload", files={"file": ("over.pdf", pdf_bytes, "application/pdf")})
+    assert over_limit.status_code == 429
+    assert "rate limit exceeded" in over_limit.json()["detail"].lower()
+
+
+def test_activate_rate_limit_triggers_after_threshold(api_client, db_session):
+    # Seed one extra resume version per request beyond the limit, each
+    # already active so activate_resume's early "already active" no-op
+    # branch short-circuits BEFORE the rate limit would matter for
+    # correctness of the underlying operation - but _enforce_rate_limit
+    # runs first regardless of that branch, which is exactly what this
+    # test is checking.
+    resume = _seed_resume(db_session, 1, is_active=True, embedding=EMBEDDING_A)
+
+    statuses = []
+    for _ in range(_activate_rate_limiter.max_requests):
+        resp = api_client.patch(f"/resumes/{resume.id}/activate")
+        statuses.append(resp.status_code)
+    assert all(s == 200 for s in statuses), statuses
+
+    over_limit = api_client.patch(f"/resumes/{resume.id}/activate")
+    assert over_limit.status_code == 429
+    assert "rate limit exceeded" in over_limit.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------
+# Hard upload-size cap (MaxUploadSizeMiddleware) - see
+# tests/test_max_upload_size_middleware.py for a lower-level unit test
+# proving the middleware cuts off mid-stream rather than after fully
+# buffering an oversized body. This test proves it's actually wired into
+# the real app for the real /resumes/upload path end to end.
+# ---------------------------------------------------------------------
+
+
+def test_oversized_upload_is_rejected_with_413(api_client, db_session):
+    oversized = b"x" * (MAX_UPLOAD_BYTES + 1024)
+    response = api_client.post(
+        "/resumes/upload",
+        files={"file": ("huge.pdf", oversized, "application/pdf")},
+    )
+    assert response.status_code == 413
+
+    # Nothing should have been written to resume_versions or to disk for
+    # a request this large - it was rejected before upload_resume() (the
+    # route handler) ever ran.
+    assert db_session.query(ResumeVersion).count() == 0
