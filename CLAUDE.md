@@ -45,17 +45,31 @@ conventions" and SESSIONS.md for the real current state).
   2026-09-13 — slice 2 of the job-detail chat assistant, BYOK
   resume-grounded answer drafting) accepts a user-supplied third-party
   LLM API key with every request and forwards it to that provider. That
-  key travels over whatever transport this API is served on. This
-  stack, per `docker-compose.yml`, currently runs the `api`/`app`/`db`
-  services over PLAIN HTTP with NO TLS TERMINATION ANYWHERE — there is
-  no TLS layer in this project at all as of this entry. DO NOT expose
-  this endpoint (or this API generally, but this endpoint specifically
-  handles a third-party credential) on a public/non-localhost deployment
-  until a real TLS terminator (reverse proxy, managed load balancer,
-  etc.) is put in front of it. This is a real pre-launch blocker, not a
-  someday nice-to-have — treat it as one before any non-local deploy.
-  Also see the identical warning in `huntloop/drafting.py`'s and
-  `huntloop/api/routers/drafting.py`'s module docstrings. <<<**
+  key travels over whatever transport this API is served on. **This was
+  a real pre-launch blocker when first written (the stack ran `api`/
+  `app`/`db` over plain HTTP with no TLS layer anywhere) — it is now
+  CLOSED, as of 2026-09-14 (see the `caddy` reverse-proxy entry below
+  and SESSIONS.md "Add an optional Caddy reverse proxy for self-hosted
+  HTTPS")**: `docker-compose.yml` has an opt-in `caddy` service (behind
+  the `proxy` Compose profile) that terminates real Let's Encrypt HTTPS
+  for a self-hoster's own domain in front of `api`/`frontend`. **This
+  is opt-in, not the default** — plain `docker compose up` (no
+  `--profile proxy`) still serves `api`/`frontend` over plain HTTP on
+  their own host-mapped ports (now bound to `127.0.0.1` only as of
+  2026-09-15, see the port-binding fix below — no longer reachable from
+  the LAN/internet even without Caddy). **The rule is unchanged in
+  substance, just no longer "there is no way to do this safely": DO NOT
+  expose this endpoint (or this API generally) on a public/non-localhost
+  deployment without enabling the `proxy` profile (or fronting it with
+  some other real TLS terminator) first** — a non-local deploy that
+  skips the `proxy` profile is still serving this credential-handling
+  endpoint over plain HTTP. **`huntloop/drafting.py`'s and
+  `huntloop/api/routers/drafting.py`'s module docstrings still say
+  "the stack currently runs plain HTTP with no TLS anywhere" verbatim —
+  confirmed stale against the code itself during this documentation
+  pass (2026-09-16), not just this file; those two docstrings need the
+  same update this entry just got, as a follow-up code change (not made
+  here — this pass only touches `.md` files).** <<<**
   **`POST /jobs/{id}/draft-answer` itself (added 2026-09-13, see
   SESSIONS.md "Slice 2: resume-grounded application-answer drafting" —
   builds on the read-only Q&A panel from slice 1, `JobAssistantPanel.tsx`)
@@ -297,11 +311,30 @@ conventions" and SESSIONS.md for the real current state).
   `/jobs`, which didn't exist yet (the job list was mounted at `/`) —
   both silently 404'd; fixed as part of adding the dashboard, not a
   separate cleanup.
-  **Deliberately NOT containerized** — `npm run dev`'s hot reload beats
-  a Docker rebuild loop with no compensating benefit yet; revisit once
-  there's an actual reason Docker helps (see SESSIONS.md). Run via `cd
-  frontend && npm install && npm run dev`, needs the API already
-  running (`NEXT_PUBLIC_API_URL`, defaults to `http://localhost:8000`).
+  **Now containerized, as of 2026-09-13 (see SESSIONS.md "Dockerize the
+  frontend so docker compose up brings up the full stack") — supersedes
+  the earlier "Deliberately NOT containerized" decision below.**
+  `frontend/Dockerfile` (multi-stage: `npm ci`, `next build`, `next
+  start` on `node:24-alpine`) plus a `frontend` service in
+  `docker-compose.yml` mean a plain `docker compose up` (no profile
+  flag) now brings up `db`/`app`/`api`/`frontend` together — a
+  stranger's first run needs no local Node/npm install at all.
+  `NEXT_PUBLIC_API_URL` is a Docker **build** arg, not a runtime
+  `environment:` var (Next.js inlines `NEXT_PUBLIC_`-prefixed vars into
+  the browser bundle at build time — the frontend always runs in the
+  visitor's own browser regardless of containerization, so this is the
+  URL the browser calls directly, never a container-to-container
+  address); it defaults to the `api` service's own host-mapped
+  `http://localhost:8000`. This is a production-style build (no hot
+  reload) — `npm run dev` (Turbopack) remains the faster loop for
+  active local development and is not replaced by this; the paragraph
+  below describing the original non-containerized-only state is now
+  historical context for *why* Docker wasn't added earlier, not a
+  description of the current setup. Run either way — containerized (`cd
+  <repo root> && docker compose up --build -d api frontend`) or
+  locally via `cd frontend && npm install && npm run dev`, needs the API
+  already running (`NEXT_PUBLIC_API_URL`, defaults to
+  `http://localhost:8000`).
   Note: this dev machine's `.venv` console-script shebangs went stale
   after the `JobSight`→`HuntLoop` rename — run the API via
   `PYTHONPATH=src .venv/bin/python -m uvicorn huntloop.api.main:app`,
@@ -2947,12 +2980,61 @@ A security audit (2026-08-21, see SESSIONS.md) found the repo clean on
 pre-Phase-0 hardcoded Postgres password never actually entered git
 history). The two medium-severity findings (Docker running as root,
 `data/raw/`/`logs/` missing from `.dockerignore`) are fixed — see the
-Docker bullet above. Left open by deliberate choice, not oversight:
-`requirements.txt` is mostly unpinned (3 of 18 direct deps have an `==`
-pin), `.idea/` is tracked in git despite being in `.gitignore` (committed
-before the ignore rule existed), and there's no automated
-`pip-audit`/`bandit` step in CI. Don't "fix" these unprompted — they're
-tracked follow-ups, not bugs.
+Docker bullet above.
+
+**A second, more thorough security-fix pass shipped 2026-09-15/16 (see
+SESSIONS.md and the git log — "Bump starlette, urllib3, cryptography,
+lxml, soupsieve for known CVEs", "Bump Next.js and pdfminer.six to fix
+two confirmed-live-reachable RCE CVEs", "Close plaintext Caddy bypass
+ports and fix resume-upload DoS", "Fix rate-limiter IP detection
+collapsing all requests behind Caddy", "Untrack .idea/") — several items
+this section previously listed as "left open by deliberate choice" are
+now closed, not still-open follow-ups:**
+- **`.idea/` is no longer tracked in git** — `git rm --cached` removed
+  the 5 leftover files (committed before the `.gitignore` rule existed);
+  local IDE state on disk is untouched. The "tracked despite being
+  gitignored" gap described below no longer exists.
+- **`requirements.txt` pinning improved materially, though it is still
+  not fully pinned**: 8 of 30 direct deps now carry an exact `==` pin
+  (`scrapy`, `alembic`, `pytest`, `prometheus-client`, `pdfplumber`,
+  `sentence-transformers`, `pgvector`, `groq`), and `fastapi`/`starlette`/
+  `urllib3`/`cryptography`/`lxml`/`soupsieve` (previously fully
+  unpinned, sitting on whatever version happened to already be
+  resolving) now carry explicit `>=` security floors — `cryptography` is
+  deliberately capped `<47` since scrapy's own `pyOpenSSL` dependency
+  pins it there (confirmed via a real `pip check` conflict), leaving a
+  known, flagged residual gap on CVEs that only have a 47+/48+/50+ fix.
+  The remaining ~16 direct deps are still fully unpinned — "mostly
+  unpinned" is no longer accurate framing, but "fully pinned" isn't
+  either.
+- **Next.js and pdfminer.six were bumped for two confirmed-live-reachable
+  RCE CVEs** (`14bd844`) — Next.js 16.3.2 → 16.3.5 (an unauthenticated
+  RCE in the Image Optimization API, confirmed reachable on this app's
+  own frontend container even though it never imports `next/image`
+  itself) and pdfminer.six 20250506 → 20251230 (via a pdfplumber bump,
+  since pdfplumber hard-pins pdfminer.six with an exact `==`).
+- **A real rate-limiter bug behind the new Caddy proxy was found and
+  fixed** (`64d09db`) — every request proxied through Caddy was
+  resolving to Caddy's own container IP for `request.client.host`,
+  collapsing every real visitor into one shared per-IP rate-limit
+  bucket; fixed by pinning `caddy` to a static compose-network address
+  and wiring uvicorn's `ProxyHeadersMiddleware` to trust only that one
+  peer (`TRUSTED_PROXY_IPS`).
+- **The `api`/`frontend` host ports are now bound to `127.0.0.1` only**
+  (`2d6fe1a`), not every interface — previously reachable from the
+  LAN/internet even with Caddy in front, since Caddy fronting a service
+  doesn't stop that service's own directly-published port from also
+  being open to the world.
+- A resume-upload DoS (unbounded body size before FastAPI's multipart
+  parser buffers it) was fixed with a hard 15MB ASGI-layer cap
+  (`MaxUploadSizeMiddleware`), and per-IP rate limiting was added to the
+  resume-upload/activate endpoints (`2d6fe1a`).
+
+**Still open by deliberate choice, not oversight**: there's still no
+automated `pip-audit`/`bandit` step in CI (confirmed by re-checking
+`.github/workflows/ci.yml` during this pass — no such step exists), and
+`requirements.txt` is still partially unpinned as described above. Don't
+"fix" these unprompted — they're tracked follow-ups, not bugs.
 
 A standalone ATS-detection function (`detect_ats()`,
 `src/huntloop/ats_detection.py`, 2026-08-21, see SESSIONS.md) also exists

@@ -1,11 +1,18 @@
 # HuntLoop
 
-HuntLoop is a job-posting scraper. Today, it scrapes a single company's public
-Greenhouse job board API and writes normalized postings (with company, source,
-locations, and skills) into a Postgres database via SQLAlchemy/Scrapy. The
-broader roadmap is to aggregate postings across more sources and eventually add
-sponsorship-aware matching — but that's future work, not something this
-codebase does yet. What's below reflects only what's built.
+HuntLoop is a multi-ATS job-board scraper and matching app. `main.py` is a
+multi-platform orchestrator that scrapes public job-board APIs across seven
+implemented ATS platforms (Greenhouse, Lever, Workday, SmartRecruiters,
+Ashby, iCIMS, Gem — see `CLAUDE.md` for the full per-platform detail) for
+however many companies have been onboarded (`companies.ats_platform`), and
+writes normalized postings (company, source, locations, skills, department,
+employment type) into a Postgres database via SQLAlchemy/Scrapy. On top of
+that, a FastAPI backend (`src/huntloop/api/`) and a Next.js frontend
+(`frontend/`) expose the scraped postings with embedding-based resume match
+scoring, precomputed matched/missing skills, optional H-1B/DOL-sponsorship
+data, an application tracker, and a BYOK resume-grounded chat/drafting
+assistant. See "Project status" below for what's built vs. not, and
+`CLAUDE.md` for the full architectural detail this file doesn't repeat.
 
 ## Prerequisites
 
@@ -42,8 +49,9 @@ The app fails fast with a clear error if `DATABASE_URL` is missing — see
 `huntloop/settings.py`.
 
 `alembic upgrade head` creates/updates all tables (`companies`, `job_sources`,
-`job_postings`, `job_locations`, `job_skills`, `job_metadata`) to match the
-current schema.
+`job_postings`, `job_locations`, `job_skills`, `job_metadata`,
+`lca_disclosures`, `sponsor_name_overrides`, `resume_versions`,
+`job_applications`) to match the current schema.
 
 ## Running the scraper
 
@@ -53,10 +61,18 @@ From the repo root:
 python main.py
 ```
 
-This runs the `GreenhouseScraper` spider against the Greenhouse Job Board API
-for whatever companies are configured (see below), and pipes each scraped
-posting through `JobDataPipeline`, which upserts the company/source and
-inserts the job posting (plus its locations/skills) into Postgres.
+`main.py` is a multi-ATS orchestrator: it queries `companies.ats_platform`
+(populated by the onboarding/detection scripts under `scripts/` — see
+`CLAUDE.md` for the full detail on `detect_and_store_ats.py` and the
+per-platform discovery scripts), groups companies by platform, and runs the
+matching spider (`GreenhouseScraper`, `LeverScraper`, `WorkdayScraper`,
+`SmartRecruitersScraper`, `AshbyScraper`, `IcimsScraper`, `GemScraper`) once
+per platform with that platform's full token list. A company with an
+unrecognized/`unknown`/`NULL` platform is skipped with a clear log message,
+not silently dropped. Every spider pipes each scraped posting through the
+same source-agnostic `JobDataPipeline`, which upserts the company/source and
+inserts the job posting (plus its locations/skills/department/employment
+type) into Postgres.
 
 Expect Scrapy's standard crawl log, plus pipeline log lines for each item,
 e.g.:
@@ -94,30 +110,44 @@ LOG_LEVEL=WARNING python main.py
 
 ## Scheduled runs
 
-The scraper orchestrator (`main.py`) and the skills-matching backfill
-(`scripts/backfill_skills_matching.py`) both run on the same daily
-schedule via `cron`, so postings stay fresh and newly-scraped (or
-still-backlogged) jobs get matched against the active resume without any
-manual step. This is local-only automation for a dev machine that's
-actually on/awake at the scheduled time — it is not a substitute for
-real deployment scheduling (e.g. GitHub Actions against a hosted
-Postgres), which is a separate, later step once there's a publicly
-reachable database.
+The scraper orchestrator (`main.py`), the skills-matching backfill
+(`scripts/backfill_skills_matching.py`), and a third stage, the
+department-categorization backfill (`scripts/backfill_department_category.py`),
+all run on the same daily schedule, so postings stay fresh and
+newly-scraped (or still-backlogged) jobs get matched against the active
+resume and categorized without any manual step. This is local-only
+automation for a dev machine that's actually on/awake at the scheduled
+time — it is not a substitute for real deployment scheduling (e.g. GitHub
+Actions against a hosted Postgres), which is a separate, later step once
+there's a publicly reachable database (see `huntloop-architecture-decisions.md`
+for research on that, not yet acted on).
 
-`scripts/run_orchestrator_cron.sh` is the entrypoint cron calls. It's a
-thin wrapper, not a parallel code path: it `cd`s into the repo (cron's
-working directory isn't otherwise predictable), then runs each stage
-with `.venv/bin/python` — the exact same scripts, same `.venv`, same
-`.env`/`DATABASE_URL`/`GROQ_API_KEY` a manual run uses. Nothing about
-credentials or config is duplicated for the scheduled path. Both stages
-always run, regardless of whether the other succeeded — a scraping
-hiccup shouldn't stall skills-matching progress on the backlog, and vice
-versa. The skills-matching stage works through whatever job_postings
-rows still have `matched_skills IS NULL` (oldest-scraped first),
-respecting Groq's real 200,000-tokens-per-day free-tier budget, and
-simply stops itself cleanly for the day once that budget is exhausted —
-picking back up automatically on the next scheduled run. That's expected
-steady-state behavior, not a failure.
+**On this project's own dev machine the actual trigger is `launchd`, not
+`cron`** — `cron` doesn't run a missed job when the Mac is asleep, which
+made a real overnight 3am `cron` schedule silently never fire; see
+`CLAUDE.md`'s Scheduling entries for the full launchd migration and its
+boot/login catch-up job. The `crontab` instructions below still work as a
+generic, portable way to schedule the same wrapper script on any machine
+(cron is what most non-macOS setups would actually use) — they're not
+wrong, just not what this specific dev machine runs day to day.
+
+`scripts/run_orchestrator_cron.sh` is the entrypoint the scheduler calls
+(the name predates the later `cron`→`launchd` migration above; it wasn't
+renamed). It's a thin wrapper, not a parallel code path: it `cd`s into the
+repo (the scheduler's working directory isn't otherwise predictable), then
+runs each stage with `.venv/bin/python` (stage 1 now runs via
+`docker compose run` instead — see `CLAUDE.md`'s "the daily scraper itself
+now runs via Docker" entry) — the same scripts, same `.env`/
+`DATABASE_URL`/`GROQ_API_KEY` a manual run uses. Nothing about credentials
+or config is duplicated for the scheduled path. All three stages always
+run, regardless of whether an earlier one succeeded — a scraping hiccup
+shouldn't stall skills-matching or categorization progress on the backlog,
+and vice versa. The skills-matching stage works through whatever
+job_postings rows still have `matched_skills IS NULL` (best resume-match
+score first, see `CLAUDE.md`), respecting each provider's real daily
+free-tier budget, and simply stops itself cleanly for the day once that
+budget is exhausted — picking back up automatically on the next scheduled
+run. That's expected steady-state behavior, not a failure.
 
 **Enable it** (runs daily at 3:00 AM local time):
 
@@ -187,6 +217,12 @@ same as it would for a manual run.
 pytest
 ```
 
+The suite has grown well past the original pipeline smoke tests (300+
+tests as of this writing, across the pipeline, spiders, ATS
+detection/onboarding, matching, the API, and more) — don't expect an
+exact count to stay accurate here; run `pytest` for the real current
+total. Illustrative early example, still representative of the format:
+
 ```
 ============================= test session starts ==============================
 collected 2 items
@@ -244,22 +280,41 @@ Postgres (via `host.docker.internal`, same pattern used for the
 embeddings backfill) rather than the docker-compose `db` service - see
 that file's comment on `api` for why.
 
-Endpoints:
+Endpoints (see `CLAUDE.md` for full per-endpoint detail — this list is
+kept to the shape, not every query param/edge case):
 
 - `GET /health` - basic liveness check.
-- `GET /jobs` - paginated list of job postings, each with its
-  embedding-based match score against the active resume, precomputed
-  `matched_skills`/`missing_skills`, and application status (defaults to
-  `not_applied` if no `job_applications` row exists yet). Query params:
-  `company` (case-insensitive filter), `min_score` (0-1, requires an
-  active resume), `sort` (`score` or `-score`, default `-score` - best
-  matches first), `limit`/`offset`.
+- `GET /jobs` - paginated list of job postings, each with its calibrated
+  composite match score (`match_score`, embedding similarity blended with
+  skills-match ratio - see `CLAUDE.md`) against the active resume,
+  precomputed `matched_skills`/`missing_skills`, sponsor/salary-estimate
+  info, and application status (defaults to `not_applied` if no
+  `job_applications` row exists yet). Query params: `company`
+  (case-insensitive filter), `department`, `employment_type`, `location`
+  (repeatable, OR'd), `min_score` (0-1, requires an active resume),
+  `salary_min`/`salary_max`/`salary_unspecified`, `sort` (`score` or
+  `-score`, default `-score` - best matches first), `limit`/`offset`.
 - `GET /jobs/{id}` - single job, same fields plus the full
-  `job_description`.
+  `job_description` (rendered as sanitized HTML by the frontend).
+- `GET /jobs/departments` / `GET /jobs/employment-types` / `GET /jobs/locations`
+  - the real distinct filter values behind the `GET /jobs` params above
+  (departments/locations are canonicalized, not raw free text).
 - `PATCH /jobs/{id}/application` - upserts the application status for a
   job (`{"status": "applied", "notes": "..."}`) - one row per job, not a
   history; `applied_at` is set the first time status moves away from
   `not_applied` and never overwritten by later status changes.
+- `GET /dashboard/stats` - total jobs/companies, applications by status,
+  new-jobs-in-the-last-7-days.
+- `GET /resumes` / `POST /resumes/upload` / `PATCH /resumes/{id}/activate`
+  - resume version history, PDF upload (extract → embed → activate), and
+  reactivating a prior version.
+- `POST /jobs/{id}/draft-answer` - BYOK (bring-your-own-key) resume-grounded
+  drafting of free-form application answers via a user-supplied Groq/Gemini
+  API key (`{"prompt", "provider", "api_key"}`) - the key is never read
+  from server-side env vars, never persisted, never logged. **See the
+  security note in "Reverse proxy / HTTPS for self-hosting" below before
+  exposing this on anything but localhost** - it handles a real
+  third-party credential per request.
 
 Run it via Docker:
 
@@ -286,11 +341,17 @@ are unaffected either way, since CORS is a browser-enforced restriction.
 ## Frontend
 
 A Next.js (App Router) app in `frontend/` - TypeScript, Tailwind CSS,
-TanStack Query for data fetching. Skeleton stage: one page proving real
-connectivity to the API (`GET /health`, `GET /jobs`), not a real
-job-list UI yet. `frontend/src/types/api.ts` and `frontend/src/lib/api.ts`
-mirror the backend's real Pydantic schemas/endpoints already, ready for
-that UI; `frontend/src/components/` is an empty placeholder for it.
+TanStack Query for data fetching. No longer a skeleton - real pages exist
+for a dashboard (`/dashboard`, the default landing route), a filterable/
+sortable job list with cards/table views (`/jobs`), a job detail page
+(matched/missing skill chips, sponsor/salary-estimate sidebar, sanitized-HTML
+job description, and a floating chat assistant panel with a read-only Q&A
+mode plus the BYOK drafting endpoint above), an application tracker
+(`/applications`, kanban + list views), and resume version management
+(`/resumes`, upload/activate). `frontend/src/types/api.ts` and
+`frontend/src/lib/api.ts` mirror the backend's real Pydantic
+schemas/endpoints (kept manually in sync - no shared codegen, a known gap).
+See `CLAUDE.md`'s frontend bullet for the full page-by-page detail.
 
 **Now containerized** (`frontend/Dockerfile`, a `frontend` service in
 `docker-compose.yml`) - `docker compose up` alone runs a production-style
@@ -452,8 +513,14 @@ docker-compose --profile observability up -d prometheus pushgateway grafana
   ```
   then, after Prometheus's next 15s scrape, query
   http://localhost:9090/graph?g0.expr=huntloop_smoke_test_value for `42`.
-- **Grafana** — http://localhost:3000 (login `admin` / `admin` by
-  default — override with `GRAFANA_ADMIN_PASSWORD` in `.env`, local dev
+- **Grafana** — http://localhost:3001 (host port `3001`, not Grafana's
+  own default `3000` - that port is now the Next.js frontend's, both in
+  local dev and via the containerized `frontend` service above, so
+  Grafana's host-side port mapping was moved to avoid the collision;
+  `docker-compose.yml`'s `grafana` service still maps to container port
+  `3000` internally, which is irrelevant from the host). Login
+  `admin` / `admin` by default — override with `GRAFANA_ADMIN_PASSWORD`
+  in `.env`, local dev
   only, not a real secret). Both its Prometheus datasource
   (`observability/grafana/provisioning/datasources/datasource.yml`) and
   the **"HuntLoop Scraping Activity" dashboard**
@@ -468,9 +535,9 @@ docker-compose --profile observability up -d prometheus pushgateway grafana
   ones. Verify the datasource is connected via the API rather than just
   the UI:
   ```bash
-  curl -u admin:admin http://localhost:3000/api/datasources
+  curl -u admin:admin http://localhost:3001/api/datasources
   # then, using the "uid" from that response:
-  curl -u admin:admin http://localhost:3000/api/datasources/uid/<uid>/health
+  curl -u admin:admin http://localhost:3001/api/datasources/uid/<uid>/health
   ```
 
 Tear down with `docker-compose --profile observability down` (add `-v` to
@@ -548,34 +615,43 @@ replace Option A's real/current/full dataset for actual job-hunting use.
 
 ## Adding a company to scrape
 
-Not yet configurable. Companies are a hardcoded list in
-`src/huntloop/spiders/greenhouse_spider.py`:
-
-```python
-company_tokens = [
-    'checkr'
-]
-```
-
-`company_token` is the slug Greenhouse uses in a company's public job board
-URL (e.g. `checkr` for `https://job-boards.greenhouse.io/checkr`). To scrape
-more companies today, add their tokens to that list directly in the source —
-there's no config file or CLI flag for this yet.
+Not exposed via any UI or CLI flag — companies are onboarded by running one
+of the discovery/detection scripts under `scripts/` (e.g.
+`detect_and_store_ats.py`, `detect_ats_for_sponsors.py`,
+`discover_and_store_ashby.py`, `discover_and_store_workday.py`,
+`discover_and_store_icims.py`, `discover_and_store_smartrecruiters.py`,
+`discover_and_store_gem.py`), which write a `companies` row with
+`ats_platform`/`ats_token` (and, for Workday, `careers_url`) populated. Most
+of these scripts gate auto-storing a match behind a confidence check and
+hold ambiguous matches for human confirmation via a `--confirmations` file,
+rather than guessing. See `CLAUDE.md` for the full per-platform detail on
+each discovery mechanism and its accuracy/collision caveats. Once a company
+has a row with a recognized `ats_platform`, `python main.py` picks it up on
+its next run automatically — no separate step is needed.
 
 ## Project status
 
-**Built:**
-- Scrapy spider pulling job postings from one Greenhouse-hosted company's
-  public API
-- SQLAlchemy models + Postgres pipeline (companies, sources, postings,
-  locations, skills, raw metadata)
-- Alembic migrations, env-based config, a pytest scaffold covering the
-  pipeline/DB-insert path
-- A dev-oriented Docker setup (app + Postgres via docker-compose)
-
-**Not built yet:**
-- Scraping more than one hardcoded company, or sources other than Greenhouse
-- Any job matching or sponsorship-based filtering (the `h1b_sponsorship`
-  column exists on `companies` but nothing populates or reads it yet)
-- An API or any user-facing interface
-- A containerized test runner/CI, or a production-hardened deploy image
+**Built:** a working multi-ATS scraper (Greenhouse, Lever, Workday,
+SmartRecruiters, Ashby, iCIMS, Gem) feeding a Postgres pipeline
+(companies/sources/postings/locations/skills/department/employment type);
+embedding-based resume-to-job match scoring plus a Groq/Gemini-backed
+matched/missing-skills engine; DOL H-1B/LCA sponsorship matching (optional,
+see "H-1B sponsorship data" below); a FastAPI backend (`GET /health`,
+`GET /jobs` with filtering/sorting/pagination, `GET /jobs/{id}`,
+`GET /jobs/departments`, `GET /jobs/employment-types`, `GET /jobs/locations`,
+`PATCH /jobs/{id}/application`, `GET /dashboard/stats`, `GET /resumes`,
+`POST /resumes/upload`, `PATCH /resumes/{id}/activate`,
+`POST /jobs/{id}/draft-answer`); a Next.js frontend covering a dashboard,
+job list/detail, an application tracker, resume version management, and a
+BYOK resume-grounded chat/drafting assistant on the job detail page; Alembic
+migrations, a pytest suite (300+ tests), CI running migrations + both the
+backend and frontend test suites against a real Postgres service on every
+push/PR; Docker for the full stack (`db`/`app`/`api`/`frontend`, plus
+opt-in `caddy`-fronted HTTPS and an opt-in Prometheus/Grafana observability
+stack); and local (launchd-scheduled) daily scrape + skills-matching +
+department-categorization automation. See `CLAUDE.md` for the complete,
+much more detailed picture (this section is deliberately a summary, not a
+substitute for it) and its "Current phase / what's next" section for what's
+still explicitly deferred (broader test coverage of frontend presentation
+components, an FK from `companies` to `lca_disclosures`, a hosted-DB/GitHub
+Actions deployment, an automated `pip-audit`/`bandit` CI step, and more).
