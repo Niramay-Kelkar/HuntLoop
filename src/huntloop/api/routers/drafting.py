@@ -13,9 +13,12 @@ modes (bad key, provider rate limit, provider outage) that no other
 SECURITY / DEPLOYMENT WARNING - see huntloop.drafting's module docstring
 for the full statement. Short version: this endpoint forwards a
 user-supplied third-party API key over whatever transport this API is
-served on. The stack (docker-compose.yml) currently runs plain HTTP with
-no TLS anywhere. DO NOT expose this endpoint on a public/non-localhost
-deployment until TLS is actually in front of this service.
+served on. docker-compose.yml's `api` service is plain HTTP by default
+(host port now bound to 127.0.0.1 only) and TLS is available via the
+opt-in `caddy` service behind the `proxy` Compose profile - it is not
+on by default. DO NOT expose this endpoint on a public/non-localhost
+deployment without enabling the `proxy` profile (or another real TLS
+terminator) first.
 ============================================================================
 
 BYOK contract (see huntloop.drafting for the provider-call layer):

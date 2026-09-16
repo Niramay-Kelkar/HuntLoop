@@ -12,17 +12,22 @@ This module (and the route that calls it) receives a user-supplied,
 third-party LLM API key with EVERY request (see draft_with_groq/
 draft_with_gemini's api_key argument) and forwards it to that provider.
 The key travels from the browser to this API over whatever transport the
-API is served on. As of this writing, docker-compose.yml runs this
-service over PLAIN HTTP with no TLS termination anywhere in the stack
-(see CLAUDE.md - the api/app/db services have no TLS layer at all). A
-key sent over plaintext HTTP on a non-localhost network is exposed to
-anyone who can observe that traffic.
+API is served on. docker-compose.yml's `api`/`frontend` services are
+plain HTTP by default and now bind only to 127.0.0.1 on the host (not
+reachable from the LAN/internet even without TLS - see the port-binding
+fix in SESSIONS.md), and an opt-in `caddy` service behind the `proxy`
+Compose profile (see caddy/Caddyfile, CLAUDE.md) terminates real Let's
+Encrypt HTTPS in front of both when enabled. TLS is NOT the default,
+though - `docker compose up` without `--profile proxy` still serves this
+endpoint over plain HTTP, just no longer network-reachable beyond the
+host itself.
 
-DO NOT deploy this endpoint on a public/non-localhost host until TLS is
-actually in front of the API. This is a real pre-launch blocker, not a
-buried caveat - if you are standing up a public deployment, put a TLS
-terminator (a reverse proxy, a managed load balancer, etc.) in front of
-this service FIRST.
+DO NOT deploy this endpoint on a public/non-localhost host without
+enabling the `proxy` Compose profile (or fronting it with some other
+real TLS terminator) FIRST. A public deployment that skips this step is
+still sending a third-party credential in the clear to anyone who can
+observe that traffic - this is a real pre-launch step, not a buried
+caveat, just no longer a blocker with no available fix.
 ============================================================================
 
 BYOK model, deliberately different from every skills_matching* module:
