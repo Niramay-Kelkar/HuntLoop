@@ -84,6 +84,20 @@ services:
     environment:
       PYTHONPATH: /app/src
       DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@host.docker.internal:5432/${POSTGRES_DB}
+      # Tells huntloop.api.main's ProxyHeadersMiddleware setup which peer
+      # IP is allowed to hand it an X-Forwarded-For header to trust (see
+      # that module for the full reasoning) - the `caddy` service's own
+      # pinned internal address (see the `default` network's `caddy`
+      # entry below), nothing broader. Deliberately hardcoded to the
+      # single static IP `caddy` is pinned to on this compose network,
+      # not the whole subnet - anything else on this network (db, app,
+      # frontend, ...) must NOT be able to spoof a client IP against this
+      # service. Harmless when the `proxy` profile isn't running at all -
+      # no `caddy` container exists to ever present this address, and
+      # nothing ever sends this API an X-Forwarded-For header in that
+      # case, so ProxyHeadersMiddleware never has anything to act on
+      # regardless of what's configured here.
+      TRUSTED_PROXY_IPS: 172.28.0.10
     # POST /resumes/upload (added 2026-08-23, see CLAUDE.md/SESSIONS.md)
     # writes to data/resumes/ inside the container - data/resumes/ is
     # both gitignored and dockerignored (real personal data, never baked
@@ -188,6 +202,18 @@ services:
     restart: unless-stopped
     environment:
       HUNTLOOP_DOMAIN: ${HUNTLOOP_DOMAIN}
+    # Pinned to a fixed address on the `default` network (see this
+    # file's top-level `networks:` block for the subnet this comes
+    # from) instead of an address Docker would otherwise assign
+    # dynamically - `api`'s TRUSTED_PROXY_IPS (above) has to name a
+    # specific, stable peer address for ProxyHeadersMiddleware to trust,
+    # and a dynamic address could silently change across a container
+    # recreate/restart, or even (in principle) be reused by a different
+    # container later. Every other service is untouched, still just
+    # auto-joining `default` with whatever address Docker hands out.
+    networks:
+      default:
+        ipv4_address: 172.28.0.10
     ports:
       - "80:80"
       - "443:443"
@@ -288,6 +314,22 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+
+networks:
+  # Explicit subnet on the implicit `default` network (every service
+  # still joins it automatically exactly as before) purely so `caddy`
+  # can be pinned to a fixed address within it - see the `caddy` service
+  # and `api`'s TRUSTED_PROXY_IPS above. Docker Compose requires a
+  # network to have a declared subnet before any service on it can
+  # request a static `ipv4_address`; without this block there would be
+  # no fixed address to trust in the first place. Everything else about
+  # this network (which services join it, DNS-by-service-name,
+  # connectivity) is unchanged - only the specific subnet is now pinned
+  # instead of Docker Compose picking one automatically.
+  default:
+    ipam:
+      config:
+        - subnet: 172.28.0.0/24
 
 volumes:
   pgdata:
