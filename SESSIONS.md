@@ -1872,7 +1872,7 @@ the new row as active. Ingestion only, per the task's explicit scope - no
 embeddings, no matching, no LLM-suggestion or skills-extraction logic.
 
 **Verified against the user's real resume**
-(`data/resumes/Niramay_Kelkar_Resume_FullStack_v3.pdf`, placed there
+(`data/resumes/my_resume.pdf`, placed there
 mid-session - not present when the step started, confirmed by searching
 the repo for any `.pdf` before proceeding rather than assuming it was
 already there):
@@ -1900,7 +1900,7 @@ already there):
   migration-only check) and after both ingestion runs.
 
 **Decided:** `file_path` stores the path as given on the command line
-(here, `data/resumes/Niramay_Kelkar_Resume_FullStack_v3.pdf`, relative to
+(here, `data/resumes/my_resume.pdf`, relative to
 repo root) rather than copying the PDF into a canonical location - the
 task didn't ask for file management, just extraction + versioned storage,
 and `data/resumes/` is already gitignored/dockerignored so leaving the
@@ -2009,7 +2009,7 @@ system Postgres (5432):**
    `employer_name_normalized` populated (confirmed already wired into
    the ingest path, no separate backfill pass needed).
 4. **Resume**: re-ran `scripts/ingest_resume.py` against
-   `data/resumes/Niramay_Kelkar_Resume_FullStack_v3.pdf` (same file,
+   `data/resumes/my_resume.pdf` (same file,
    untouched by the DB wipe). Result: version 1 (fresh numbering, the
    table was empty - not the original v1/v2), active, 5195 chars
    extracted - content identical to before, since extraction from an
