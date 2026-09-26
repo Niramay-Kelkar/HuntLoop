@@ -17,10 +17,64 @@ assistant. See "Project status" below for what's built vs. not, and
 ## Prerequisites
 
 - Python 3.13 (what this repo's virtualenv is built with — no stricter pin
-  exists yet)
+  exists yet) **except on macOS Intel (x86_64) — see the callout below,
+  `pip install -r requirements.txt` does not complete there on 3.13.**
 - PostgreSQL (developed/tested against Postgres 18, running locally)
 - A Postgres role with privileges on the target database (`CREATE`, `SELECT`,
   `INSERT`, `UPDATE`, `DELETE` on its tables)
+
+> **macOS Intel (x86_64) + Python 3.13: `pip install -r requirements.txt`
+> fails on `torch`.** This is a real, confirmed PyPI wheel gap, not a bug in
+> this repo's pins: `torch` is a transitive dependency (via
+> `sentence-transformers`, used for resume/job-match embeddings —
+> `src/huntloop/embeddings.py`), and PyPI's last `macosx_x86_64` `torch`
+> wheel release, `2.2.2`, only ships `cp312` and earlier builds — there is no
+> `torch` wheel for `cp313` on this platform at all (confirmed directly via
+> `pip download --platform macosx_10_9_x86_64 --python-version 313
+> --only-binary=:all: torch`, which fails with `no versions`, vs. the same
+> command with `--python-version 312`, which resolves `2.2.2` cleanly). No
+> version range in `requirements.txt` can fix this — it's an availability
+> gap, not a pin.
+>
+> **If you're on macOS Intel, build the virtualenv with Python 3.12
+> instead** (`python3.12 -m venv .venv` in the Setup steps below) — that
+> resolves `torch==2.2.2` and `pip install -r requirements.txt` completes
+> end to end with exit code 0 (verified in a real clean venv). Apple
+> Silicon (arm64), Linux, and Windows on Python 3.13 are unaffected (real
+> `cp313` wheels exist for those platforms).
+>
+> **Installing successfully is not the same as it working, though — read
+> this before assuming Python 3.12 "fixes" embeddings on macOS Intel.**
+> Even after a clean 3.12 install, `import sentence_transformers` (and
+> therefore `import torch`) still crashes at runtime on this platform: the
+> only `torch` build macOS x86_64 gets (`2.2.2`) was compiled against
+> NumPy's pre-2.0 C ABI, while `pip`'s resolver — with no way to know about
+> that ABI constraint — pulls the latest `numpy`/`scipy`/`scikit-learn`
+> (which require NumPy ≥ 2.0) to satisfy everyone else's floor. The result
+> is a real crash (`NameError: name 'nn' is not defined` inside
+> `transformers/integrations/accelerate.py`), confirmed directly against
+> the installed packages, not a hypothetical. Downgrading `numpy` alone
+> just moves the same conflict onto `scipy` instead — there is no single
+> `numpy` version that satisfies both `torch==2.2.2` and the rest of this
+> stack's current releases at once. **This repo does not attempt to
+> reconcile that dependency graph for macOS x86_64**, deliberately: the
+> app already treats `sentence-transformers`/`torch` as an optional,
+> gracefully-degrading capability everywhere it's used
+> (`huntloop.pipelines.JobDataPipeline._get_reference_embedding()` and
+> `_classify_and_embed()` both catch this exact failure via a broad
+> `except Exception` and leave `is_relevant`/`embedding` `NULL` for that
+> run rather than crashing — confirmed directly: `_classify_and_embed()`
+> returns `(None, None)` under this real broken-import condition), and the
+> project's real fix for actually running embeddings is Docker, not a
+> local pin (see `src/huntloop/embeddings.py`'s own module docstring and
+> `CLAUDE.md`). So: **use Python 3.12 on macOS Intel only to unblock `pip
+> install -r requirements.txt` itself** (scraping, the API, the frontend,
+> and most tests all work locally without `torch` ever successfully
+> importing) — for anything that actually needs to compute a real
+> embedding (`scripts/backfill_embeddings.py`, the daily scrape's
+> classification step, etc.), run it inside the project's `app` Docker
+> image (Linux, real `cp313` torch wheels, no ABI conflict) exactly as
+> `CLAUDE.md` already documents, on any Python version.
 
 ## Setup
 
