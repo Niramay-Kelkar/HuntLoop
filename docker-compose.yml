@@ -120,8 +120,7 @@ services:
       # IP is allowed to hand it an X-Forwarded-For header to trust (see
       # that module for the full reasoning) - the `caddy` service's own
       # pinned internal address (see the `default` network's `caddy`
-      # entry below), nothing broader. Deliberately hardcoded to the
-      # single static IP `caddy` is pinned to on this compose network,
+      # entry below), nothing broader. Deliberately a single static IP,
       # not the whole subnet - anything else on this network (db, app,
       # frontend, ...) must NOT be able to spoof a client IP against this
       # service. Harmless when the `proxy` profile isn't running at all -
@@ -129,7 +128,16 @@ services:
       # nothing ever sends this API an X-Forwarded-For header in that
       # case, so ProxyHeadersMiddleware never has anything to act on
       # regardless of what's configured here.
-      TRUSTED_PROXY_IPS: 172.28.0.10
+      #
+      # HUNTLOOP_CADDY_IP is the SAME variable `caddy`'s own
+      # ipv4_address (below) is pinned to, deliberately not a second
+      # variable - this value must always equal whatever `caddy` is
+      # actually pinned to, and reusing one variable makes that
+      # impossible to drift out of sync by editing just one of the two.
+      # See the `networks.default` block at the bottom of this file for
+      # why/when to override it (a subnet collision with another
+      # Compose project) and README.md's Troubleshooting section.
+      TRUSTED_PROXY_IPS: ${HUNTLOOP_CADDY_IP:-172.28.0.10}
     # POST /resumes/upload (added 2026-08-23, see CLAUDE.md/SESSIONS.md)
     # writes to data/resumes/ inside the container - data/resumes/ is
     # both gitignored and dockerignored (real personal data, never baked
@@ -246,9 +254,15 @@ services:
     # recreate/restart, or even (in principle) be reused by a different
     # container later. Every other service is untouched, still just
     # auto-joining `default` with whatever address Docker hands out.
+    #
+    # HUNTLOOP_CADDY_IP - same variable `api`'s TRUSTED_PROXY_IPS reads
+    # above, so the two can't drift apart. Override it (along with
+    # HUNTLOOP_DOCKER_SUBNET below) only if 172.28.0.0/24 collides with
+    # another Docker network already on this host - see README.md's
+    # Troubleshooting section.
     networks:
       default:
-        ipv4_address: 172.28.0.10
+        ipv4_address: ${HUNTLOOP_CADDY_IP:-172.28.0.10}
     ports:
       - "80:80"
       - "443:443"
@@ -361,10 +375,22 @@ networks:
   # this network (which services join it, DNS-by-service-name,
   # connectivity) is unchanged - only the specific subnet is now pinned
   # instead of Docker Compose picking one automatically.
+  #
+  # HUNTLOOP_DOCKER_SUBNET - overridable via .env, defaulting to the
+  # original hardcoded value. This subnet is a genuinely common one for
+  # other Compose projects to also default to or hand-pick, so a
+  # stranger with another project already using it (or running a second
+  # clone/checkout of this repo) hits Docker's real "Pool overlaps with
+  # other one on this address space" error on `docker compose up` - see
+  # README.md's Troubleshooting section for the fix. If you override
+  # this, also override HUNTLOOP_CADDY_IP (above, on the `caddy`
+  # service) to a `.x` address inside the new subnet - it's a separate
+  # variable because Compose can't derive one from the other, but it
+  # must stay inside whatever subnet this resolves to.
   default:
     ipam:
       config:
-        - subnet: 172.28.0.0/24
+        - subnet: ${HUNTLOOP_DOCKER_SUBNET:-172.28.0.0/24}
 
 volumes:
   pgdata:

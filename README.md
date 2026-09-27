@@ -335,6 +335,48 @@ full stack** — `db`, `app`, `api`, and `frontend` together, with no
 separate `npm run dev`/`uvicorn --reload` step required. See "API
 service" and "Frontend" below for what each one is.
 
+## Troubleshooting
+
+### `docker compose up` fails with "Pool overlaps with other one on this address space"
+
+```
+Error response from daemon: invalid pool request: Pool overlaps with
+other one on this address space
+```
+
+**Cause:** `docker-compose.yml` pins this project's Docker network to a
+fixed subnet, `172.28.0.0/24` (needed so the optional Caddy reverse proxy
+has a stable IP for the `api` service to trust — see the `networks`
+block at the bottom of `docker-compose.yml` for the full reasoning).
+`172.28.0.0/24` is a common private range other Docker Compose projects
+also default to or hand-pick, so if any other Compose project already
+running on this machine — or a second clone/checkout of this repo — has
+a network on that same subnet, Docker refuses to create a second one
+that overlaps it.
+
+**Fix:** pick a different, unused subnet and set it via `.env` — no code
+changes needed. First, check what's actually taken:
+
+```bash
+docker network ls
+docker network inspect <network-name>   # look for its "Subnet" under IPAM.Config
+```
+
+Then in your `.env`, set both variables together (they must describe the
+same network — `HUNTLOOP_CADDY_IP` has to be a `.x` address that falls
+inside `HUNTLOOP_DOCKER_SUBNET`):
+
+```bash
+HUNTLOOP_DOCKER_SUBNET=172.31.0.0/24
+HUNTLOOP_CADDY_IP=172.31.0.10
+```
+
+Then re-run `docker compose up`. If you're not using the `proxy` profile
+(Caddy) at all, `HUNTLOOP_CADDY_IP` still needs to be set consistently
+with `HUNTLOOP_DOCKER_SUBNET` — it's read either way, it just has no
+effect unless the `caddy` container actually exists. Both variables are
+documented with their defaults in `.env.example`.
+
 ## API service
 
 A FastAPI backend, `src/huntloop/api/main.py` - a separate service from
