@@ -91,6 +91,8 @@ cp .env.example .env
 # edit .env and fill in your real DATABASE_URL
 
 alembic upgrade head
+
+python scripts/seed_sample_job_postings.py
 ```
 
 `.env.example` documents the expected format:
@@ -106,6 +108,43 @@ The app fails fast with a clear error if `DATABASE_URL` is missing — see
 `job_postings`, `job_locations`, `job_skills`, `job_metadata`,
 `lca_disclosures`, `sponsor_name_overrides`, `resume_versions`,
 `job_applications`) to match the current schema.
+
+`python scripts/seed_sample_job_postings.py` loads the same small real
+sample dataset (~194 real job postings across 28 companies spanning all 7
+implemented ATS platforms — see `data/samples/README.md`) the Docker
+path's `seed` service auto-runs, so a manual/non-Docker install ends up
+with the same populated-on-first-run experience instead of an empty
+dashboard — this step is genuinely optional (the API/frontend below work
+fine against an empty database, they'll just show zero jobs/companies
+until you run a real scrape), but skipping it means starting from empty.
+It only needs `DATABASE_URL` in the environment (same as everything
+else here) — no Docker-specific assumptions (network hostnames,
+hardcoded connection details) anywhere in the script. It's also
+idempotent and safe to re-run: it checks `SELECT COUNT(*) FROM
+job_postings` first and does nothing (logs one line, exits 0) if that's
+already non-zero, whether from a previous run of this script or your own
+real scrape — see the script's own module docstring for the full
+reasoning.
+
+At this point you have a fully migrated, sample-populated local database.
+To actually run the app against it:
+
+- **API**: `PYTHONPATH=src uvicorn huntloop.api.main:app --reload` — see
+  "API service" below for the full endpoint list and options.
+- **Frontend**: `cd frontend && npm install && npm run dev` — see
+  "Frontend" below; by default it talks to `http://localhost:8000`, which
+  is where the command above serves the API.
+
+Verify it end-to-end:
+
+```bash
+curl http://localhost:8000/dashboard/stats
+# {"total_jobs":194,"total_companies":28,"applications_by_status":{...},"new_jobs_last_7_days":194}
+curl http://localhost:8000/jobs?limit=3
+# real job postings from the sample dataset
+
+open http://localhost:3000/dashboard   # or /jobs — real data, not an empty state
+```
 
 ## Running the scraper
 
