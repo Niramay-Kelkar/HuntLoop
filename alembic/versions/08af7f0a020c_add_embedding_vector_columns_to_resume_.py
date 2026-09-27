@@ -11,12 +11,39 @@ confirmed against the model's own published
 Requires the `vector` extension already enabled (c2d25907fe8e). Column-
 only - populating them is scripts/backfill_job_embeddings.py and
 scripts/ingest_resume.py, not this migration.
+
+Uses a locally-defined schema-qualified Vector (emits `public.VECTOR(n)`
+in DDL) instead of the raw `pgvector.sqlalchemy.Vector` (emits bare
+`VECTOR(n)`, which only resolves when `public` is on the connecting
+role/database's `search_path` - true by Postgres's own default, but not
+guaranteed) - same fix `huntloop.db_models.Vector` already applies to
+every application-facing pgvector column, applied here directly rather
+than imported so this migration stays self-contained (migrations here
+don't import app code). This changes only how the column type is
+*declared* in this file, not the DDL a normal `search_path` produces:
+`public.VECTOR(384)` and `VECTOR(384)` resolve to the exact same
+Postgres type when `public` is on the path (Postgres's default), so
+every database that already ran this migration is unaffected - this is
+not a new revision.
 """
-from typing import Sequence, Union
+from typing import Any, Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-from pgvector.sqlalchemy import Vector
+from pgvector.sqlalchemy import Vector as _Vector
+
+
+class Vector(_Vector):
+    """Same as pgvector.sqlalchemy.Vector, but always emits a schema-
+    qualified `public.VECTOR(n)` in DDL instead of the bare `VECTOR(n)`
+    the base class emits - see huntloop.db_models.Vector, which this
+    mirrors (DDL-only override; value bind/result processing are
+    inherited unchanged)."""
+
+    cache_ok = True
+
+    def get_col_spec(self, **kw: Any) -> str:
+        return f"public.{super().get_col_spec(**kw)}"
 
 
 # revision identifiers, used by Alembic.
