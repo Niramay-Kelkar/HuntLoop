@@ -293,11 +293,12 @@ write your real `job_postings` data. See `tests/conftest.py`.
 
 ## Run with Docker
 
-Runs the scraper/pipeline and a Postgres 18 database as two containers via
-docker-compose. This is a separate Postgres instance from any local one —
-it's exposed on host port `5433` (not `5432`) so there's no ambiguity about
-which database gets written to, and its data lives in a named volume
-(`pgdata`) that persists across `docker-compose down`/`up`.
+Runs the full stack — Postgres 18, the scraper/pipeline (`app`), the API
+(`api`), and the frontend — as containers via docker-compose. This is a
+separate Postgres instance from any local one — it's exposed on host port
+`5433` (not `5432`) so there's no ambiguity about which database gets
+written to, and its data lives in a named volume (`pgdata`) that persists
+across `docker-compose down`/`up`.
 
 ```bash
 cp .env.example .env
@@ -306,33 +307,44 @@ cp .env.example .env
 # pointed at the `db` service, so DATABASE_URL itself only matters if you also
 # run things locally against localhost:5432)
 
-docker-compose up --build -d db   # start Postgres and wait for it to be ready
-docker-compose run --rm app alembic upgrade head   # first run only: create the schema
-
-docker-compose up --build   # run the scraper (and keep db running)
+docker compose up --build
 ```
 
-`docker-compose down -v` tears everything down, including the `pgdata`
-volume, for a clean slate.
+That's it — **no separate manual `alembic upgrade head` step is needed
+anymore.** A one-shot `seed` service (see `docker-compose.yml`) runs once,
+automatically, before `app`/`api` are allowed to start: it applies every
+pending migration, then seeds a small real sample dataset (~194 real job
+postings across 28 companies spanning all 7 implemented ATS platforms —
+see `data/samples/README.md` for exactly what's in it) into a fresh
+database, so the first thing you see — the dashboard, the job list, the
+API's own responses — is populated with real data, not empty. The sample
+seed is gated on `job_postings` being genuinely empty: run
+`docker compose up` again later, after you've onboarded your own companies
+and run a real scrape, and the `seed` service's logs will show it
+detecting your real data and skipping the sample seed entirely (`docker
+compose logs seed`) — it never re-runs or overwrites anything once real
+data exists, whether that's the sample itself or your own scrape.
 
-**As of this entry, `docker compose up` (no extra flags, no `--profile`)
-also brings up the `api` and `frontend` services** — the full stack
-(backend + frontend), not just the scraper/db above, with no separate
-`npm run dev`/`uvicorn --reload` step required. See "API service" and
-"Frontend" below for what each one is; this section's `app`/`db`
-instructions are unchanged by that — `app` is still a run-to-completion
-batch job (the scraper), not a long-running service, so it still needs
-`alembic upgrade head` run once against a fresh `pgdata` volume before it
-can insert anything, same as before.
+`docker-compose down -v` tears everything down, including the `pgdata`
+volume, for a clean slate (the next `docker compose up` re-seeds the
+sample dataset from scratch, since the volume — and therefore
+`job_postings` — is empty again).
+
+**`docker compose up` (no extra flags, no `--profile`) brings up the
+full stack** — `db`, `app`, `api`, and `frontend` together, with no
+separate `npm run dev`/`uvicorn --reload` step required. See "API
+service" and "Frontend" below for what each one is.
 
 ## API service
 
 A FastAPI backend, `src/huntloop/api/main.py` - a separate service from
 the scraper/orchestrator (`app`), not merged into it. Its own `api`
-service in `docker-compose.yml`, connected directly to the real host
-Postgres (via `host.docker.internal`, same pattern used for the
-embeddings backfill) rather than the docker-compose `db` service - see
-that file's comment on `api` for why.
+service in `docker-compose.yml`, connected to the same bundled `db`
+service `app` uses (not a separate/host Postgres) - self-contained for a
+fresh `docker compose up`, and covered by the same `seed` service above,
+so it never starts against an unmigrated or empty database. Point it at
+your own real host Postgres instead by overriding `DATABASE_URL` in your
+own `.env`, if you want that - no code change needed.
 
 Endpoints (see `CLAUDE.md` for full per-endpoint detail — this list is
 kept to the shape, not every query param/edge case):

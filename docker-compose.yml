@@ -59,23 +59,55 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+
+  # One-shot migration + sample-data seed step, added so a plain
+  # `docker compose up` against a fresh `pgdata` volume is fully
+  # self-contained - no separate manual `alembic upgrade head` command,
+  # and no empty-database dashboard on first run. Same image as `app`
+  # (build: .), no ports, no restart policy - it runs `alembic upgrade
+  # head` (the sole source of schema creation, same as every other path
+  # in this project - see CLAUDE.md) then
+  # scripts/seed_sample_job_postings.py (see that script and
+  # data/samples/README.md), then exits 0. `app`/`api` both wait on this
+  # via `service_completed_successfully` below rather than running
+  # against a database that might still be unmigrated/unseeded.
+  # scripts/seed_sample_job_postings.py gates on a real
+  # `SELECT COUNT(*) FROM job_postings` check - it only ever inserts
+  # anything the very first time this runs against a genuinely empty
+  # table, and is a correct no-op on every later `docker compose up`
+  # (schema already migrated, and either the sample or a real scrape has
+  # since populated job_postings).
+  seed:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+    command: ["sh", "-c", "alembic upgrade head && python scripts/seed_sample_job_postings.py"]
+    depends_on:
+      db:
+        condition: service_healthy
 
   # FastAPI backend service, added 2026-08-22 - a separate concern from
   # `app` (the scraper/orchestrator), deliberately not merged into it.
   # Real endpoints as of 2026-08-22 - see src/huntloop/api/main.py.
   #
-  # DATABASE_URL deliberately points at host.docker.internal:5432 - the
-  # real local system Postgres where the actual scraped/matched data
-  # lives - NOT the docker-compose `db` service (a separate, smaller
-  # instance, see the two-Postgres-instances note in CLAUDE.md). Same
-  # host.docker.internal pattern already used for the embeddings
-  # backfill (scripts/backfill_embeddings.py, run via `docker compose
-  # run` with a DATABASE_URL override - see SESSIONS.md). extra_hosts
-  # below is only needed on Linux (Docker Desktop on Mac/Windows already
-  # resolves host.docker.internal natively) but is harmless everywhere,
-  # so it's included for portability rather than assuming Mac.
-  # Consequently `api` no longer depends on the `db` service at all -
-  # it never talks to it.
+  # DATABASE_URL points at the bundled `db` service, same pattern `app`
+  # already uses above - `api` is self-contained for a fresh
+  # `docker compose up`: no separate host Postgres needed, and (via the
+  # `seed` service above) it never starts against an unmigrated/empty
+  # database. This replaces an earlier design where `api` pointed at
+  # `host.docker.internal:5432` (the host's own real system Postgres) -
+  # that meant a fresh clone's `api` container 500'd on every endpoint,
+  # since nothing real lives at that address on a stranger's machine (or,
+  # worse, it could silently connect to some unrelated Postgres a
+  # stranger happens to run locally). Anyone who *wants* `api` to see
+  # their own real host Postgres data instead of the bundled `db`
+  # service/sample data can still do that - override DATABASE_URL in
+  # their own .env, same env_file-override pattern every other variable
+  # in this file already supports; no code change needed for that case.
   api:
     build: .
     command: ["uvicorn", "huntloop.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
@@ -83,7 +115,7 @@ services:
       - .env
     environment:
       PYTHONPATH: /app/src
-      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@host.docker.internal:5432/${POSTGRES_DB}
+      DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       # Tells huntloop.api.main's ProxyHeadersMiddleware setup which peer
       # IP is allowed to hand it an X-Forwarded-For header to trust (see
       # that module for the full reasoning) - the `caddy` service's own
@@ -108,8 +140,11 @@ services:
     # scripts/ingest_resume.py has always read from/written to manually.
     volumes:
       - ./data/resumes:/app/data/resumes
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
     # Bound to loopback only, not every interface - this API is
     # unauthenticated (see huntloop/api/routers/drafting.py's own
     # security warning) and was previously reachable from anywhere on
