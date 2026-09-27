@@ -5,6 +5,29 @@ scripts into two unrelated sets of tables - loading one has no effect on
 the other. Both are real subsets of this project's own production data,
 not synthetic or fabricated.
 
+**Verified safe to seed in any order/combination** (fresh Postgres →
+`alembic upgrade head` → both seed scripts, run in both orders; also
+re-run each a second time to confirm idempotency): no FK relationship
+exists between `lca_disclosures` and `companies`/`job_postings`/etc, so
+neither script depends on the other having run first, and re-running
+either is a safe no-op (table-level count check for the job-postings
+sample, per-row `ON CONFLICT DO NOTHING` on `case_number` for the LCA
+sample). Loading only one of the two is also fine - the other simply
+stays empty, with no crash or degraded behavior anywhere else.
+
+They *do* meaningfully interact once both are loaded, though - this
+isn't a coincidence to be careful about, it's the intended bridge for
+this sample data to show real functionality: `companies_sample.csv.gz`
+already carries each company's real `matched_sponsor_employer_name`, and
+running `scripts/resolve_sponsor_matches.py` after both samples are
+seeded links that value against the freshly-loaded `lca_disclosures`
+rows and populates it fresh (confirmed live: 27/28 sample companies
+resolved a real sponsor match). `GET /jobs`/`GET /jobs/{id}` then show
+real `has_sponsor_history`/`salary_estimate` values for those companies'
+postings, sourced from the LCA sample data, purely because both samples
+happen to be loaded - no code change or special wiring needed for this,
+same lookup path a real scrape + real DOL data would use.
+
 ## `job_postings_sample.csv.gz` + friends (companies/job_sources/job_locations)
 
 A real, curated sample of scraped job postings, so a fresh

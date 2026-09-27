@@ -1,82 +1,174 @@
 # HuntLoop
 
-HuntLoop is a multi-ATS job-board scraper and matching app. `main.py` is a
-multi-platform orchestrator that scrapes public job-board APIs across seven
-implemented ATS platforms (Greenhouse, Lever, Workday, SmartRecruiters,
-Ashby, iCIMS, Gem — see `CLAUDE.md` for the full per-platform detail) for
-however many companies have been onboarded (`companies.ats_platform`), and
-writes normalized postings (company, source, locations, skills, department,
-employment type) into a Postgres database via SQLAlchemy/Scrapy. On top of
-that, a FastAPI backend (`src/huntloop/api/`) and a Next.js frontend
-(`frontend/`) expose the scraped postings with embedding-based resume match
-scoring, precomputed matched/missing skills, optional H-1B/DOL-sponsorship
-data, an application tracker, and a BYOK resume-grounded chat/drafting
-assistant. See "Project status" below for what's built vs. not, and
-`CLAUDE.md` for the full architectural detail this file doesn't repeat.
+![CI](https://github.com/Niramay-Kelkar/HuntLoop/actions/workflows/ci.yml/badge.svg)
+![Python](https://img.shields.io/badge/python-3.13-blue.svg)
+![Postgres](https://img.shields.io/badge/postgres-18-blue.svg)
+![Next.js](https://img.shields.io/badge/next.js-App%20Router-black.svg)
+
+HuntLoop is a personal job-search automation and resume-matching
+platform. It scrapes real job postings from seven applicant-tracking
+systems' public APIs — Greenhouse, Lever, Workday, SmartRecruiters,
+Ashby, iCIMS, Gem — with no third-party job board or paid API involved.
+
+A FastAPI backend and Next.js frontend then score each posting against
+your resume using sentence embeddings and an LLM-backed skills-gap
+analysis. It can also flag whether a company has a real history of
+H-1B visa sponsorship, using actual DOL wage-filing data, and gives you
+a dashboard, job list, and application tracker to run the search.
+Everything is self-hosted: your resume and application data stay in
+your own database.
+
+See ["Project status"](#project-status) for what's built, and
+`CLAUDE.md` for full architectural detail this file doesn't repeat.
+
+## Table of contents
+
+- [Features](#features)
+- [Architecture](#architecture)
+- [Quick start](#quick-start)
+- [Prerequisites](#prerequisites)
+- [Manual / local setup](#manual--local-setup)
+- [Run with Docker](#run-with-docker)
+- [Running the scraper](#running-the-scraper)
+- [Logging](#logging)
+- [Scheduled runs](#scheduled-runs)
+- [Running tests](#running-tests)
+- [API service](#api-service)
+- [Frontend](#frontend)
+- [Reverse proxy / HTTPS for self-hosting](#reverse-proxy--https-for-self-hosting-optional-opt-in)
+- [Observability stack](#observability-stack-optional-opt-in)
+- [H-1B sponsorship data](#h-1b-sponsorship-data-optional)
+- [Adding a company to scrape](#adding-a-company-to-scrape)
+- [Troubleshooting / FAQ](#troubleshooting--faq)
+- [Project status](#project-status)
+
+## Features
+
+- **Multi-ATS scraper** across 7 real platforms (Greenhouse, Lever,
+  Workday, SmartRecruiters, Ashby, iCIMS, Gem), feeding a normalized
+  Postgres schema (companies, postings, locations, skills, department,
+  employment type).
+- **Resume-to-job match scoring** — sentence embeddings blended with an
+  LLM-backed (Groq/Gemini) matched/missing-skills analysis, computed per
+  posting against whichever resume version you've activated.
+- **Optional H-1B/DOL sponsorship matching** against real government LCA
+  wage-filing data, with a rough per-company salary estimate derived
+  from those same filings.
+- **A FastAPI backend** exposing filtering/sorting/pagination over
+  postings, an application tracker, resume version management, and a
+  BYOK (bring-your-own-key) resume-grounded drafting assistant.
+- **A Next.js frontend** — dashboard, filterable job list (cards/table
+  views), a job detail page with a chat assistant, a kanban/list
+  application tracker, and resume upload/version management.
+- **Fully containerized**: one `docker compose up --build` brings up
+  Postgres, the scraper, the API, and the frontend together, already
+  migrated and pre-seeded with real sample data.
+- **CI** (GitHub Actions) running the full backend + frontend test
+  suites against a real Postgres service on every push/PR.
+- **Optional opt-in extras**: a Caddy-fronted HTTPS reverse proxy for
+  self-hosting on a real domain, and a Prometheus/Grafana observability
+  stack for scrape metrics.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    ATS["Public ATS APIs (Greenhouse, Lever, Workday, SmartRecruiters, Ashby, iCIMS, Gem)"]
+    Scraper["main.py (Scrapy orchestrator)"]
+    DB[(Postgres)]
+    API["FastAPI backend"]
+    FE["Next.js frontend"]
+    LCA[("DOL LCA data (optional)")]
+    LLM["Groq / Gemini (skills matching + BYOK drafting)"]
+    You(("You"))
+
+    ATS --> Scraper --> DB
+    LCA -.-> DB
+    DB --> API
+    LLM -.-> API
+    API --> FE --> You
+```
+
+The scraper (`main.py`) and the API/frontend are independent processes.
+They only share the same Postgres database — the scraper never calls
+the API, and the API never scrapes. Resume embeddings and
+skills-matching calls go out to Groq/Gemini. Everything else stays in
+your own Postgres instance.
+
+## Quick start
+
+Both paths below get you a fully working local instance with real
+sample data (194 job postings across 28 companies) — pick whichever
+fits how you work. Full detail on each is further down this file.
+
+### Docker (recommended)
+
+```bash
+git clone <repo-url>
+cd HuntLoop
+
+cp .env.example .env
+# edit .env: fill in POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
+
+docker compose up --build
+```
+
+Then open http://localhost:3000/dashboard — migrations and sample-data
+seeding both happen automatically before the app starts; no manual step
+needed. See ["Run with Docker"](#run-with-docker) below for the full
+detail on what this actually does under the hood, and the
+[Troubleshooting / FAQ](#troubleshooting--faq) section if `docker compose
+up` fails with a network/subnet error.
+
+### Manual / local setup
+
+```bash
+git clone <repo-url>
+cd HuntLoop
+
+python3 -m venv .venv
+source .venv/bin/activate
+
+pip install -r requirements.txt
+
+cp .env.example .env
+# edit .env and fill in your real DATABASE_URL
+
+alembic upgrade head
+python scripts/seed_sample_job_postings.py
+```
+
+Then, in two separate terminals:
+
+```bash
+PYTHONPATH=src uvicorn huntloop.api.main:app --reload
+```
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open http://localhost:3000/dashboard. See
+["Manual / local setup"](#manual--local-setup) below for the full
+detail, and the [Troubleshooting / FAQ](#troubleshooting--faq) section
+if you're on macOS Intel (x86_64) — `pip install` needs one extra step
+there.
 
 ## Prerequisites
 
-- Python 3.13 (what this repo's virtualenv is built with — no stricter pin
-  exists yet) **except on macOS Intel (x86_64) — see the callout below,
-  `pip install -r requirements.txt` does not complete there on 3.13.**
+- Python 3.13 (what this repo's virtualenv is built with — no stricter
+  pin exists yet) **except on macOS Intel (x86_64), which needs Python
+  3.12 instead — see the [Troubleshooting / FAQ](#troubleshooting--faq)
+  section for why and the exact workaround.**
 - PostgreSQL (developed/tested against Postgres 18, running locally)
 - A Postgres role with privileges on the target database (`CREATE`, `SELECT`,
   `INSERT`, `UPDATE`, `DELETE` on its tables)
+- Docker + Docker Compose, if you're taking the Docker path instead of
+  the manual one — nothing else to install first in that case.
 
-> **macOS Intel (x86_64) + Python 3.13: `pip install -r requirements.txt`
-> fails on `torch`.** This is a real, confirmed PyPI wheel gap, not a bug in
-> this repo's pins: `torch` is a transitive dependency (via
-> `sentence-transformers`, used for resume/job-match embeddings —
-> `src/huntloop/embeddings.py`), and PyPI's last `macosx_x86_64` `torch`
-> wheel release, `2.2.2`, only ships `cp312` and earlier builds — there is no
-> `torch` wheel for `cp313` on this platform at all (confirmed directly via
-> `pip download --platform macosx_10_9_x86_64 --python-version 313
-> --only-binary=:all: torch`, which fails with `no versions`, vs. the same
-> command with `--python-version 312`, which resolves `2.2.2` cleanly). No
-> version range in `requirements.txt` can fix this — it's an availability
-> gap, not a pin.
->
-> **If you're on macOS Intel, build the virtualenv with Python 3.12
-> instead** (`python3.12 -m venv .venv` in the Setup steps below) — that
-> resolves `torch==2.2.2` and `pip install -r requirements.txt` completes
-> end to end with exit code 0 (verified in a real clean venv). Apple
-> Silicon (arm64), Linux, and Windows on Python 3.13 are unaffected (real
-> `cp313` wheels exist for those platforms).
->
-> **Installing successfully is not the same as it working, though — read
-> this before assuming Python 3.12 "fixes" embeddings on macOS Intel.**
-> Even after a clean 3.12 install, `import sentence_transformers` (and
-> therefore `import torch`) still crashes at runtime on this platform: the
-> only `torch` build macOS x86_64 gets (`2.2.2`) was compiled against
-> NumPy's pre-2.0 C ABI, while `pip`'s resolver — with no way to know about
-> that ABI constraint — pulls the latest `numpy`/`scipy`/`scikit-learn`
-> (which require NumPy ≥ 2.0) to satisfy everyone else's floor. The result
-> is a real crash (`NameError: name 'nn' is not defined` inside
-> `transformers/integrations/accelerate.py`), confirmed directly against
-> the installed packages, not a hypothetical. Downgrading `numpy` alone
-> just moves the same conflict onto `scipy` instead — there is no single
-> `numpy` version that satisfies both `torch==2.2.2` and the rest of this
-> stack's current releases at once. **This repo does not attempt to
-> reconcile that dependency graph for macOS x86_64**, deliberately: the
-> app already treats `sentence-transformers`/`torch` as an optional,
-> gracefully-degrading capability everywhere it's used
-> (`huntloop.pipelines.JobDataPipeline._get_reference_embedding()` and
-> `_classify_and_embed()` both catch this exact failure via a broad
-> `except Exception` and leave `is_relevant`/`embedding` `NULL` for that
-> run rather than crashing — confirmed directly: `_classify_and_embed()`
-> returns `(None, None)` under this real broken-import condition), and the
-> project's real fix for actually running embeddings is Docker, not a
-> local pin (see `src/huntloop/embeddings.py`'s own module docstring and
-> `CLAUDE.md`). So: **use Python 3.12 on macOS Intel only to unblock `pip
-> install -r requirements.txt` itself** (scraping, the API, the frontend,
-> and most tests all work locally without `torch` ever successfully
-> importing) — for anything that actually needs to compute a real
-> embedding (`scripts/backfill_embeddings.py`, the daily scrape's
-> classification step, etc.), run it inside the project's `app` Docker
-> image (Linux, real `cp313` torch wheels, no ABI conflict) exactly as
-> `CLAUDE.md` already documents, on any Python version.
-
-## Setup
+## Manual / local setup
 
 ```bash
 git clone <repo-url>
@@ -130,10 +222,12 @@ At this point you have a fully migrated, sample-populated local database.
 To actually run the app against it:
 
 - **API**: `PYTHONPATH=src uvicorn huntloop.api.main:app --reload` — see
-  "API service" below for the full endpoint list and options.
+  ["API service"](#api-service) below for the full endpoint list and
+  options.
 - **Frontend**: `cd frontend && npm install && npm run dev` — see
-  "Frontend" below; by default it talks to `http://localhost:8000`, which
-  is where the command above serves the API.
+  ["Frontend"](#frontend) below; by default it talks to
+  `http://localhost:8000`, which is where the command above serves the
+  API.
 
 Verify it end-to-end:
 
@@ -146,6 +240,56 @@ curl http://localhost:8000/jobs?limit=3
 open http://localhost:3000/dashboard   # or /jobs — real data, not an empty state
 ```
 
+## Run with Docker
+
+Runs the full stack as containers via Docker Compose: Postgres 18, the
+scraper/pipeline (`app`), the API (`api`), and the frontend. This is a
+separate Postgres instance from any local one, exposed on host port
+`5433` (not `5432`) so there's no ambiguity about which database gets
+written to. Its data lives in a named volume (`pgdata`) that persists
+across `docker-compose down`/`up`.
+
+```bash
+cp .env.example .env
+# edit .env: fill in DATABASE_URL, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
+# (the containerized app builds its own DATABASE_URL from the POSTGRES_* vars,
+# pointed at the `db` service, so DATABASE_URL itself only matters if you also
+# run things locally against localhost:5432)
+
+docker compose up --build
+```
+
+That's it — **no separate manual `alembic upgrade head` step is needed
+anymore.** A one-shot `seed` service (see `docker-compose.yml`) runs once,
+automatically, before `app`/`api` are allowed to start: it applies every
+pending migration, then seeds a small real sample dataset (~194 real job
+postings across 28 companies spanning all 7 implemented ATS platforms —
+see `data/samples/README.md` for exactly what's in it) into a fresh
+database, so the first thing you see — the dashboard, the job list, the
+API's own responses — is populated with real data, not empty. The sample
+seed is gated on `job_postings` being genuinely empty: run
+`docker compose up` again later, after you've onboarded your own companies
+and run a real scrape, and the `seed` service's logs will show it
+detecting your real data and skipping the sample seed entirely (`docker
+compose logs seed`) — it never re-runs or overwrites anything once real
+data exists, whether that's the sample itself or your own scrape.
+
+`docker-compose down -v` tears everything down, including the `pgdata`
+volume, for a clean slate (the next `docker compose up` re-seeds the
+sample dataset from scratch, since the volume — and therefore
+`job_postings` — is empty again).
+
+**`docker compose up` (no extra flags, no `--profile`) brings up the
+full stack** — `db`, `app`, `api`, and `frontend` together, with no
+separate `npm run dev`/`uvicorn --reload` step required. See ["API
+service"](#api-service) and ["Frontend"](#frontend) below for what each
+one is.
+
+If `docker compose up` fails with a `Pool overlaps with other one on
+this address space` error, see the
+[Troubleshooting / FAQ](#troubleshooting--faq) section below — it's a
+known, fixable network-subnet collision, not a bug in the stack itself.
+
 ## Running the scraper
 
 From the repo root:
@@ -154,18 +298,17 @@ From the repo root:
 python main.py
 ```
 
-`main.py` is a multi-ATS orchestrator: it queries `companies.ats_platform`
+`main.py` is a multi-ATS orchestrator. It queries `companies.ats_platform`
 (populated by the onboarding/detection scripts under `scripts/` — see
-`CLAUDE.md` for the full detail on `detect_and_store_ats.py` and the
-per-platform discovery scripts), groups companies by platform, and runs the
-matching spider (`GreenhouseScraper`, `LeverScraper`, `WorkdayScraper`,
-`SmartRecruitersScraper`, `AshbyScraper`, `IcimsScraper`, `GemScraper`) once
-per platform with that platform's full token list. A company with an
-unrecognized/`unknown`/`NULL` platform is skipped with a clear log message,
-not silently dropped. Every spider pipes each scraped posting through the
-same source-agnostic `JobDataPipeline`, which upserts the company/source and
-inserts the job posting (plus its locations/skills/department/employment
-type) into Postgres.
+`CLAUDE.md`), groups companies by platform, and runs the matching spider
+(`GreenhouseScraper`, `LeverScraper`, `WorkdayScraper`,
+`SmartRecruitersScraper`, `AshbyScraper`, `IcimsScraper`, `GemScraper`)
+once per platform with that platform's full token list. A company with
+an unrecognized, `unknown`, or `NULL` platform is skipped with a clear
+log message, not silently dropped. Every spider pipes each posting
+through the same `JobDataPipeline`, which upserts the company/source and
+inserts the posting, including its locations, skills, department, and
+employment type, into Postgres.
 
 Expect Scrapy's standard crawl log, plus pipeline log lines for each item,
 e.g.:
@@ -187,12 +330,11 @@ dump (`item_scraped_count`, `finish_reason: finished`, etc.) and:
 
 ## Logging
 
-All logging (the scraper, the pipeline, and the one-off scripts in
-`scripts/`) goes through a shared setup in `huntloop/logging_config.py`:
-consistent format (timestamp, level, module name, message), written to both
-the console and a rotating log file at `logs/huntloop.log` (gitignored —
-it's a runtime artifact, not source; capped at 5MB per file, 3 backups
-kept).
+All logging — the scraper, the pipeline, and the one-off scripts in
+`scripts/` — goes through a shared setup in `huntloop/logging_config.py`.
+It uses a consistent format (timestamp, level, module, message) and
+writes to both the console and a rotating log file at `logs/huntloop.log`
+(gitignored, capped at 5MB per file with 3 backups).
 
 The log level defaults to `INFO`. Override it with the `LOG_LEVEL`
 environment variable, e.g.:
@@ -203,17 +345,18 @@ LOG_LEVEL=WARNING python main.py
 
 ## Scheduled runs
 
-The scraper orchestrator (`main.py`), the skills-matching backfill
-(`scripts/backfill_skills_matching.py`), and a third stage, the
-department-categorization backfill (`scripts/backfill_department_category.py`),
-all run on the same daily schedule, so postings stay fresh and
-newly-scraped (or still-backlogged) jobs get matched against the active
-resume and categorized without any manual step. This is local-only
-automation for a dev machine that's actually on/awake at the scheduled
-time — it is not a substitute for real deployment scheduling (e.g. GitHub
-Actions against a hosted Postgres), which is a separate, later step once
-there's a publicly reachable database (see `huntloop-architecture-decisions.md`
-for research on that, not yet acted on).
+Three stages run on the same daily schedule: the scraper orchestrator
+(`main.py`), the skills-matching backfill
+(`scripts/backfill_skills_matching.py`), and the department-categorization
+backfill (`scripts/backfill_department_category.py`). Together they keep
+both newly-scraped and backlogged postings matched against the active
+resume and categorized, with no manual step.
+
+This is local-only automation, for a dev machine that's actually awake
+at the scheduled time. It isn't a substitute for real deployment
+scheduling, such as GitHub Actions against a hosted Postgres — that's a
+separate, later step once there's a publicly reachable database (see
+`huntloop-architecture-decisions.md`).
 
 **On this project's own dev machine the actual trigger is `launchd`, not
 `cron`** — `cron` doesn't run a missed job when the Mac is asleep, which
@@ -285,13 +428,13 @@ crontab -l | grep -v 'run_orchestrator_cron.sh' | crontab -
   matching stage stopping early with a `Backfill stopped early (daily
   quota exhausted)` line is normal, not a failure — it still exits 0.
 - `logs/huntloop.log` — the same rotating, shared-logging file every
-  manual run also writes to (see "Logging" above; 5MB cap, 3 backups).
-  Scheduled runs show up in it exactly like manual ones — same format,
-  same per-company INFO/WARNING lines, same Scrapy stats dump at the end
-  for stage 1, and the same per-job/per-batch INFO/WARNING lines for
-  stage 2 (including which jobs got a skills match, which were rejected
-  by the sanity filter, and why). This is where to look for *what*
-  happened during a run, not just whether it succeeded.
+  manual run also writes to (see ["Logging"](#logging) above; 5MB cap, 3
+  backups). Scheduled runs show up in it exactly like manual ones — same
+  format, same per-company INFO/WARNING lines, same Scrapy stats dump at
+  the end for stage 1, and the same per-job/per-batch INFO/WARNING lines
+  for stage 2 (including which jobs got a skills match, which were
+  rejected by the sanity filter, and why). This is where to look for
+  *what* happened during a run, not just whether it succeeded.
 
 The scheduled job assumes Postgres is already reachable at
 `DATABASE_URL` when it fires (same requirement as a manual run — this
@@ -299,8 +442,8 @@ wrapper doesn't start or manage any database). On this repo's dev
 machine that's a locally-installed Postgres 18 running as a system
 service on port 5432, independent of the `docker-compose` `db` service
 described below (which is a separate, smaller Postgres instance on port
-5433 for the containerized workflow — see "Run with Docker"). If
-`DATABASE_URL` points somewhere not currently running, the run fails
+5433 for the containerized workflow — see ["Run with Docker"](#run-with-docker)).
+If `DATABASE_URL` points somewhere not currently running, the run fails
 fast with a clear connection-error traceback in `logs/huntloop.log`,
 same as it would for a manual run.
 
@@ -310,11 +453,11 @@ same as it would for a manual run.
 pytest
 ```
 
-The suite has grown well past the original pipeline smoke tests (300+
-tests as of this writing, across the pipeline, spiders, ATS
-detection/onboarding, matching, the API, and more) — don't expect an
-exact count to stay accurate here; run `pytest` for the real current
-total. Illustrative early example, still representative of the format:
+The suite has grown well past the original pipeline smoke tests. It now
+covers the pipeline, spiders, ATS detection/onboarding, matching, the
+API, and more (300+ tests as of this writing — don't expect that count
+to stay accurate; run `pytest` for the real current total). Illustrative
+early example, still representative of the format:
 
 ```
 ============================= test session starts ==============================
@@ -330,102 +473,16 @@ Tests run against a throwaway Postgres schema created for the test session
 (same server as `DATABASE_URL`, different namespace) — they never read or
 write your real `job_postings` data. See `tests/conftest.py`.
 
-## Run with Docker
-
-Runs the full stack — Postgres 18, the scraper/pipeline (`app`), the API
-(`api`), and the frontend — as containers via docker-compose. This is a
-separate Postgres instance from any local one — it's exposed on host port
-`5433` (not `5432`) so there's no ambiguity about which database gets
-written to, and its data lives in a named volume (`pgdata`) that persists
-across `docker-compose down`/`up`.
-
-```bash
-cp .env.example .env
-# edit .env: fill in DATABASE_URL, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
-# (the containerized app builds its own DATABASE_URL from the POSTGRES_* vars,
-# pointed at the `db` service, so DATABASE_URL itself only matters if you also
-# run things locally against localhost:5432)
-
-docker compose up --build
-```
-
-That's it — **no separate manual `alembic upgrade head` step is needed
-anymore.** A one-shot `seed` service (see `docker-compose.yml`) runs once,
-automatically, before `app`/`api` are allowed to start: it applies every
-pending migration, then seeds a small real sample dataset (~194 real job
-postings across 28 companies spanning all 7 implemented ATS platforms —
-see `data/samples/README.md` for exactly what's in it) into a fresh
-database, so the first thing you see — the dashboard, the job list, the
-API's own responses — is populated with real data, not empty. The sample
-seed is gated on `job_postings` being genuinely empty: run
-`docker compose up` again later, after you've onboarded your own companies
-and run a real scrape, and the `seed` service's logs will show it
-detecting your real data and skipping the sample seed entirely (`docker
-compose logs seed`) — it never re-runs or overwrites anything once real
-data exists, whether that's the sample itself or your own scrape.
-
-`docker-compose down -v` tears everything down, including the `pgdata`
-volume, for a clean slate (the next `docker compose up` re-seeds the
-sample dataset from scratch, since the volume — and therefore
-`job_postings` — is empty again).
-
-**`docker compose up` (no extra flags, no `--profile`) brings up the
-full stack** — `db`, `app`, `api`, and `frontend` together, with no
-separate `npm run dev`/`uvicorn --reload` step required. See "API
-service" and "Frontend" below for what each one is.
-
-## Troubleshooting
-
-### `docker compose up` fails with "Pool overlaps with other one on this address space"
-
-```
-Error response from daemon: invalid pool request: Pool overlaps with
-other one on this address space
-```
-
-**Cause:** `docker-compose.yml` pins this project's Docker network to a
-fixed subnet, `172.28.0.0/24` (needed so the optional Caddy reverse proxy
-has a stable IP for the `api` service to trust — see the `networks`
-block at the bottom of `docker-compose.yml` for the full reasoning).
-`172.28.0.0/24` is a common private range other Docker Compose projects
-also default to or hand-pick, so if any other Compose project already
-running on this machine — or a second clone/checkout of this repo — has
-a network on that same subnet, Docker refuses to create a second one
-that overlaps it.
-
-**Fix:** pick a different, unused subnet and set it via `.env` — no code
-changes needed. First, check what's actually taken:
-
-```bash
-docker network ls
-docker network inspect <network-name>   # look for its "Subnet" under IPAM.Config
-```
-
-Then in your `.env`, set both variables together (they must describe the
-same network — `HUNTLOOP_CADDY_IP` has to be a `.x` address that falls
-inside `HUNTLOOP_DOCKER_SUBNET`):
-
-```bash
-HUNTLOOP_DOCKER_SUBNET=172.31.0.0/24
-HUNTLOOP_CADDY_IP=172.31.0.10
-```
-
-Then re-run `docker compose up`. If you're not using the `proxy` profile
-(Caddy) at all, `HUNTLOOP_CADDY_IP` still needs to be set consistently
-with `HUNTLOOP_DOCKER_SUBNET` — it's read either way, it just has no
-effect unless the `caddy` container actually exists. Both variables are
-documented with their defaults in `.env.example`.
-
 ## API service
 
-A FastAPI backend, `src/huntloop/api/main.py` - a separate service from
-the scraper/orchestrator (`app`), not merged into it. Its own `api`
-service in `docker-compose.yml`, connected to the same bundled `db`
-service `app` uses (not a separate/host Postgres) - self-contained for a
-fresh `docker compose up`, and covered by the same `seed` service above,
-so it never starts against an unmigrated or empty database. Point it at
-your own real host Postgres instead by overriding `DATABASE_URL` in your
-own `.env`, if you want that - no code change needed.
+A FastAPI backend at `src/huntloop/api/main.py`, separate from the
+scraper/orchestrator (`app`). Its own `api` service in
+`docker-compose.yml` connects to the same bundled `db` service `app`
+uses, not a separate host Postgres. It's self-contained for a fresh
+`docker compose up` — the same `seed` service migrates and seeds it
+first, so it never starts against an empty database. Point it at your
+own host Postgres instead by overriding `DATABASE_URL` in your `.env`;
+no code change needed.
 
 Endpoints (see `CLAUDE.md` for full per-endpoint detail — this list is
 kept to the shape, not every query param/edge case):
@@ -459,9 +516,9 @@ kept to the shape, not every query param/edge case):
   drafting of free-form application answers via a user-supplied Groq/Gemini
   API key (`{"prompt", "provider", "api_key"}`) - the key is never read
   from server-side env vars, never persisted, never logged. **See the
-  security note in "Reverse proxy / HTTPS for self-hosting" below before
-  exposing this on anything but localhost** - it handles a real
-  third-party credential per request.
+  security note in ["Reverse proxy / HTTPS for self-hosting"](#reverse-proxy--https-for-self-hosting-optional-opt-in)
+  below before exposing this on anything but localhost** - it handles a
+  real third-party credential per request.
 
 Run it via Docker:
 
@@ -487,18 +544,21 @@ are unaffected either way, since CORS is a browser-enforced restriction.
 
 ## Frontend
 
-A Next.js (App Router) app in `frontend/` - TypeScript, Tailwind CSS,
-TanStack Query for data fetching. No longer a skeleton - real pages exist
-for a dashboard (`/dashboard`, the default landing route), a filterable/
-sortable job list with cards/table views (`/jobs`), a job detail page
-(matched/missing skill chips, sponsor/salary-estimate sidebar, sanitized-HTML
-job description, and a floating chat assistant panel with a read-only Q&A
-mode plus the BYOK drafting endpoint above), an application tracker
-(`/applications`, kanban + list views), and resume version management
-(`/resumes`, upload/activate). `frontend/src/types/api.ts` and
-`frontend/src/lib/api.ts` mirror the backend's real Pydantic
-schemas/endpoints (kept manually in sync - no shared codegen, a known gap).
-See `CLAUDE.md`'s frontend bullet for the full page-by-page detail.
+A Next.js (App Router) app in `frontend/` — TypeScript, Tailwind CSS,
+TanStack Query for data fetching. Real pages exist for:
+
+- **Dashboard** (`/dashboard`, the default landing route)
+- **Job list** (`/jobs`) — filterable/sortable, cards or table view
+- **Job detail** — matched/missing skill chips, sponsor/salary-estimate
+  sidebar, sanitized-HTML description, and a chat assistant panel
+  (read-only Q&A plus the BYOK drafting endpoint)
+- **Application tracker** (`/applications`) — kanban and list views
+- **Resume version management** (`/resumes`) — upload and activate
+
+`frontend/src/types/api.ts` and `frontend/src/lib/api.ts` mirror the
+backend's Pydantic schemas/endpoints, kept manually in sync (no shared
+codegen — a known gap). See `CLAUDE.md`'s frontend bullet for full
+page-by-page detail.
 
 **Now containerized** (`frontend/Dockerfile`, a `frontend` service in
 `docker-compose.yml`) - `docker compose up` alone runs a production-style
@@ -535,23 +595,22 @@ By default it talks to `http://localhost:8000` - override with
 `NEXT_PUBLIC_API_URL` in `frontend/.env.local` (see
 `frontend/.env.local.example`) if the API is running somewhere else. The
 API must already be running for either workflow above - via Docker (per
-"Run with Docker"/"API service") or `uvicorn ... --reload`.
+["Run with Docker"](#run-with-docker)/["API service"](#api-service)) or
+`uvicorn ... --reload`.
 
 ## Reverse proxy / HTTPS for self-hosting (optional, opt-in)
 
-**Not needed for local/localhost use - everything above this section is
-completely unaffected by it.** Plain `docker compose up` never starts
-this; it exists only for anyone who wants to run this stack on a real
-server, reachable at a real domain, over real HTTPS instead of plain
-HTTP. (The stack has no TLS anywhere on its own - see
-`src/huntloop/drafting.py`'s and `src/huntloop/api/routers/drafting.py`'s
-module docstrings for why that specifically matters before exposing
-`POST /jobs/{id}/draft-answer`, which handles a user-supplied third-party
-API key, on any public/non-localhost deployment.)
+**Not needed for local/localhost use.** Plain `docker compose up` never
+starts this. It exists for anyone running this stack on a real server,
+reachable at a real domain over real HTTPS instead of plain HTTP. The
+stack has no TLS of its own — see `src/huntloop/drafting.py` and
+`src/huntloop/api/routers/drafting.py` for why that matters before
+exposing `POST /jobs/{id}/draft-answer`, which handles a real
+third-party API key, on any public deployment.
 
 This uses [Caddy](https://caddyserver.com/) as an optional reverse proxy
 in front of the existing `api`/`frontend` services, behind a `proxy`
-Compose profile (same pattern as the `observability` profile above -
+Compose profile (same pattern as the `observability` profile below -
 nothing starts unless you opt in). Caddy was chosen over nginx+certbot
 and Traefik for this project specifically: automatic HTTPS needs only a
 domain name in a Caddyfile (no separate certbot/acme-companion container,
@@ -591,7 +650,8 @@ label config or nginx-proxy's two-container/shared-volume setup.
   both under one HTTPS origin means the frontend can call a plain
   relative `/api` path instead of needing to know its own public domain
   baked in at Docker build time (`NEXT_PUBLIC_API_URL` is otherwise a
-  `next build`-time constant - see the Frontend section above).
+  `next build`-time constant - see the ["Frontend"](#frontend) section
+  above).
 
 ### How to enable it
 
@@ -610,12 +670,12 @@ stack with Caddy. Leaving it unset (the plain no-proxy path covered
 earlier in this README) keeps building the frontend against
 `http://localhost:8000` exactly as before.
 
-CORS (`CORS_ALLOWED_ORIGINS`, see "API service" above) does not need any
-change for this setup - same-origin path-routing means the browser never
-makes a cross-origin request to the API in the first place, so CORS is
-moot for traffic that goes through Caddy. Direct calls to the `api`
-service's own published port (still available, same as always) are
-unaffected either way.
+CORS (`CORS_ALLOWED_ORIGINS`, see ["API service"](#api-service) above)
+does not need any change for this setup - same-origin path-routing means
+the browser never makes a cross-origin request to the API in the first
+place, so CORS is moot for traffic that goes through Caddy. Direct calls
+to the `api` service's own published port (still available, same as
+always) are unaffected either way.
 
 ### None of this replaces the plain-HTTP setup
 
@@ -625,16 +685,20 @@ directly, with no Caddy involved and no HTTPS. This section only adds an
 opt-in HTTPS front door for a real-domain deployment; it changes nothing
 for local/dev use.
 
+If you hit a network-subnet collision bringing up this profile, see the
+[Troubleshooting / FAQ](#troubleshooting--faq) section - the same fix
+applies here as for plain `docker compose up`.
+
 ## Observability stack (optional, opt-in)
 
 Prometheus + Pushgateway + Grafana, for local metrics on scraping
-activity. `main.py`'s orchestrator (`huntloop.metrics`) pushes real
-per-run metrics to the Pushgateway once, as a batch, at the end of each
-run — jobs scraped/inserted/skipped-as-duplicate/errored (all labeled by
-company and source) plus the run's wall-clock duration. A pre-provisioned
-Grafana dashboard visualizes them. Metrics are observability, not a hard
-dependency: if the Pushgateway is unreachable, `main.py` logs one warning
-and the actual scrape/DB-insert run completes normally regardless.
+activity. `main.py`'s orchestrator (`huntloop.metrics`) pushes per-run
+metrics to the Pushgateway as one batch at the end of each run: jobs
+scraped, inserted, skipped-as-duplicate, and errored (labeled by company
+and source), plus the run's duration. A pre-provisioned Grafana dashboard
+visualizes them. Metrics are observability, not a hard dependency — if
+the Pushgateway is unreachable, `main.py` logs one warning and the
+scrape completes normally.
 
 These three services live behind the `observability` Compose profile, so
 a plain `docker-compose up` (regular dev work) never starts them:
@@ -759,46 +823,138 @@ exactly how it was built and what it contains (~7,200 rows, ~300 KB
 compressed). It's meant to make a fresh install look populated and
 demonstrate the sponsor-status/salary-estimate features quickly, not to
 replace Option A's real/current/full dataset for actual job-hunting use.
+Both sample datasets (this one and the job-postings sample from
+["Manual / local setup"](#manual--local-setup)/["Run with
+Docker"](#run-with-docker) above) are independent and verified safe to
+load in either order, or on their own — see `data/samples/README.md` for
+the full detail on how they do (and don't) interact.
 
 ## Adding a company to scrape
 
-Not exposed via any UI or CLI flag — companies are onboarded by running one
-of the discovery/detection scripts under `scripts/` (e.g.
-`detect_and_store_ats.py`, `detect_ats_for_sponsors.py`,
-`discover_and_store_ashby.py`, `discover_and_store_workday.py`,
-`discover_and_store_icims.py`, `discover_and_store_smartrecruiters.py`,
-`discover_and_store_gem.py`), which write a `companies` row with
-`ats_platform`/`ats_token` (and, for Workday, `careers_url`) populated. Most
-of these scripts gate auto-storing a match behind a confidence check and
-hold ambiguous matches for human confirmation via a `--confirmations` file,
-rather than guessing. See `CLAUDE.md` for the full per-platform detail on
-each discovery mechanism and its accuracy/collision caveats. Once a company
-has a row with a recognized `ats_platform`, `python main.py` picks it up on
-its next run automatically — no separate step is needed.
+Not exposed via any UI or CLI flag. Companies are onboarded by running
+one of the discovery/detection scripts under `scripts/` — `detect_and_store_ats.py`,
+`detect_ats_for_sponsors.py`, `discover_and_store_ashby.py`,
+`discover_and_store_workday.py`, `discover_and_store_icims.py`,
+`discover_and_store_smartrecruiters.py`, `discover_and_store_gem.py` —
+each of which writes a `companies` row with `ats_platform`/`ats_token`
+(and, for Workday, `careers_url`) populated. Most gate auto-storing a
+match behind a confidence check and hold ambiguous matches for human
+confirmation via a `--confirmations` file, rather than guessing. See
+`CLAUDE.md` for the full per-platform detail. Once a company has a
+recognized `ats_platform`, `python main.py` picks it up automatically on
+its next run.
+
+## Troubleshooting / FAQ
+
+### `docker compose up` fails: "Pool overlaps with other one on this address space"
+
+Another Docker network on this machine already uses the same subnet
+(`172.28.0.0/24` by default — pinned so Caddy has a stable IP for the API
+to trust). Check what's taken:
+
+```bash
+docker network ls
+docker network inspect <network-name>   # look under IPAM.Config for "Subnet"
+```
+
+Then set an unused subnet in `.env` (`HUNTLOOP_CADDY_IP` must be a `.x`
+address inside it):
+
+```bash
+HUNTLOOP_DOCKER_SUBNET=172.31.0.0/24
+HUNTLOOP_CADDY_IP=172.31.0.10
+```
+
+Both variables are documented with their defaults in `.env.example`.
+
+### `pip install` fails on `torch`, or embeddings crash at runtime (macOS Intel + Python 3.13)
+
+PyPI's last macOS x86_64 `torch` wheel (`2.2.2`) has no build for Python
+3.13. Under Python 3.12 it installs, but conflicts with the NumPy version
+everything else in `requirements.txt` needs, crashing at import
+(`NameError: name 'nn' is not defined` inside `sentence-transformers`).
+
+**Fix**: build the venv with Python 3.12 instead:
+
+```bash
+python3.12 -m venv .venv
+```
+
+That unblocks `pip install`, and the scraper/API/frontend/tests all work
+without `torch` ever importing (the pipeline treats it as optional and
+leaves `embedding`/`is_relevant` `NULL`). For anything that needs a
+*working* embedding model on this platform — `scripts/backfill_embeddings.py`,
+resume upload — run it inside the project's `app`/`api` Docker image
+instead (Linux, real Python 3.13 `torch` wheels, no conflict). Apple
+Silicon, Linux, and Windows aren't affected by any of this.
+
+### `POST /resumes/upload` returns a 500 (`ModuleNotFoundError: No module named 'sentence_transformers'`) on the manual/local path
+
+Resume upload and activation need a real embedding for the resume, so —
+unlike the scraper pipeline — they don't degrade gracefully to a `NULL`
+embedding; a resume with no embedding can't be matched against anything.
+
+**Fix**: run the API via Docker for this endpoint:
+
+```bash
+docker compose up --build -d api
+```
+
+Every other endpoint (`GET /jobs`, the dashboard, application tracking)
+works fine locally without Docker.
+
+### Docker's `seed` service ran, but I still see zero jobs on the dashboard
+
+Check `docker compose logs seed`. A line like `job_postings already has
+N row(s) - skipping sample seed` means real data (or a previous seed
+run) already exists, and the sample is deliberately not inserted on top
+of it.
+
+**Fix**, for a clean slate with the sample data back:
+
+```bash
+docker compose down -v   # drops the pgdata volume
+docker compose up --build
+```
+
+If the log instead shows an error before that check runs,
+`DATABASE_URL`/`POSTGRES_*` likely don't match between the `seed`/`api`
+services and your `.env` — see `.env.example`.
 
 ## Project status
 
-**Built:** a working multi-ATS scraper (Greenhouse, Lever, Workday,
-SmartRecruiters, Ashby, iCIMS, Gem) feeding a Postgres pipeline
-(companies/sources/postings/locations/skills/department/employment type);
-embedding-based resume-to-job match scoring plus a Groq/Gemini-backed
-matched/missing-skills engine; DOL H-1B/LCA sponsorship matching (optional,
-see "H-1B sponsorship data" below); a FastAPI backend (`GET /health`,
-`GET /jobs` with filtering/sorting/pagination, `GET /jobs/{id}`,
-`GET /jobs/departments`, `GET /jobs/employment-types`, `GET /jobs/locations`,
-`PATCH /jobs/{id}/application`, `GET /dashboard/stats`, `GET /resumes`,
-`POST /resumes/upload`, `PATCH /resumes/{id}/activate`,
-`POST /jobs/{id}/draft-answer`); a Next.js frontend covering a dashboard,
-job list/detail, an application tracker, resume version management, and a
-BYOK resume-grounded chat/drafting assistant on the job detail page; Alembic
-migrations, a pytest suite (300+ tests), CI running migrations + both the
-backend and frontend test suites against a real Postgres service on every
-push/PR; Docker for the full stack (`db`/`app`/`api`/`frontend`, plus
-opt-in `caddy`-fronted HTTPS and an opt-in Prometheus/Grafana observability
-stack); and local (launchd-scheduled) daily scrape + skills-matching +
-department-categorization automation. See `CLAUDE.md` for the complete,
-much more detailed picture (this section is deliberately a summary, not a
-substitute for it) and its "Current phase / what's next" section for what's
-still explicitly deferred (broader test coverage of frontend presentation
-components, an FK from `companies` to `lca_disclosures`, a hosted-DB/GitHub
-Actions deployment, an automated `pip-audit`/`bandit` CI step, and more).
+**Shipped**
+- Multi-ATS scraper (Greenhouse, Lever, Workday, SmartRecruiters, Ashby,
+  iCIMS, Gem) into a normalized Postgres schema (companies, postings,
+  locations, skills, department, employment type)
+- Resume-to-job match scoring (sentence embeddings blended with a
+  Groq/Gemini-backed matched/missing-skills engine)
+- Optional H-1B/DOL sponsorship matching with salary estimates (see
+  ["H-1B sponsorship data"](#h-1b-sponsorship-data-optional))
+- FastAPI backend — jobs, applications, resumes, dashboard stats, BYOK
+  drafting assistant ([full endpoint list](#api-service))
+- Next.js frontend — dashboard, filterable job list/detail, application
+  tracker, resume version management, BYOK chat assistant
+- Docker Compose for the full stack, pre-seeded with real sample data
+- CI running the full backend + frontend test suite against a real
+  Postgres on every push/PR
+- Optional HTTPS reverse proxy (Caddy) and Prometheus/Grafana
+  observability stack
+- Local (launchd-scheduled) daily scrape + skills-matching +
+  department-categorization automation
+
+**Not yet built**
+- Broader frontend test coverage — most presentation components
+  (`ScoreIndicator`, `KanbanBoard` drag-and-drop, `StatusControl`, etc.)
+  and any end-to-end/browser-level testing are still untested
+- A foreign key from `companies` to `lca_disclosures` — deliberately
+  deferred, since one company can span multiple legal entities in the
+  LCA data
+- A hosted-database / GitHub Actions deployment — scheduling is still
+  local-machine-only (`launchd`)
+- An automated `pip-audit`/`bandit` CI step, and full `requirements.txt`
+  pinning (currently partial)
+- An AI resume-review UI (missing-keyword/phrasing/formatting
+  suggestions) — no backend for it exists yet
+
+See `CLAUDE.md` for the complete architectural detail behind all of this.
