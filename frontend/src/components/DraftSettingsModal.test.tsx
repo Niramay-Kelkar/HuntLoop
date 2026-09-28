@@ -7,9 +7,11 @@ import { DraftSettingsModal } from "./DraftSettingsModal";
 describe("DraftSettingsModal", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    window.sessionStorage.clear();
   });
   afterEach(() => {
     window.localStorage.clear();
+    window.sessionStorage.clear();
   });
 
   it("is closed until the gear icon is clicked", () => {
@@ -19,7 +21,7 @@ describe("DraftSettingsModal", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
   });
 
-  it("saves the chosen provider and key to localStorage", () => {
+  it("saves the chosen provider (localStorage) and key (sessionStorage)", () => {
     render(<DraftSettingsModal />);
     fireEvent.click(screen.getByRole("button", { name: /drafting settings/i }));
 
@@ -28,6 +30,11 @@ describe("DraftSettingsModal", () => {
     fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
 
     expect(readDraftSettings()).toEqual({ provider: "gemini", apiKey: "my-real-looking-key" });
+    expect(window.localStorage.getItem("huntloop.draftAnswer.preferredProvider")).toBe("gemini");
+    expect(window.sessionStorage.getItem("huntloop.draftAnswer.apiKey.gemini")).toBe(
+      "my-real-looking-key",
+    );
+    expect(window.localStorage.getItem("huntloop.draftAnswer.apiKey.gemini")).toBeNull();
     expect(screen.getByText(/saved/i)).toBeInTheDocument();
   });
 

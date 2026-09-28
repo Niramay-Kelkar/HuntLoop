@@ -11889,3 +11889,17 @@ Left pending a product decision between the realistic options
 toggle, or keep as is and document the trade-off); nothing changed here.
 
 **Branch:** `fix/codeql-first-scan`.
+
+---
+
+## 2026-09-28: Move the BYOK drafting key to sessionStorage (`fix/byok-key-session-storage`)
+
+**Did:** Acted on the CodeQL "clear text storage of sensitive information" alert from the prior scan (`frontend/.../lib/draftSettings.ts:58`).
+
+**Threat model:** the key is sent only to this app's own same-origin `POST /jobs/{id}/draft-answer` endpoint, which forwards it server-side to the chosen provider; the browser never contacts the third-party LLM provider directly. The only `dangerouslySetInnerHTML` surface in the frontend (scraped job descriptions) runs through `sanitizeJobDescription()`'s DOMPurify allow-list, which narrows but does not eliminate a theoretical XSS-to-key-theft path.
+
+**Decision:** moved the API key from `localStorage` to `sessionStorage` (same key names, unchanged request/response wiring). The preferred-provider setting (not a secret) stays in `localStorage`. Any leftover key from the old behavior is removed from `localStorage` on load, never copied into `sessionStorage`; the user re-enters it once. In-memory-only was rejected as too disruptive for a page reused across many job listings (the key would be lost on every reload). An opt-in "remember on this device" toggle was rejected as more UI/state to build and test for a feature that already defaults to the safer behavior with this change; revisit only if user feedback asks for it. The remaining CodeQL alert on this line will be dismissed as an accepted trade-off once this lands, not treated as fully eliminated risk.
+
+**Verified:** frontend suite passing with 2 new/updated tests covering the storage split and the legacy-cleanup-on-load behavior; a real running app check confirmed the key lands in `sessionStorage` (absent from `localStorage`), survives a page reload, and a pre-seeded legacy `localStorage` entry is removed on load without appearing in `sessionStorage`; a real `POST /jobs/{id}/draft-answer` call with a real Groq key returned a genuine drafted answer.
+
+**Branch:** `fix/byok-key-session-storage`.
