@@ -11844,3 +11844,48 @@ disclosure data and public scraped job postings, no personal data. Only
   2026-09-08 to 2026-09-16 window (PRs #23-#32).
 
 **Branch:** `chore/pre-public-cleanup`.
+
+---
+
+## 2026-09-28: CodeQL default setup, first scan triage (`fix/codeql-first-scan`)
+
+**Did:** Enabled GitHub CodeQL default setup on this repo. The first scan
+returned 18 open alerts: 2 Medium ("Workflow does not contain
+permissions," `.github/workflows/ci.yml` lines 31 and 67), 15 High
+("Clear-text logging of sensitive information," across 8 onboarding/
+discovery scripts under `scripts/`), and 1 High ("Clear text storage of
+sensitive information," `frontend/src/lib/draftSettings.ts:58`).
+
+**Fixed:** Added a single top-level `permissions: contents: read` block
+to `ci.yml`. Neither the `test` nor `frontend-test` job uploads
+artifacts, posts a status/check, or calls any GitHub API beyond
+`actions/checkout`, so read-only `contents` at the workflow level covers
+both jobs; no job needed a broader per-job override.
+
+**Investigated (no code changes):** All 15 clear-text-logging alerts
+were traced value-by-value back to their source. All 15 are false
+positives: every logged value is either a public DOL LCA employer name
+(`lca_disclosures.employer_name_normalized`), a public ATS board
+slug/companyId/tenant name, a hardcoded public startup-company name from
+a curated candidate list, or a generic exception message from an
+unauthenticated public API call. None of the 15 log a credential,
+connection string, or personal data. CodeQL's heuristic most likely
+triggered on employment-adjacent variable names (`employer`, `name`)
+rather than any actual sensitive value.
+
+The storage alert (`draftSettings.ts:58`) is a real, already-documented
+design choice, not a bug: the user's own BYOK LLM API key is stored in
+`window.localStorage` so it survives across job-detail page visits. It
+is read back by `readApiKey`/`readDraftSettings` and sent only to this
+app's own same-origin `POST /jobs/{id}/draft-answer` endpoint, which
+forwards it server-side to the chosen provider; the browser never
+contacts the third-party provider directly. The only `dangerouslySetInnerHTML`
+usage in the frontend (scraped job descriptions on the job detail page)
+runs through `sanitizeJobDescription()` with a narrow DOMPurify
+allow-list (no `script`/`style`/`class`/event-handler attributes), which
+narrows but does not eliminate the theoretical XSS-to-key-theft path.
+Left pending a product decision between the realistic options
+(`sessionStorage`, in-memory only, an opt-in "remember on this device"
+toggle, or keep as is and document the trade-off); nothing changed here.
+
+**Branch:** `fix/codeql-first-scan`.

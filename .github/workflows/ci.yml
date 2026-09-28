@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [master]
 
+permissions:
+  contents: read
+
 env:
   POSTGRES_USER: ci_user
   POSTGRES_PASSWORD: ci_password
