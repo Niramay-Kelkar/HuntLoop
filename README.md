@@ -41,6 +41,7 @@ See ["Project status"](#project-status) for what's built, and
 - [Adding a company to scrape](#adding-a-company-to-scrape)
 - [Troubleshooting / FAQ](#troubleshooting--faq)
 - [Project status](#project-status)
+- [License](#license)
 
 ## Features
 
@@ -979,3 +980,7 @@ services and your `.env` — see `.env.example`.
   suggestions) — no backend for it exists yet
 
 See `CLAUDE.md` for the complete architectural detail behind all of this.
+
+## License
+
+MIT licensed. See [LICENSE](LICENSE).
