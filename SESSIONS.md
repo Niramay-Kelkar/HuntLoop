@@ -11532,3 +11532,259 @@ holding the advisory lock — confirmed identical failure on clean
 clean.
 
 **Branch:** `composite-match-score-v1` off `master`.
+
+---
+
+## 2026-09-26 — Document the real macOS Intel + Python 3.13 torch install failure (`fix/torch-macos-intel-py313-install`)
+
+**Did:** `pip install -r requirements.txt` fails outright on macOS Intel
+(x86_64) under Python 3.13 — confirmed via `pip download` that PyPI's
+last `macosx_x86_64` `torch` wheel (`2.2.2`) only ships up through
+`cp312`; there is no `cp313` wheel for this platform at all. No
+`requirements.txt` pin can fix this — it's a real PyPI availability gap,
+not a stale pin. Python 3.12 *does* resolve `torch==2.2.2` and lets the
+install complete, but README previously implied that alone fixed
+things; in fact, even under 3.12, importing `sentence-transformers`
+still crashes at runtime with a NumPy pre-2.0 vs. 2.0+ ABI conflict
+between `torch==2.2.2` and the rest of the pinned-latest ML stack
+(confirmed directly). README.md rewritten to document this accurately —
+the app already tolerates it gracefully everywhere it matters
+(`JobDataPipeline`'s broad `except Exception` around embedding calls),
+and Docker remains the documented path for anything on this platform
+that actually needs real embeddings.
+
+**Branch:** `fix/torch-macos-intel-py313-install`. PR #33.
+
+---
+
+## 2026-09-26 — Fix api's DATABASE_URL and auto-seed a real sample dataset on docker compose up (`feature/docker-autoseed-sample-data`)
+
+**Did:** Two real bugs found doing a genuine fresh-clone ("what does a
+stranger see") pass:
+
+- **`api`'s `DATABASE_URL` pointed at `host.docker.internal:5432`** —
+  the original dev machine's own real system Postgres — instead of the
+  bundled `db` service. A fresh clone's `api` container 500'd on every
+  endpoint, since nothing real lives at that address on a stranger's
+  machine. Fixed to the same `db:5432/${POSTGRES_DB}` pattern `app`
+  already used; the now-dead `extra_hosts` config was removed.
+- **Nothing ran `alembic upgrade head` automatically** — a fresh
+  `docker compose up` produced a fully unmigrated, empty database.
+  Added a new one-shot `seed` Compose service (`alembic upgrade head &&
+  python scripts/seed_sample_job_postings.py`); `app`/`api` now both
+  wait on it via `service_completed_successfully`.
+
+`scripts/seed_sample_job_postings.py` (new) loads a small curated real
+sample — 194 postings across 28 companies spanning all 7 implemented ATS
+platforms, ~256KB under `data/samples/` — so a stranger's first run
+shows a populated dashboard/job list instead of an empty one. Gated on a
+table-level `SELECT COUNT(*) FROM job_postings` check (not per-row):
+never inserts once real data (the sample, or a real scrape) already
+exists.
+
+**Two more real bugs found during end-to-end verification of this, not
+at review time:** `matched_skills`/`missing_skills` were being inserted
+as raw CSV text instead of parsed JSON (crashed `GET /jobs` with a
+pydantic `ValidationError` the first time this ran for real); and empty
+values need `sqlalchemy.null()`, not plain Python `None`, on that JSON
+column, or Postgres stores the literal JSON scalar `null` instead of a
+real SQL `NULL` — the exact same pitfall already documented for
+`huntloop.api.routers.resumes._reset_skills_matching()`.
+
+**Verified:** end-to-end in an isolated Docker project — fresh volume →
+`seed` runs migrations + inserts real data and exits 0 → `api`/`app`
+start only after → `api` serves real 200s → frontend renders real
+companies/postings; then a second `down`/`up` cycle with the volume kept
+confirms `seed` detects existing data and skips cleanly, no
+duplication.
+
+**Branch:** `feature/docker-autoseed-sample-data`. PR #34.
+
+---
+
+## 2026-09-27 — Make Docker network subnet/Caddy IP configurable to fix cold-start collision (`fix/docker-subnet-collision`)
+
+**Did:** `docker-compose.yml` hardcoded the `default` network to
+`172.28.0.0/24` and pinned Caddy's `ipv4_address` to `172.28.0.10`
+(referenced by `api`'s `TRUSTED_PROXY_IPS`). `172.28.0.0/24` is a
+common range other Compose projects also pick, so a stranger with
+another project already on that subnet — or a second clone of this
+repo — hit `"Pool overlaps with other one on this address space"` on a
+fresh `docker compose up`, with no documented fix. Both values are now
+env-var-substituted (`HUNTLOOP_DOCKER_SUBNET`, `HUNTLOOP_CADDY_IP`),
+defaulting to the original hardcoded values so nothing changes for
+anyone not hitting a collision; `TRUSTED_PROXY_IPS` reads the same
+`HUNTLOOP_CADDY_IP` variable Caddy is pinned to (not a second variable)
+so the two can't drift apart. Documented both in `.env.example` and
+added a README Troubleshooting entry for this exact error.
+
+**Also this session:** audited the manual/non-Docker setup path end-to-
+end against a real fresh Postgres database — venv + `pip install`,
+`alembic upgrade head`, `uvicorn`, `npm run dev` all work exactly as
+documented, and `scripts/seed_sample_job_postings.py` runs cleanly
+standalone (no Docker-specific assumptions, just needs `DATABASE_URL`).
+The real gap was documentation only: the Docker path's `seed` service
+(previous entry) auto-runs the sample seed, but the manual Setup
+section never mentioned it — a stranger following those steps literally
+would end up with a migrated but empty database instead of the same
+populated-on-first-run experience. Added the seed step to Setup, plus a
+verified copy-pasteable path to running the API/frontend locally and
+confirming real data via `curl`.
+
+**Branch:** `fix/docker-subnet-collision`. PR #35.
+
+---
+
+## 2026-09-27 — Verify the two sample datasets are safe together, then overhaul README.md for readability (`investigate/sample-seed-interplay`)
+
+**Did:**
+
+- **Investigated whether the LCA sponsor-disclosure sample and the
+  newer job-postings sample conflict when loaded together** against a
+  genuinely fresh database. They don't: no FK relationship exists
+  between `lca_disclosures` and `companies`/`job_postings`, both seed
+  scripts are independently idempotent, and running them in either
+  order (or only one, or re-running either) produces no errors or
+  partial state. Also confirmed, against a real fresh database with
+  both samples loaded, that the resume-upload → skills-matching flow
+  works correctly end to end against the job-postings sample
+  (content-hash reset/skip behaves exactly as documented; a real
+  `backfill_skills_matching.py` run produced sensible matched/missing
+  skills for both true-negative and true-positive cases), and that
+  `resolve_sponsor_matches.py` correctly links the two samples together
+  (27/28 sample companies resolved a real sponsor match) — which is
+  what makes sponsor/salary-estimate data show up on job-postings-sample
+  rows. No bugs found; this investigation only documents the verified
+  state in `data/samples/README.md`.
+- **Restructured README.md top-to-bottom for readability** —
+  reorganization only, no factual content changed or removed. Added a
+  plain-language intro, a table of contents, real badges (CI status,
+  Python/Postgres/Next.js versions), a Mermaid architecture diagram
+  (rendered locally via `@mermaid-js/mermaid-cli` to confirm valid
+  syntax before committing), and a Quick Start section presenting the
+  Docker and manual/local paths side by side. Consolidated the Docker
+  subnet-collision section, the macOS torch blockquote, and the
+  resume-upload/torch limitation found in the investigation above into
+  one real Troubleshooting/FAQ section. Checked for internal reference
+  breakage first (grepped `.env.example`, `scripts/`, `src/`,
+  `CLAUDE.md` for anything quoting the old heading text) — nothing
+  broke.
+- **Tightened README.md prose** in a follow-up pass — Project status
+  became a Shipped / Not yet built checklist; all four
+  Troubleshooting/FAQ entries rewritten in a problem/cause/fix shape
+  (cut the "isn't a bug" argumentative sentences, kept every error
+  message/command/reasoning); intro, Architecture blurb, and section
+  openers shortened. Verified before committing: every ToC anchor
+  re-checked against the (unchanged) heading text, the Mermaid diagram
+  re-rendered to confirm the fenced block wasn't touched, and every
+  removed line traced to an intentional tightening edit, not an
+  accidental drop.
+
+**Branch:** `investigate/sample-seed-interplay`. PR #36.
+
+---
+
+## 2026-09-27 — Fix search_path dependency in the embedding-column migration (`fix/migration-vector-search-path-dependency`)
+
+**Context:** Surfaced by the cold-start audit above — a test run there
+happened to use a non-default `search_path` to simulate database
+isolation, and hit a real migration bug nobody's normal setup had ever
+triggered.
+
+**Did:** Migration `08af7f0a020c` (adds `embedding vector(384)` to
+`resume_versions`/`job_postings`) imported the raw
+`pgvector.sqlalchemy.Vector` directly, which emits an unqualified
+`VECTOR(n)` in its DDL — that only resolves when `public` (where
+`CREATE EXTENSION vector` registers the type) is on the connecting
+role's `search_path`. Postgres's own default, but not guaranteed — and
+a real gap, since `huntloop.db_models.Vector` already exists
+specifically to schema-qualify this for every other pgvector column in
+the app. Grepped the whole `alembic/`/`src/` tree first to confirm this
+migration was the *only* place using the raw import.
+
+Edited the migration file in place rather than adding a new revision:
+the fix only changes how the column type is *declared* in Python
+(`public.VECTOR(n)` vs. bare `VECTOR(n)`), not the DDL a normal
+`search_path` produces — confirmed by compiling both column-type
+declarations and by running the migration against a fresh database
+under the real default `search_path` (`"$user", public`), which
+produced a byte-identical `\d` column description before and after.
+Every database that already applied this migration is unaffected.
+
+**Verified:** reproduced the original failure first — a fresh schema
+with `search_path` excluding `public` hit `type "vector" does not
+exist` on the unfixed migration. With the fix, `alembic upgrade head`
+now completes cleanly through to head under that same `search_path`.
+Ran the equivalent check under the true default `search_path` too (via
+a genuinely fresh database on the docker-compose `db` instance, never
+touching the real system Postgres) — identical output before/after, no
+regression. Full suite: 481 passed.
+
+**Branch:** `fix/migration-vector-search-path-dependency`. PR #37.
+
+---
+
+## 2026-09-27 — Skills-matching backlog check-in: two real cron bugs found and fixed (`fix/department-category-cron-pythonpath`)
+
+**Did:** A routine backlog check-in (real DB queries, no code changes)
+found `job_postings` relevant-population growth outpacing skills-
+matching throughput as expected (relevant postings 105,807 → 127,960
+day over day, matched count 22,323 → 24,712, coverage drifting 21.1% →
+19.3% — driven by ~19,800 items/day of continued scraping against a
+fixed ~2,300–2,400/day LLM-quota-capped backfill rate, not a backfill
+slowdown) — and, while checking why, found last night's (2026-09-27,
+~3am) scheduled cron run had two of its three stages fail outright:
+
+- **Stage 3 (department categorization) had never once succeeded via
+  cron.** `scripts/backfill_department_category.py` imports from
+  `huntloop` with no `sys.path` bootstrap, and `run_orchestrator_cron.sh`
+  never exports `PYTHONPATH` — every scheduled run since the script was
+  introduced (`9cffc1d`) failed at import time with
+  `ModuleNotFoundError`, confirmed across every retained `cron.log`
+  going back 15+ days. Its sibling script, `backfill_skills_matching.py`,
+  already has this exact two-line bootstrap; applied the identical fix.
+  Verified by replicating the cron wrapper's exact invocation
+  (`env -i PATH="$PATH" .venv/bin/python
+  scripts/backfill_department_category.py`, no `PYTHONPATH`)
+  before/after: `ModuleNotFoundError` before, clean run after. Then
+  actually ran the real backfill against the real database now that it
+  works: eligible rows (`department IS NOT NULL AND department_category
+  IS NULL`) went from 13,454 (2,037 distinct values) to 1,692 (180
+  distinct) in one run — **11,762 rows resolved**. Checked the rest of
+  `scripts/` for the same latent bug: `detect_and_store_ats.py` and
+  `detect_ats_for_sponsors.py` also lack the bootstrap, but neither is
+  invoked by any cron/launchd path — left unfixed, flagged for a
+  separate decision.
+- **Stage 1 (the scraper) failed with `Bind for 0.0.0.0:5433 failed:
+  port is already allocated`.** `docker-compose.yml`'s `db` service
+  hardcoded its host port with no override, unlike the network
+  subnet/Caddy IP (which already got this treatment — see the
+  cold-start-audit entry above). Changed the mapping to
+  `"${HUNTLOOP_DB_PORT:-5433}:5432"` (default unchanged), documented it
+  in `.env.example`, and added a matching README Troubleshooting entry.
+  Made `run_orchestrator_cron.sh`'s stage 1 retry once (30s sleep)
+  specifically on this error signature (grepped from the failure
+  output, not any other stage-1 failure), logging both attempts
+  distinctly. Testing this against a real forced collision surfaced a
+  genuine wrinkle: simply restarting the `db`/`seed` containers that
+  failed their network setup on attempt 1 isn't enough — a container
+  that failed its external port bind can still come back "Healthy" on
+  restart (its healthcheck runs *inside* the container, so it never
+  sees the host-side failure) while carrying a broken internal
+  network/DNS attachment, so `seed`/`app` still can't resolve the `db`
+  hostname even once the collision has genuinely cleared. Fixed by
+  force-removing (`docker compose rm -f db seed`) before the retry so
+  it fully recreates them — verified this was both necessary and
+  sufficient by reproducing the failure with and without it, using a
+  throwaway blocker container and port so the real running stack was
+  never touched.
+
+**Verified:** reproduced the original port collision exactly (`Bind for
+0.0.0.0:5433 failed: port is already allocated`) against the real,
+still-running `db` container; confirmed the override works (a second
+Compose project succeeds on an alternate port while the real one keeps
+running untouched); confirmed the retry logic recovers end-to-end once
+a collision clears, with both attempts logged distinctly. Full suite:
+481 passed throughout.
+
+**Branch:** `fix/department-category-cron-pythonpath`. PR #38.
