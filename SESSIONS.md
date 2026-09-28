@@ -11903,3 +11903,15 @@ toggle, or keep as is and document the trade-off); nothing changed here.
 **Verified:** frontend suite passing with 2 new/updated tests covering the storage split and the legacy-cleanup-on-load behavior; a real running app check confirmed the key lands in `sessionStorage` (absent from `localStorage`), survives a page reload, and a pre-seeded legacy `localStorage` entry is removed on load without appearing in `sessionStorage`; a real `POST /jobs/{id}/draft-answer` call with a real Groq key returned a genuine drafted answer.
 
 **Branch:** `fix/byok-key-session-storage`.
+
+---
+
+## 2026-09-28: Fix js-yaml Dependabot alert (`fix/js-yaml-dependabot`)
+
+**Did:** Fixed a High-severity Dependabot alert, "js-yaml: maxTotalMergeKeys does not limit CPU use for empty merge sources" (`GHSA-2883-xcg3-v3hh`), in `frontend/package-lock.json`. `js-yaml@4.3.1` was pulled in transitively via `eslint` → `@eslint/eslintrc`, a devDependency only — confirmed absent from the production tree via `npm ls js-yaml --omit=dev`.
+
+**Fix:** `npm update js-yaml` inside `frontend/` resolved it straight to the patched `4.3.2` (patched range `>=4.3.2`); no parent-package bump or `overrides` entry was needed. Only `frontend/package-lock.json` changed.
+
+**Verified:** clean `npm ci`, `npx tsc --noEmit` (0 errors), `npm run lint` (0 issues), `npm run build` (all 8 routes built), `npm test` (107/107 tests passing across 15 files). `npm audit` went from 1 high-severity finding to 0.
+
+**Branch:** `fix/js-yaml-dependabot`.
