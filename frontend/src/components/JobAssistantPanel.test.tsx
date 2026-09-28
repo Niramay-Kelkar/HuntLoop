@@ -42,9 +42,11 @@ function renderOpen(detail: JobDetail) {
 describe("JobAssistantPanel", () => {
   beforeEach(() => {
     window.localStorage.clear();
+    window.sessionStorage.clear();
   });
   afterEach(() => {
     window.localStorage.clear();
+    window.sessionStorage.clear();
     vi.restoreAllMocks();
   });
 
@@ -305,8 +307,8 @@ describe("JobAssistantPanel", () => {
       expect(screen.getByDisplayValue("one-off-override-key")).toBeInTheDocument();
       // The shared saved default is untouched by this local edit - this
       // form's own changes are session-local, never written back to
-      // localStorage (only DraftSettingsModal's Save button does that).
-      expect(window.localStorage.getItem("huntloop.draftAnswer.apiKey.groq")).toBe("saved-groq-key");
+      // sessionStorage (only DraftSettingsModal's Save button does that).
+      expect(window.sessionStorage.getItem("huntloop.draftAnswer.apiKey.groq")).toBe("saved-groq-key");
     });
   });
 });

@@ -9,8 +9,9 @@ import type { DraftAnswerProvider } from "@/types/api";
  * App-wide, gear-icon-triggered settings drawer for the BYOK drafting
  * feature (see JobAssistantPanel.tsx's DraftingSection and
  * lib/draftSettings.ts). Lets the user set a preferred provider + API
- * key ONCE instead of retyping it on every job detail page - saved to
- * this browser's localStorage only (see lib/draftSettings.ts's
+ * key ONCE instead of retyping it on every job detail page - the
+ * preferred provider is saved to this browser's localStorage, but the
+ * API key itself is saved to sessionStorage (see lib/draftSettings.ts's
  * docstring for why: no server-side/account-backed version of this
  * exists or is planned until real user auth exists as its own separate
  * project).
@@ -99,8 +100,9 @@ export function DraftSettingsModal() {
 
             <p className="text-xs leading-relaxed text-text-subtle">
               Set your preferred provider and API key once - job pages will pre-fill this
-              automatically. Stored only in this browser (localStorage), never on our servers.
-              You can still override the key for a single request on any job page.
+              automatically. Your API key is kept only for this browser session and is never
+              stored on our servers. You can still override the key for a single request on
+              any job page.
             </p>
 
             <label className="flex flex-col gap-1 text-sm text-text">
