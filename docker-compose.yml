@@ -16,7 +16,16 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "5433:5432"
+      # Overridable via HUNTLOOP_DB_PORT (default 5433, unchanged) for the
+      # same reason HUNTLOOP_DOCKER_SUBNET/HUNTLOOP_CADDY_IP are overridable
+      # above - another Docker Compose project on this host (including a
+      # second clone/checkout of this same repo) may already be bound to
+      # this host port, which collides with both a manual `docker compose
+      # up` and the nightly cron scrape's `docker compose run app ...` (see
+      # README.md's Troubleshooting section and SESSIONS.md's 2026-09-27
+      # port-collision investigation). Only the host side is overridable -
+      # the container's own internal port stays 5432.
+      - "${HUNTLOOP_DB_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql
     healthcheck:

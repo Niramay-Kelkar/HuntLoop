@@ -250,8 +250,42 @@ PYTHON="$REPO_ROOT/.venv/bin/python"
   fi
 
   echo "--- stage 1/2: scraper orchestrator (main.py, via docker compose run) ---"
-  docker compose run --rm --build -e DATABASE_URL="$DB_URL_FOR_DOCKER" app python main.py
-  scrape_status=$?
+  # A specific, known collision (see CLAUDE.md/SESSIONS.md's 2026-09-27
+  # port-collision investigation, and docker-compose.yml's HUNTLOOP_DB_PORT
+  # comment): another Compose project on this host - including a second
+  # clone/checkout of this repo - can already be bound to db's host port,
+  # which fails `docker compose run`'s own `db` dependency with "Bind for
+  # 0.0.0.0:<port> failed: port is already allocated". That's often
+  # transient (the other process finishing and releasing the port), so -
+  # ONLY for this specific error signature, not any other stage 1 failure -
+  # retry once after a short sleep before giving up. STAGE1_OUT captures
+  # the attempt's combined output (via tee, so it still reaches cron.log
+  # through this block's own outer redirect) purely so it can be grepped
+  # for that signature; PIPESTATUS[0] is docker compose run's own exit
+  # code, not tee's.
+  STAGE1_OUT="$(mktemp "$REPO_ROOT/logs/.stage1_attempt.XXXXXX")"
+  docker compose run --rm --build -e DATABASE_URL="$DB_URL_FOR_DOCKER" app python main.py 2>&1 | tee "$STAGE1_OUT"
+  scrape_status=${PIPESTATUS[0]}
+  if [ "$scrape_status" -ne 0 ] && grep -q "port is already allocated" "$STAGE1_OUT"; then
+    echo "stage 1/2, attempt 1: failed with a host-port allocation collision (exit code $scrape_status) - another Docker Compose project on this host is likely holding db's host port. This is often transient - retrying once after 30s (see HUNTLOOP_DB_PORT in .env.example/README.md if this keeps happening)."
+    sleep 30
+    # Force-remove (not just restart) the db/seed containers that failed
+    # their network setup on attempt 1 before retrying - confirmed by
+    # testing (see SESSIONS.md's 2026-09-27 port-collision investigation)
+    # that simply restarting a container whose external port bind already
+    # failed once can come back "Healthy" (its healthcheck runs inside the
+    # container, unaffected by the host port) while still carrying a
+    # broken internal network/DNS attachment from the failed attempt -
+    # `seed`/`app` then can't resolve the `db` hostname even though the
+    # collision has genuinely cleared. Removing them here forces a full
+    # recreate on the retry instead of reusing that half-broken state.
+    # Failure to remove (e.g. nothing to remove) is not itself fatal here.
+    docker compose rm -f db seed
+    docker compose run --rm --build -e DATABASE_URL="$DB_URL_FOR_DOCKER" app python main.py 2>&1 | tee "$STAGE1_OUT"
+    scrape_status=${PIPESTATUS[0]}
+    echo "stage 1/2, attempt 2 (retry): finished with exit code $scrape_status"
+  fi
+  rm -f "$STAGE1_OUT"
   echo "--- stage 1/2 finished with exit code $scrape_status ---"
 
   echo "--- stage 2/3: skills-matching backfill (scripts/backfill_skills_matching.py) ---"

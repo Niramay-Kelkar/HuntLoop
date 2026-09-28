@@ -867,6 +867,27 @@ HUNTLOOP_CADDY_IP=172.31.0.10
 
 Both variables are documented with their defaults in `.env.example`.
 
+### `docker compose up` (or the nightly cron scrape) fails: "Bind for 0.0.0.0:5433 failed: port is already allocated"
+
+Another Docker Compose project on this host — a different project, or a
+second clone/checkout of this repo — is already bound to host port 5433
+(`db`'s host-mapped port). Check what's holding it:
+
+```bash
+docker ps -a
+lsof -i :5433   # or the platform equivalent
+```
+
+Then set an unused host port in `.env`:
+
+```bash
+HUNTLOOP_DB_PORT=5434
+```
+
+Documented with its default in `.env.example`. The container's own
+internal Postgres port (5432) is unaffected — this only changes the
+host-side mapping.
+
 ### `pip install` fails on `torch`, or embeddings crash at runtime (macOS Intel + Python 3.13)
 
 PyPI's last macOS x86_64 `torch` wheel (`2.2.2`) has no build for Python
