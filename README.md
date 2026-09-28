@@ -983,4 +983,4 @@ See `CLAUDE.md` for the complete architectural detail behind all of this.
 
 ## License
 
-MIT licensed — see [LICENSE](LICENSE).
+MIT licensed. See [LICENSE](LICENSE).

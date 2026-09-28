@@ -1,11 +1,8 @@
 # SESSIONS.md
 
-This is the project's running engineering log — one dated entry per work
-session, oldest entry first and newest last. If you're new here, start
-with README.md instead; this file is detail/history, not orientation.
-
-Append-only running log, one entry per work session. Short and factual —
-detail lives in the external prompt log, not here.
+This is the project's running engineering log, one dated entry per work
+session, oldest entry first. Entries are short and factual. New readers
+should start with README.md instead.
 
 ---
 
@@ -11539,26 +11536,26 @@ clean.
 
 ---
 
-## 2026-09-08 to 2026-09-16 — PRs #23-#32 (log gap)
+## 2026-09-08 to 2026-09-16: PRs #23-#32 (log gap)
 
 **Did (one line per merged PR, from the PR title):**
-- **#23** `job-detail-employment-type` — Show employment type on the job detail page header
-- **#24** `job-detail-chat-assistant-slice1` — Add a DB-lookup-only Q&A panel to the job detail page
-- **#25** `job-detail-chat-assistant-slice2-drafting` — Add a BYOK resume-grounded application-answer drafting endpoint
-- **#26** `job-detail-chat-assistant-floating-launcher` — Convert job assistant panel to a floating launcher and fix answer state
-- **#27** `fix-drafting-plaintext-output-and-copy-button` — Instruct drafting prompt to output plain text and add a copy button
-- **#28** `dockerize-frontend` — Dockerize the frontend so docker compose up brings up the full stack
-- **#29** `lca-optional-sample-data` — Make LCA/H-1B sponsorship data optional with manual-download docs and a sample dataset
-- **#30** `caddy-reverse-proxy` — Add an optional Caddy reverse proxy for self-hosted HTTPS
-- **#31** `fix-critical-rce-cves` — Bump Next.js and pdfminer.six to fix two confirmed-live-reachable RCE CVEs
-- **#32** `fix-caddy-ports-and-resume-dos` — Close plaintext Caddy bypass ports and fix resume-upload DoS
+- **#23** `job-detail-employment-type`: Show employment type on the job detail page header
+- **#24** `job-detail-chat-assistant-slice1`: Add a DB-lookup-only Q&A panel to the job detail page
+- **#25** `job-detail-chat-assistant-slice2-drafting`: Add a BYOK resume-grounded application-answer drafting endpoint
+- **#26** `job-detail-chat-assistant-floating-launcher`: Convert job assistant panel to a floating launcher and fix answer state
+- **#27** `fix-drafting-plaintext-output-and-copy-button`: Instruct drafting prompt to output plain text and add a copy button
+- **#28** `dockerize-frontend`: Dockerize the frontend so docker compose up brings up the full stack
+- **#29** `lca-optional-sample-data`: Make LCA/H-1B sponsorship data optional with manual-download docs and a sample dataset
+- **#30** `caddy-reverse-proxy`: Add an optional Caddy reverse proxy for self-hosted HTTPS
+- **#31** `fix-critical-rce-cves`: Bump Next.js and pdfminer.six to fix two confirmed-live-reachable RCE CVEs
+- **#32** `fix-caddy-ports-and-resume-dos`: Close plaintext Caddy bypass ports and fix resume-upload DoS
 
 Two direct follow-up commits on `master` after #32 (2026-09-16, documentation
 only, no code changed): "Fix stale documentation: TLS/Caddy, frontend
 containerization, security fixes, README drift" and "Fix stale TLS warning
 in drafting module docstrings."
 
-Detailed session notes were not recorded for this window — see `git log
+Detailed session notes were not recorded for this window. See `git log
 --first-parent master` for the individual commits and PR merges.
 
 ---
@@ -11819,27 +11816,27 @@ a collision clears, with both attempts logged distinctly. Full suite:
 
 ---
 
-## 2026-09-28 — Pre-public-release audit + cleanup (`chore/pre-public-cleanup`)
+## 2026-09-28: Pre-public-release audit + cleanup (`chore/pre-public-cleanup`)
 
 **Did:** Ran a read-only pre-public-release audit of the repo (no code
 changes), then a small follow-up cleanup pass based on its findings.
 
 **Audit summary:** `gitleaks` over full history plus a manual grep for
 common secret patterns (`GROQ`/`GEMINI`/`MISTRAL`/`API_KEY`/`gsk_`/`AIza`/
-`sk-`/`password=`/`DATABASE_URL`) found no real secrets — only a
+`sk-`/`password=`/`DATABASE_URL`) found no real secrets. Only a
 documented Grafana default login (`admin:admin`), synthetic test-fixture
-keys, and CI placeholder values. `.env` was never committed at any point
-in history. No personal documents (resume, etc.) were ever committed.
-`data/samples/` was confirmed to hold only public DOL LCA disclosure data
-and public scraped job postings, no personal data. Only `master` exists
-on `origin` — no other local branch has been pushed.
+keys, and CI placeholder values turned up. `.env` was never committed at
+any point in history. No personal documents (resume, etc.) were ever
+committed. `data/samples/` was confirmed to hold only public DOL LCA
+disclosure data and public scraped job postings, no personal data. Only
+`master` exists on `origin`; no other local branch has been pushed.
 
 **Cleanup, based on the audit's should-fix items:**
 - Added `LICENSE` (MIT, Copyright (c) 2026 Niramay Kelkar) and a
   "License" section + table-of-contents entry in README.md.
 - Confirmed `.claude/RESUME.md` (a Claude Code session-checkpoint
   artifact the audit flagged) does not exist at `HEAD` on `master` and
-  nothing under `.claude/` is tracked — the existing blanket `.claude/`
+  nothing under `.claude/` is tracked. The existing blanket `.claude/`
   `.gitignore` rule already prevents it from being committed again, so
   no file removal or `.gitignore` change was needed.
 - Added a short orienting header to the top of this file.
