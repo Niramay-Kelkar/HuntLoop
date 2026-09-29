@@ -11915,3 +11915,21 @@ toggle, or keep as is and document the trade-off); nothing changed here.
 **Verified:** clean `npm ci`, `npx tsc --noEmit` (0 errors), `npm run lint` (0 issues), `npm run build` (all 8 routes built), `npm test` (107/107 tests passing across 15 files). `npm audit` went from 1 high-severity finding to 0.
 
 **Branch:** `fix/js-yaml-dependabot`.
+
+---
+
+## 2026-09-28: Add feedback channels and honest documentation (`chore/feedback-channels`)
+
+**Did:** Added GitHub issue templates, a SECURITY.md, and three new README sections so visitors to the now-public repo have a real way to report bugs, ideas, and wrong sponsor matches, and can see the data's real limits and how the project was built. No application code changed.
+
+**Issue templates:** `.github/ISSUE_TEMPLATE/bug_report.yml` (what happened, expected behavior, repro steps, how it was run, OS), `feature_request.yml` (problem, idea, who benefits), `wrong_sponsor_match.yml` (company as shown, expected match, what the sponsor data showed, why it looks wrong, labeled `data-quality`), and `config.yml` (blank issues enabled, contact links to Discussions and private security advisory reporting). All four YAML files parsed cleanly.
+
+**SECURITY.md:** none existed before this. Added a short policy pointing to GitHub's private vulnerability reporting instead of public issues, and noting the project's use of CodeQL, secret scanning, and Dependabot (all three have real evidence in the git history, the `fix/codeql-first-scan` and `fix/js-yaml-dependabot` branches).
+
+**README:** added "Feedback and contributions" (links to the three issue templates and Discussions, plus a note to run `pytest`/`npm test` before opening a PR), "Data limitations" (an LCA filing is not an approved visa, one filing can cover multiple positions, company matching is fuzzy via `rapidfuzz` `token_set_ratio` at threshold 88, and it can mismatch), and "How this was built" (AI coding tools with a plan-first, small-reviewed-commits, tests-and-CI-on-every-merge workflow, a pre-launch security audit, and `SESSIONS.md` as project memory, with architecture and product decisions made by the author). All three added to the table of contents with matching anchors.
+
+**LCA years, verified against real data, not guessed:** queried the running `lca_disclosures` table directly (`SELECT fiscal_year, COUNT(*) ... GROUP BY fiscal_year`) and cross-checked against the real files in `data/raw/dol_lca/` matching `scripts/ingest_lca_disclosures.py`'s `LCA_Disclosure_Data_FY<YYYY>_Q<N>.xlsx` pattern (excluding the legacy H-1B file and the Appendix A file, which that script explicitly skips). Result: fiscal years 2021 (201,711 rows), 2022 (114,826), 2024 (543,588), and 2025 (571,196), totaling 1,431,321, matching the 11-file count already noted elsewhere in the project's docs. Fiscal year 2023 is not currently loaded. The README states this plainly and says more years are planned.
+
+**Verified:** all four issue-template YAML files load with `yaml.safe_load` with no errors. README table-of-contents anchors checked against the actual heading text for all three new sections. Grepped the diff for em dashes and semicolons in the newly added prose and fixed every hit (two em dashes in "How this was built", two in "Data limitations", one in "Feedback and contributions") until the diff was clean.
+
+**Branch:** `chore/feedback-channels`.

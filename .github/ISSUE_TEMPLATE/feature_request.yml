@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest an idea or improvement for HuntLoop
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What problem are you running into that this would solve?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: The idea
+      description: Describe the feature or change you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: who-benefits
+    attributes:
+      label: Who benefits
+      description: Who would use this, and how would it help them?
+    validations:
+      required: false
