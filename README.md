@@ -40,6 +40,9 @@ See ["Project status"](#project-status) for what's built, and
 - [H-1B sponsorship data](#h-1b-sponsorship-data-optional)
 - [Adding a company to scrape](#adding-a-company-to-scrape)
 - [Troubleshooting / FAQ](#troubleshooting--faq)
+- [Feedback and contributions](#feedback-and-contributions)
+- [Data limitations](#data-limitations)
+- [How this was built](#how-this-was-built)
 - [Project status](#project-status)
 - [License](#license)
 
@@ -942,6 +945,67 @@ docker compose up --build
 If the log instead shows an error before that check runs,
 `DATABASE_URL`/`POSTGRES_*` likely don't match between the `seed`/`api`
 services and your `.env` — see `.env.example`.
+
+## Feedback and contributions
+
+Found a bug, have an idea, or spotted a company matched to the wrong H-1B
+sponsor? Open an issue with one of the templates:
+
+- [Bug report](../../issues/new?template=bug_report.yml)
+- [Feature request](../../issues/new?template=feature_request.yml)
+- [Wrong sponsor match](../../issues/new?template=wrong_sponsor_match.yml)
+
+For open-ended questions or ideas, use
+[Discussions](https://github.com/Niramay-Kelkar/HuntLoop/discussions)
+instead. Security vulnerabilities should go through private reporting,
+see [SECURITY.md](SECURITY.md), not a public issue.
+
+Before opening a pull request, run the test suite locally
+(`pytest` for the backend, `cd frontend && npm test` for the frontend,
+see ["Running tests"](#running-tests)) and make sure it passes.
+
+## Data limitations
+
+The H-1B sponsorship data in HuntLoop comes from real DOL LCA (Labor
+Condition Application) disclosure filings, and it has real limits worth
+understanding before you rely on it:
+
+- **A filing is not an approved visa.** An LCA is a step an employer
+  files with the Department of Labor before petitioning for an H-1B, and
+  it is not proof that a visa was granted, and it is not the same thing
+  as an approved H-1B petition.
+- **One filing can cover multiple positions.** A single LCA can list
+  more than one position for the same job title and worksite, so a
+  filing count is not a headcount of individuals sponsored.
+- **Company matching is fuzzy, not exact.** Scraped company names are
+  matched against DOL employer names with `rapidfuzz`'s
+  `token_set_ratio` at a threshold of 88 (see
+  `src/huntloop/matching/fuzzy_match.py`). This resolves most real
+  matches correctly, but a company can still match the wrong employer,
+  or fail to match one it should, especially for short or generic
+  names. `sponsor_name_overrides` exists specifically to correct known
+  bad matches by hand, see the [wrong sponsor match issue
+  template](../../issues/new?template=wrong_sponsor_match.yml) if you
+  spot one.
+- **Current data covers fiscal years 2021, 2022, 2024, and 2025** (the
+  quarterly files actually loaded, see `scripts/ingest_lca_disclosures.py`
+  and `data/raw/dol_lca/`). Fiscal year 2023 is not currently loaded.
+  More years are planned as further quarterly files are ingested.
+
+## How this was built
+
+HuntLoop was built with AI coding tools, primarily Claude Code, using a
+plan-first workflow: changes were scoped and reviewed before being
+written, landed as small reviewed commits rather than large drops, and
+went through the project's test suite and CI on every merge. The project
+also went through a pre-launch security audit before being made public,
+and a session log (`SESSIONS.md`) was kept throughout as a running
+project memory, recording what was built, what was tried and rejected,
+and why.
+
+The architecture and product decisions, what to build, which
+trade-offs to take, what to defer, were made by the author. AI tools
+were used to help implement and review that direction, not to set it.
 
 ## Project status
 

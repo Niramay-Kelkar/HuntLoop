@@ -1,0 +1,33 @@
+name: Wrong sponsor match
+description: Report a company matched to the wrong H-1B sponsor record
+title: "[Sponsor match]: "
+labels: ["data-quality"]
+body:
+  - type: input
+    id: company-shown
+    attributes:
+      label: Company name as shown in HuntLoop
+      description: The company name exactly as it appears in the app.
+    validations:
+      required: true
+  - type: input
+    id: expected-match
+    attributes:
+      label: The company you think it should match
+      description: What sponsor record do you believe this company should be matched to, if any?
+    validations:
+      required: true
+  - type: textarea
+    id: what-data-showed
+    attributes:
+      label: What the sponsor data showed
+      description: Describe or paste what HuntLoop displayed (sponsor name, filings, salary estimate, etc).
+    validations:
+      required: true
+  - type: textarea
+    id: why-wrong
+    attributes:
+      label: Why it looks wrong
+      description: Explain why you believe this match is incorrect.
+    validations:
+      required: true
