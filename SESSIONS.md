@@ -11981,3 +11981,23 @@ toggle, or keep as is and document the trade-off); nothing changed here.
 **Verified:** backend suite 502 tests (499 pass, 3 fail only from this machine's known local-Postgres connection-slot limit - same pre-existing issue `feat/demo-mode`'s entry already documented, and confirmed all 3 pass cleanly in isolation). Frontend suite 118/118 passing (untouched by this branch - one run under heavy concurrent Docker builds saw 6 flaky timeouts, confirmed not reproducible on a clean rerun or against `master`). Diff grepped clean for secrets/connection strings and for semicolons/em dashes in added prose (the only semicolons remaining are inside a literal required SQL statement, `CREATE EXTENSION IF NOT EXISTS vector;`, quoted in the runbook and script docstrings).
 
 **Branch:** `chore/demo-deploy-prep`.
+
+---
+
+## 2026-10-01: Fix database connection leak in tests (`chore/demo-deploy-prep`)
+
+**Did:** CI's backend test job failed with `FATAL: sorry, too many clients already` against the CI Postgres service, on a single test that had nothing to do with the real cause. Investigated and fixed a real connection leak in the test fixtures, not a flaky test.
+
+**CI's Postgres service:** `.github/workflows/ci.yml` runs `pgvector/pgvector:pg18` with no `max_connections` override, so it uses the image's stock default of 100 (confirmed directly against a fresh container). `tests/conftest.py`'s `test_database_url` fixture connects via a plain `create_engine(DATABASE_URL)` (SQLAlchemy's default `QueuePool`, no `NullPool`, no `pool_pre_ping`).
+
+**Root cause:** `tests/conftest.py`'s `pipeline` fixture is function-scoped and constructs a new `JobDataPipeline(test_database_url)` per test. `JobDataPipeline.__init__` (`src/huntloop/pipelines.py`) calls `create_engine(...)`, so every test that uses `pipeline` (directly, or via `db_session`/`api_client`/`demo_api_client`) creates its own brand new engine and connection pool. The fixture's teardown closed the one session it opened for the end-of-test cleanup `DELETE`s, but never disposed the engine itself. A SQLAlchemy Engine/Pool holds internal locks and event-listener registries that form reference cycles, so CPython's plain refcounting does not reclaim it - it waits on a full garbage-collection pass, which does not reliably run between every test. Across hundreds of tests, the idle pooled connections from already-finished tests piled up and eventually hit Postgres's connection cap. This fixture (and this gap) predates this branch - `feat/demo-mode` added 14 tests that use these fixtures and `chore/demo-deploy-prep` added more test volume on top, pushing an already near-the-edge suite over it.
+
+**Reproduced directly**, not assumed: started a fresh, dedicated `pgvector/pgvector:pg18` container (`max_connections` confirmed 100, nothing else connected to it), ran migrations, then ran the full suite while polling `pg_stat_activity` every half second. Connection count climbed monotonically through the run to 97, at which point a test failed with the exact same `too many clients already` error CI reported. A snapshot at 76 connections showed 79 idle connections whose last query was literally `COMMIT`, matching the `pipeline` fixture's own teardown statement exactly.
+
+**Fix:** added `pl.engine.dispose()` to the `pipeline` fixture's teardown, after the existing session-based cleanup, so every test's engine and all of its pooled connections close deterministically before the next test starts, instead of waiting on garbage collection.
+
+**Why not just raise CI's max_connections:** that would hide the leak rather than fix it, and this same `create_engine`-per-call pattern exists in real app code too (every `JobDataPipeline(...)` call, not just in tests), so leaving the root cause in place would still let a real long-running process leak connections the same way. Not changed here, and the evidence shows it is not needed as a safety margin either - the real fix alone pins peak connections during a full suite run at 3-4, not just under 100, run twice in a row against the same max_connections-100 container with no failures.
+
+**Verified:** full backend suite run twice against a freshly started, dedicated Postgres container (max_connections 100, matching CI, nothing else connected) - 502 passed both times, peak connection count 4 then 3 (down from 97 before the fix). Also reran clean against the normal local dev Postgres, 502/502.
+
+**Branch:** `chore/demo-deploy-prep`.
