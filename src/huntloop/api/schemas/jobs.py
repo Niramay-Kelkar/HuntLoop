@@ -199,3 +199,7 @@ class ApplicationStatusResponse(BaseModel):
     applied_at: datetime | None = None
     status_updated_at: datetime
     notes: str | None = None
+    # True only in demo mode, where this endpoint is a no-op - the
+    # response reflects what would have been written, but nothing is
+    # persisted. Always False outside demo mode.
+    demo: bool = False

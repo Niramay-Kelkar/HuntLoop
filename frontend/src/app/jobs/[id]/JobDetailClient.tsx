@@ -11,6 +11,7 @@ import { ScoreIndicator } from "@/components/ScoreIndicator";
 import { StatusControl } from "@/components/StatusControl";
 import { avatarColors, formatDate, formatWage, initials, timeAgo } from "@/lib/theme";
 import { sanitizeJobDescription } from "@/lib/sanitizeHtml";
+import { isDemoMode } from "@/lib/demoMode";
 
 export function JobDetailClient({ jobId }: { jobId: number }) {
   const job = useQuery({
@@ -180,7 +181,7 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
             </div>
           </div>
 
-          <JobAssistantPanel detail={detail} />
+          {!isDemoMode() && <JobAssistantPanel detail={detail} />}
 
           {description && (
             <div className="border border-border bg-surface p-6">

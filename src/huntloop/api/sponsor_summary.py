@@ -31,7 +31,8 @@ from dataclasses import dataclass
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from huntloop.db_models import Company, LcaDisclosure
+from huntloop.db_models import Company, LcaDisclosure, SponsorOverallAggregate
+from huntloop.demo_mode import is_demo_mode
 
 # The mislabeled-unit pattern the Phase 1 audit originally found, and
 # reconfirmed against this table's real data in this module's docstring
@@ -55,14 +56,44 @@ class SponsorSummary:
 def get_sponsorship_summary(session: Session, company: Company) -> SponsorSummary | None:
     """Sponsor summary for `company`, from its persisted
     `matched_sponsor_employer_name` (Step 8's scripts/resolve_sponsor_matches.py) -
-    no live matching. Returns None if the company has no resolved match, or
-    if that matched name turns out to have no lca_disclosures rows (e.g.
-    the match was resolved before some data change - defensive, not
-    expected in practice)."""
+    no live matching. Returns None if the company has no resolved match.
+
+    In demo mode, reads the small precomputed sponsor_overall_aggregates
+    table instead of lca_disclosures - a demo database never carries raw
+    LCA rows (see scripts/build_demo_dataset.py), and that table is built
+    with this exact same aggregation logic run read-only against
+    production, so the numbers match."""
     name = company.matched_sponsor_employer_name
     if not name:
         return None
 
+    if is_demo_mode():
+        return _get_sponsorship_summary_from_aggregate(session, name)
+    return _get_sponsorship_summary_from_lca(session, name)
+
+
+def _get_sponsorship_summary_from_aggregate(session: Session, name: str) -> SponsorSummary | None:
+    row = session.execute(
+        select(SponsorOverallAggregate).where(SponsorOverallAggregate.employer_name_normalized == name)
+    ).scalars().first()
+    if row is None:
+        return None
+
+    return SponsorSummary(
+        matched_employer_name=name,
+        most_recent_fiscal_year=row.most_recent_fiscal_year,
+        total_lcas_most_recent_fiscal_year=row.total_lcas_most_recent_fiscal_year,
+        median_wage=float(row.median_wage) if row.median_wage is not None else None,
+        most_frequent_job_title=row.most_frequent_job_title,
+        latest_case_status=row.latest_case_status,
+    )
+
+
+def _get_sponsorship_summary_from_lca(session: Session, name: str) -> SponsorSummary | None:
+    """Returns None if the company has no resolved match, or if that
+    matched name turns out to have no lca_disclosures rows (e.g. the
+    match was resolved before some data change - defensive, not
+    expected in practice)."""
     most_recent_fy = session.execute(
         select(func.max(LcaDisclosure.fiscal_year)).where(LcaDisclosure.employer_name_normalized == name)
     ).scalar_one_or_none()

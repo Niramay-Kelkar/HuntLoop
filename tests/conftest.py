@@ -115,3 +115,25 @@ def api_client(db_session):
         yield TestClient(app)
     finally:
         app.dependency_overrides.pop(get_db, None)
+
+
+@pytest.fixture()
+def demo_api_client(db_session, monkeypatch):
+    """A FastAPI TestClient for a fresh demo-mode app, built via
+    huntloop.api.main.create_app() rather than the shared module-level
+    `app` the plain api_client fixture uses - each test gets its own app
+    instance (and its own demo rate limiter, see huntloop.api.main),
+    pointed at the same isolated test schema as every other fixture."""
+    from fastapi.testclient import TestClient
+
+    from huntloop.api.dependencies import get_db
+    from huntloop.api.main import create_app
+
+    monkeypatch.setenv("DEMO_MODE", "true")
+    demo_app = create_app()
+
+    def _override_get_db():
+        yield db_session
+
+    demo_app.dependency_overrides[get_db] = _override_get_db
+    yield TestClient(demo_app)

@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as api from "@/lib/api";
 import { ToastProvider } from "@/components/Toast";
@@ -67,5 +67,23 @@ describe("JobDetailClient header meta", () => {
     expect(await screen.findByRole("heading", { name: "Backend Engineer" })).toBeInTheDocument();
     expect(screen.queryByText("Internship")).not.toBeInTheDocument();
     expect(screen.queryByText("N/A")).not.toBeInTheDocument();
+  });
+});
+
+describe("JobDetailClient in demo mode", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.stubEnv("NEXT_PUBLIC_DEMO_MODE", "true");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("does not render the AI assistant panel", async () => {
+    renderDetail(makeDetail({ job_title: "Backend Engineer" }));
+    expect(await screen.findByRole("heading", { name: "Backend Engineer" })).toBeInTheDocument();
+    expect(screen.queryByText("Ask about this job")).not.toBeInTheDocument();
+    expect(screen.queryByText("Draft an application answer")).not.toBeInTheDocument();
   });
 });

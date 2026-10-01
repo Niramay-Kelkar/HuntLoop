@@ -88,6 +88,14 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/resumes", tags=["resumes"])
 
+# Upload and activation are unauthenticated writes that reset the whole
+# skills-matching backlog and (outside demo mode) load the embedding
+# model - unsafe to expose on a public demo (see huntloop.demo_mode).
+# Kept on a separate router so huntloop.api.main can simply not mount it
+# when DEMO_MODE is on, rather than mounting it and guarding each
+# endpoint individually.
+unsafe_router = APIRouter(prefix="/resumes", tags=["resumes"])
+
 _PREVIEW_LENGTH = 200
 
 # A real resume PDF is almost always well under 1MB of text-and-light-
@@ -275,11 +283,16 @@ def _reset_skills_matching(db: Session) -> int:
 
 @router.get("", response_model=list[ResumeVersionSummary])
 def list_resumes(db: Session = Depends(get_db)) -> list[ResumeVersionSummary]:
+    """In demo mode this always returns just the fictional resume the
+    demo dataset builder writes (scripts/build_demo_dataset.py) - not
+    because this handler filters anything, but because upload and
+    activation are unmounted in demo mode (see unsafe_router below), so
+    no other row can ever be added to a demo database."""
     resumes = db.query(ResumeVersion).order_by(ResumeVersion.version_number.desc()).all()
     return [_to_summary(r) for r in resumes]
 
 
-@router.post("/upload", response_model=ResumeVersionSummary, status_code=201)
+@unsafe_router.post("/upload", response_model=ResumeVersionSummary, status_code=201)
 async def upload_resume(request: Request, file: UploadFile = File(...), db: Session = Depends(get_db)) -> ResumeVersionSummary:
     _enforce_rate_limit(_upload_rate_limiter, request, "resume upload")
 
@@ -347,7 +360,7 @@ async def upload_resume(request: Request, file: UploadFile = File(...), db: Sess
     return _to_summary(resume)
 
 
-@router.patch("/{resume_id}/activate", response_model=ResumeVersionSummary)
+@unsafe_router.patch("/{resume_id}/activate", response_model=ResumeVersionSummary)
 def activate_resume(resume_id: int, request: Request, db: Session = Depends(get_db)) -> ResumeVersionSummary:
     _enforce_rate_limit(_activate_rate_limiter, request, "resume activation")
 

@@ -52,41 +52,96 @@ request.client.host stays the real TCP peer address, exactly as before,
 which is what keeps plain/local/non-proxied access (local dev, `docker
 compose up` without --profile proxy) resolving correctly with no
 behavior change from before this was added.
+
+DEMO_MODE (see huntloop.demo_mode): off by default, and off is byte for
+byte the same app this module always built before DEMO_MODE existed -
+every change below is gated on is_demo_mode() being true. When on:
+  - huntloop.api.routers.drafting (the BYOK LLM route) and
+    huntloop.api.routers.resumes.unsafe_router (resume upload and
+    activation) are simply never included, so those routes do not
+    exist rather than existing and refusing requests.
+  - huntloop.api.routers.demo_info is mounted (GET /demo-info), giving
+    the frontend banner a snapshot date to show.
+  - every route gets a generous, configurable per-IP rate limit
+    (DEMO_RATE_LIMIT_MAX_REQUESTS / DEMO_RATE_LIMIT_WINDOW_SECONDS),
+    applied once as an app-level dependency and reusing the same
+    _RateLimiter class the drafting/resumes routes already use rather
+    than a new implementation.
+create_app() is a plain factory so tests can build a fresh demo-mode
+app (with its own rate limiter) without disturbing the module-level
+`app` instance every other test already depends on.
 """
 import os
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from huntloop.api.routers import dashboard, drafting, health, jobs, resumes
+from huntloop.api.routers import dashboard, demo_info, drafting, health, jobs, resumes
+from huntloop.api.routers.drafting import _RateLimiter
 from huntloop.api.routers.resumes import MAX_UPLOAD_BYTES, MaxUploadSizeMiddleware
+from huntloop.demo_mode import demo_rate_limit_max_requests, demo_rate_limit_window_seconds, is_demo_mode
 
-app = FastAPI(title="HuntLoop API")
 
-_default_origins = "http://localhost:3000,http://127.0.0.1:3000"
-_allowed_origins = os.getenv("CORS_ALLOWED_ORIGINS", _default_origins).split(",")
+def _demo_rate_limit_dependency():
+    """Builds one fresh _RateLimiter per app instance (so a test building
+    several demo apps never shares rate-limit state between them) and
+    returns a FastAPI dependency function that enforces it, keyed on the
+    caller's IP the same way drafting.py/resumes.py's own limiters are."""
+    limiter = _RateLimiter(demo_rate_limit_max_requests(), demo_rate_limit_window_seconds())
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_allowed_origins,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    def _check(request: Request) -> None:
+        client_ip = request.client.host if request.client else "unknown"
+        if not limiter.allow(client_ip):
+            raise HTTPException(
+                429,
+                f"Rate limit exceeded for the demo API ({limiter.max_requests} requests per "
+                f"{int(limiter.window_seconds)}s per client). Try again shortly.",
+            )
 
-# See this module's own docstring for the full reasoning. Scoped to a
-# specific trusted peer (or peers), never "*" - see TRUSTED_PROXY_IPS
-# above.
-_trusted_proxy_ips = [ip.strip() for ip in os.getenv("TRUSTED_PROXY_IPS", "127.0.0.1").split(",") if ip.strip()]
-app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=_trusted_proxy_ips)
+    _check.limiter = limiter
+    return _check
 
-# See MaxUploadSizeMiddleware's own docstring (huntloop.api.routers.resumes)
-# for why this has to be ASGI-layer middleware rather than a check inside
-# upload_resume() itself.
-app.add_middleware(MaxUploadSizeMiddleware, path="/resumes/upload", max_bytes=MAX_UPLOAD_BYTES)
 
-app.include_router(health.router)
-app.include_router(jobs.router)
-app.include_router(dashboard.router)
-app.include_router(resumes.router)
-app.include_router(drafting.router)
+def create_app() -> FastAPI:
+    demo_mode = is_demo_mode()
+
+    dependencies = [Depends(_demo_rate_limit_dependency())] if demo_mode else []
+    app = FastAPI(title="HuntLoop API", dependencies=dependencies)
+
+    _default_origins = "http://localhost:3000,http://127.0.0.1:3000"
+    _allowed_origins = os.getenv("CORS_ALLOWED_ORIGINS", _default_origins).split(",")
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_allowed_origins,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # See this module's own docstring for the full reasoning. Scoped to a
+    # specific trusted peer (or peers), never "*" - see TRUSTED_PROXY_IPS
+    # above.
+    _trusted_proxy_ips = [ip.strip() for ip in os.getenv("TRUSTED_PROXY_IPS", "127.0.0.1").split(",") if ip.strip()]
+    app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=_trusted_proxy_ips)
+
+    app.include_router(health.router)
+    app.include_router(jobs.router)
+    app.include_router(dashboard.router)
+    app.include_router(resumes.router)
+
+    if demo_mode:
+        app.include_router(demo_info.router)
+    else:
+        # See MaxUploadSizeMiddleware's own docstring
+        # (huntloop.api.routers.resumes) for why this has to be ASGI-layer
+        # middleware rather than a check inside upload_resume() itself.
+        # Skipped in demo mode since the route it guards is never mounted.
+        app.add_middleware(MaxUploadSizeMiddleware, path="/resumes/upload", max_bytes=MAX_UPLOAD_BYTES)
+        app.include_router(resumes.unsafe_router)
+        app.include_router(drafting.router)
+
+    return app
+
+
+app = create_app()

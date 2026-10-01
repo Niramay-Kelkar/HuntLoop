@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import { DraftSettingsModal } from "@/components/DraftSettingsModal";
+import { isDemoMode } from "@/lib/demoMode";
 
 const NAV_ITEMS = [
   { href: "/dashboard", label: "Dashboard" },
@@ -43,9 +44,11 @@ export function NavBar() {
             );
           })}
         </nav>
-        <div className="ml-auto">
-          <DraftSettingsModal />
-        </div>
+        {!isDemoMode() && (
+          <div className="ml-auto">
+            <DraftSettingsModal />
+          </div>
+        )}
       </div>
     </div>
   );
