@@ -17,7 +17,11 @@ fastapi>=0.141.0
 starlette>=0.49.1
 uvicorn
 python-multipart
-sqlalchemy
+# Pinned to the 2.0.x line for the same reason as requirements.txt -
+# SQLAlchemy 2.1.x changed its default Postgres dialect for an
+# un-suffixed postgresql:// URL from psycopg2 to psycopg (version 3),
+# and this image only ever installs psycopg2-binary.
+sqlalchemy==2.0.54
 alembic==1.19.1
 psycopg2-binary
 python-dotenv

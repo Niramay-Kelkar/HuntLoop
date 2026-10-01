@@ -12022,3 +12022,23 @@ toggle, or keep as is and document the trade-off); nothing changed here.
 **Verified:** `npm audit` 0 vulnerabilities (was 1 critical, 1 high via two brace-expansion copies, 1 low). Full frontend suite 118/118 passing across 19 files. `next build` completes cleanly on Next.js 16.3.8 (Turbopack), all 8 routes build successfully, no new warnings. `npm run lint` clean under the matching `eslint-config-next@16.3.8`.
 
 **Branch:** `fix/dependabot-alerts-oct`.
+
+---
+
+## 2026-10-01: Pin sqlalchemy to stop an unpinned dependency from silently changing database driver behavior (`fix/pin-sqlalchemy-2-0`)
+
+**Did:** Pinned `sqlalchemy` to a specific 2.0.x release in `requirements.txt` and `requirements-demo.txt`, closing a real failure that surfaced while running `alembic upgrade head` against a remote Neon database with a plain `postgresql://` connection string.
+
+**The bug:** both `alembic/env.py` and `src/huntloop/api/dependencies.py` build their SQLAlchemy engine straight from `huntloop.settings.DATABASE_URL`, with no scheme rewriting or driver-suffix logic anywhere in this project's own code. `requirements.txt` left `sqlalchemy` unpinned, so a fresh image build resolved whatever was newest on PyPI at build time. Confirmed directly inside a freshly built `huntloop-app` image: it had resolved SQLAlchemy 2.1.1, where `sqlalchemy/dialects/postgresql/__init__.py` sets its default Postgres dialect to the psycopg (version 3) driver for a bare `postgresql://` URL with no driver suffix. For comparison, SQLAlchemy 2.0.x sets that same default to psycopg2. This project has only ever installed `psycopg2-binary`, never `psycopg`, so any connection string without an explicit `+psycopg2` suffix now failed at engine creation with `ModuleNotFoundError: No module named 'psycopg'`, before ever reaching the database. `docker-compose.yml`, the CI workflow, and `.env.example` all already write their own `DATABASE_URL` with the `+psycopg2` suffix spelled out, so this only bit a hand-typed or copy-pasted URL without that suffix, which is exactly what happened with `TARGET_DATABASE_URL` during a Neon deploy attempt.
+
+**Fix:** pinned `sqlalchemy==2.0.54` (the latest real 2.0.x release on PyPI, checked via `pip index versions sqlalchemy` at the time of this fix, not guessed) in both `requirements.txt` and `requirements-demo.txt`, which had the identical unpinned `sqlalchemy` line and feeds the separate demo API image (`Dockerfile.demo`). No project code was changed, since the root cause was entirely the missing pin, not anything this codebase does with the URL.
+
+**Verified against a rebuilt `huntloop-app` image, not just asserted:**
+- `sqlalchemy.__version__` prints `2.0.54` inside the rebuilt image.
+- `create_engine("postgresql://user:pass@localhost/db")` on a bare URL with no driver suffix resolves to `sqlalchemy.dialects.postgresql.psycopg2.PGDialect_psycopg2`, driver `psycopg2`, reproducing the same check that first exposed the failure on SQLAlchemy 2.1.1 but now showing the correct dialect.
+- `alembic upgrade head`, run inside the rebuilt image against a disposable local Postgres container created only for this check (never production, never any remote database), using a plain `postgresql://` URL with no driver suffix, ran the full migration chain from the initial schema through the latest revision with no errors.
+- Full backend suite passes: 502 passed. One test (`test_pipeline.py::test_process_item_splits_joined_multi_location_string`) failed on a first pass for a reason unrelated to this pin: the `huntloop-app` image's build context happened to carry this dev machine's own cached `sentence-transformers` model under `.cache/huggingface`, so the pipeline's embedding step ran for real inside the container instead of degrading to `NULL` the way it does in the real CI environment (fresh checkout, no cache, `HF_HUB_OFFLINE=1`). Pointing `HF_HOME` at an empty directory for that run reproduced the real CI environment exactly and the test passed, confirming nothing needed changing in test or application code because of the SQLAlchemy version pin itself.
+
+**Reconciliation check (no further changes needed):** `docker-compose.yml`'s three `DATABASE_URL` defaults, the CI workflow's `DATABASE_URL`, and `.env.example`'s sample value all already spell out `postgresql+psycopg2://`, so none of them were exposed to this bug and none needed edits. `Dockerfile.demo`'s own `requirements-demo.txt` did carry the same unpinned `sqlalchemy` line as `requirements.txt` and has been pinned to match.
+
+**Branch:** `fix/pin-sqlalchemy-2-0`.
