@@ -1,0 +1,26 @@
+# Lean image for the public demo API (see huntloop.demo_mode,
+# requirements-demo.txt). Same base and structure as the main Dockerfile,
+# but installs requirements-demo.txt instead of requirements.txt - no
+# sentence-transformers/torch, no scraper/script-only dependencies -
+# and starts uvicorn directly with DEMO_MODE on, rather than running
+# main.py (the scraper entrypoint, which this image has no use for).
+FROM python:3.13-slim
+
+WORKDIR /app
+
+COPY requirements-demo.txt .
+RUN pip install --no-cache-dir -r requirements-demo.txt
+
+COPY . .
+
+RUN groupadd --system huntloop && useradd --system --gid huntloop --home-dir /app huntloop \
+    && chown -R huntloop:huntloop /app
+
+USER huntloop
+
+ENV PYTHONPATH=/app/src
+ENV DEMO_MODE=true
+
+EXPOSE 8000
+
+CMD ["uvicorn", "huntloop.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

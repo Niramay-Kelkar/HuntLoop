@@ -106,6 +106,9 @@ export interface ApplicationStatusResponse {
   applied_at: string | null;
   status_updated_at: string;
   notes: string | null;
+  // True only when the API is running with DEMO_MODE on - this response
+  // reflects what would have been written, but nothing was persisted.
+  demo?: boolean;
 }
 
 export interface ApplicationStatusCounts {
@@ -177,4 +180,12 @@ export interface DraftAnswerRequest {
 export interface DraftAnswerResponse {
   answer: string;
   provider: DraftAnswerProvider;
+}
+
+// GET /demo-info (huntloop.api.routers.demo_info) - only exists when the
+// API is running with DEMO_MODE on. snapshot_date is null if the demo
+// database has no demo_meta row at all.
+export interface DemoInfoResponse {
+  snapshot_date: string | null;
+  message: string;
 }

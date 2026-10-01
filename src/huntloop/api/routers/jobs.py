@@ -37,7 +37,9 @@ from huntloop.db_models import (
     JobPosting,
     LcaDisclosure,
     ResumeVersion,
+    SponsorOverallAggregate,
 )
+from huntloop.demo_mode import is_demo_mode
 from huntloop.match_scoring import match_score_expr, match_score_order_by, score_basis_expr
 
 logger = logging.getLogger(__name__)
@@ -97,7 +99,19 @@ def _salary_estimate_expr():
     employer (huntloop.api.sponsor_summary), or NULL when the company has
     no resolved sponsor match or no annual-wage filings. This is the same
     number GET /jobs/{id} exposes as `salary_estimate.amount` - an
-    employer-level estimate, never a real posted salary for the job."""
+    employer-level estimate, never a real posted salary for the job.
+
+    In demo mode, reads sponsor_overall_aggregates.median_wage instead of
+    lca_disclosures - see huntloop.api.sponsor_summary for why a demo
+    database never carries raw LCA rows, and why that table's median_wage
+    is built to equal this same calculation."""
+    if is_demo_mode():
+        return (
+            select(SponsorOverallAggregate.median_wage)
+            .where(SponsorOverallAggregate.employer_name_normalized == Company.matched_sponsor_employer_name)
+            .correlate(Company)
+            .scalar_subquery()
+        )
     return (
         select(func.percentile_cont(0.5).within_group(LcaDisclosure.wage_rate_of_pay_from))
         .where(
@@ -477,6 +491,38 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
     )
 
 
+def _demo_application_response(
+    db: Session, job_id: int, payload: ApplicationStatusUpdate
+) -> ApplicationStatusResponse:
+    """Builds the response PATCH /jobs/{id}/application would have
+    produced, without writing anything - demo mode's tracker is a no-op
+    by design (see huntloop.demo_mode). Reads the existing row, if any,
+    purely to echo back a realistic current state, and overlays the
+    requested change in memory only."""
+    existing = db.query(JobApplication).filter_by(job_posting_id=job_id).first()
+    status = existing.status if existing is not None else ApplicationStatus.NOT_APPLIED
+    notes = existing.notes if existing is not None else None
+    applied_at = existing.applied_at if existing is not None else None
+    status_updated_at = datetime.now(timezone.utc)
+
+    fields = payload.model_fields_set
+    if "status" in fields and payload.status is not None:
+        status = payload.status
+        if status != ApplicationStatus.NOT_APPLIED and applied_at is None:
+            applied_at = status_updated_at
+    if "notes" in fields:
+        notes = payload.notes
+
+    return ApplicationStatusResponse(
+        job_posting_id=job_id,
+        status=status,
+        applied_at=applied_at,
+        status_updated_at=status_updated_at,
+        notes=notes,
+        demo=True,
+    )
+
+
 @router.patch("/{job_id}/application", response_model=ApplicationStatusResponse)
 def update_application_status(
     job_id: int, payload: ApplicationStatusUpdate, db: Session = Depends(get_db)
@@ -488,6 +534,9 @@ def update_application_status(
     fields = payload.model_fields_set
     if "status" not in fields and "notes" not in fields:
         raise HTTPException(422, "Send at least one of 'status' or 'notes'.")
+
+    if is_demo_mode():
+        return _demo_application_response(db, job_id, payload)
 
     application = db.query(JobApplication).filter_by(job_posting_id=job_id).first()
 

@@ -35,6 +35,7 @@ See ["Project status"](#project-status) for what's built, and
 - [Running tests](#running-tests)
 - [API service](#api-service)
 - [Frontend](#frontend)
+- [Demo mode](#demo-mode-optional)
 - [Reverse proxy / HTTPS for self-hosting](#reverse-proxy--https-for-self-hosting-optional-opt-in)
 - [Observability stack](#observability-stack-optional-opt-in)
 - [H-1B sponsorship data](#h-1b-sponsorship-data-optional)
@@ -601,6 +602,26 @@ By default it talks to `http://localhost:8000` - override with
 API must already be running for either workflow above - via Docker (per
 ["Run with Docker"](#run-with-docker)/["API service"](#api-service)) or
 `uvicorn ... --reload`.
+
+## Demo mode (optional)
+
+Nothing is deployed publicly yet, so there is no live link here - this
+is the local mechanism for building one later.
+
+`DEMO_MODE=true` on the API (see `huntloop.demo_mode`) turns it
+read-only: the resume upload/activate routes and the BYOK drafting
+route are not mounted, the tracker PATCH becomes a no-op, and every
+route gets a per-IP rate limit. `requirements-demo.txt` +
+`Dockerfile.demo` build a lean image with no torch/sentence-transformers
+at all. `scripts/build_demo_dataset.py` builds a small, safe sample
+database (about 10,000 real postings, per-company sponsor aggregates
+instead of raw LCA rows, one fictional resume) from a source database
+into a target database, and refuses to run if they are the same
+database. On the frontend, `NEXT_PUBLIC_DEMO_MODE=true` (build time)
+shows a banner, hides the AI assistant and resume-upload controls, and
+shows a wake-up message if a sleeping free-tier backend is slow to
+answer. See `SESSIONS.md`'s "Add read-only demo mode and a demo dataset
+builder" entry for the full detail.
 
 ## Reverse proxy / HTTPS for self-hosting (optional, opt-in)
 

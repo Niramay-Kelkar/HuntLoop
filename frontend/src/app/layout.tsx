@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { Public_Sans, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
+import { DemoBanner } from "@/components/DemoBanner";
+import { DemoWakeUpGate } from "@/components/DemoWakeUpGate";
 import { NavBar } from "@/components/NavBar";
 import { Providers } from "./providers";
 
@@ -39,8 +41,11 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
     >
       <body className="min-h-full flex flex-col bg-bg text-text font-sans">
         <Providers>
+          <DemoBanner />
           <NavBar />
-          <div className="mx-auto w-full max-w-6xl flex-1 px-6 py-7">{children}</div>
+          <div className="mx-auto w-full max-w-6xl flex-1 px-6 py-7">
+            <DemoWakeUpGate>{children}</DemoWakeUpGate>
+          </div>
         </Providers>
       </body>
     </html>

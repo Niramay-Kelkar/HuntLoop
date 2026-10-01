@@ -432,3 +432,81 @@ class JobApplication(Base):
             f"<JobApplication(job_posting_id={self.job_posting_id}, "
             f"status={self.status})>"
         )
+
+
+# ----------------------------------------------------------------------
+# Demo mode sponsorship aggregates
+# ----------------------------------------------------------------------
+class SponsorFiscalYearAggregate(Base):
+    """
+    One row per (employer, fiscal year), used only in demo mode (see
+    huntloop.demo_mode, scripts/build_demo_dataset.py) in place of the
+    raw lca_disclosures rows a demo deployment never copies. Carries the
+    per-year numbers a future multi-year sponsorship trend feature would
+    need: total filings, distinct job titles, and median annual wage for
+    that year. Empty in a non-demo database.
+    """
+    __tablename__ = "sponsor_fiscal_year_aggregates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    employer_name_normalized = Column(String(255), nullable=False, index=True)
+    fiscal_year = Column(Integer, nullable=False)
+    total_filings = Column(Integer, nullable=False)
+    distinct_titles = Column(Integer, nullable=False)
+    median_wage = Column(Numeric, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "employer_name_normalized", "fiscal_year", name="sponsor_fiscal_year_aggregates_employer_year_key"
+        ),
+    )
+
+    def __repr__(self):
+        return (
+            f"<SponsorFiscalYearAggregate(employer={self.employer_name_normalized}, "
+            f"fiscal_year={self.fiscal_year})>"
+        )
+
+
+class SponsorOverallAggregate(Base):
+    """
+    One row per employer, used only in demo mode in place of
+    huntloop.api.sponsor_summary.get_sponsorship_summary()'s live
+    lca_disclosures query. Holds exactly the fields that function
+    returns, precomputed at demo-dataset build time with the same
+    aggregation logic run read-only against production, so the numbers
+    a demo deployment shows match production. Empty in a non-demo
+    database.
+    """
+    __tablename__ = "sponsor_overall_aggregates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    employer_name_normalized = Column(String(255), nullable=False, unique=True, index=True)
+    most_recent_fiscal_year = Column(Integer, nullable=False)
+    total_lcas_most_recent_fiscal_year = Column(Integer, nullable=False)
+    median_wage = Column(Numeric, nullable=True)
+    most_frequent_job_title = Column(String(300), nullable=True)
+    latest_case_status = Column(String(50), nullable=True)
+
+    def __repr__(self):
+        return f"<SponsorOverallAggregate(employer={self.employer_name_normalized})>"
+
+
+# ----------------------------------------------------------------------
+# Demo mode snapshot metadata
+# ----------------------------------------------------------------------
+class DemoMeta(Base):
+    """
+    A single row describing the demo dataset currently loaded, read by
+    GET /demo-info (only mounted when DEMO_MODE is on, see
+    huntloop.api.routers.demo_info) for the frontend banner. Written
+    once by scripts/build_demo_dataset.py. Empty in a non-demo database.
+    """
+    __tablename__ = "demo_meta"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    snapshot_date = Column(Date, nullable=False)
+    built_at = Column(DateTime, server_default=func.now())
+
+    def __repr__(self):
+        return f"<DemoMeta(snapshot_date={self.snapshot_date})>"

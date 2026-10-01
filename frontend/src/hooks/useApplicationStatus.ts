@@ -56,7 +56,11 @@ export function useApplicationStatusMutation() {
       );
     },
 
-    onSuccess: (_data, { status }) => {
+    onSuccess: (data, { status }) => {
+      if (data.demo) {
+        showToast("Demo only, changes are not saved", "success");
+        return;
+      }
       showToast(`Status updated to "${STATUS_META[status].label}"`, "success");
     },
 
@@ -122,7 +126,11 @@ export function useApplicationNotesMutation() {
       );
     },
 
-    onSuccess: () => {
+    onSuccess: (data) => {
+      if (data.demo) {
+        showToast("Demo only, changes are not saved", "success");
+        return;
+      }
       showToast("Note saved", "success");
     },
 

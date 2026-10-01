@@ -26,6 +26,7 @@ import type {
   ApplicationStatusResponse,
   ApplicationStatusUpdate,
   DashboardStats,
+  DemoInfoResponse,
   DraftAnswerRequest,
   DraftAnswerResponse,
   HealthResponse,
@@ -88,6 +89,12 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function getHealth(): Promise<HealthResponse> {
   return apiFetch<HealthResponse>("/health");
+}
+
+// Only resolves when the API is running with DEMO_MODE on - see
+// huntloop.api.routers.demo_info. Used by the demo banner.
+export function getDemoInfo(): Promise<DemoInfoResponse> {
+  return apiFetch<DemoInfoResponse>("/demo-info");
 }
 
 // Matches GET /jobs' real query params (huntloop.api.routers.jobs) -

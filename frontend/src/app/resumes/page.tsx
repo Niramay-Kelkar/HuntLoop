@@ -8,6 +8,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { ErrorState } from "@/components/ErrorState";
 import { useToast } from "@/components/Toast";
 import { formatDate } from "@/lib/theme";
+import { isDemoMode } from "@/lib/demoMode";
 
 export default function ResumesPage() {
   const queryClient = useQueryClient();
@@ -76,56 +77,68 @@ export default function ResumesPage() {
 
       <div className="mx-auto flex w-full max-w-[440px] flex-col gap-4">
         {/* upload */}
-        <div
-          className={`border-2 border-dashed p-6 text-center transition-colors ${
-            isDragOver ? "border-accent bg-accent-soft" : "border-border-strong bg-surface"
-          } ${isUploading ? "pointer-events-none opacity-70" : ""}`}
-          onDragOver={(e) => {
-            e.preventDefault();
-            setIsDragOver(true);
-          }}
-          onDragLeave={() => setIsDragOver(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setIsDragOver(false);
-            handleFile(e.dataTransfer.files[0]);
-          }}
-        >
-          {isUploading ? (
-            <>
-              <div className="mx-auto mb-3 h-10 w-10 animate-spin rounded-full border-2 border-accent-soft border-t-accent" />
-              <div className="text-sm font-semibold text-text">Uploading &amp; processing…</div>
-              <div className="mx-auto mt-1 max-w-[280px] text-xs text-text-faintest">
-                Extracting text and computing an embedding for this resume — this can take a few seconds.
-              </div>
-            </>
-          ) : (
-            <>
-              <div className="mx-auto mb-3 grid h-10 w-10 place-items-center border border-border-strong bg-accent-soft">
-                <span className="font-mono text-base font-semibold text-accent">PDF</span>
-              </div>
-              <div className="text-sm font-semibold text-text">Upload a new version</div>
-              <div className="mb-3.5 mt-1 text-xs text-text-faintest">Drop a PDF or browse</div>
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                className="bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-accent-hover"
-              >
-                Choose file
-              </button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".pdf,application/pdf"
-                className="hidden"
-                onChange={(e) => {
-                  handleFile(e.target.files?.[0]);
-                  e.target.value = "";
-                }}
-              />
-            </>
-          )}
-        </div>
+        {isDemoMode() ? (
+          <div
+            data-testid="resume-upload-disabled"
+            className="border-2 border-dashed border-border-strong bg-surface p-6 text-center"
+          >
+            <div className="text-sm font-semibold text-text">Upload disabled in this demo</div>
+            <div className="mx-auto mt-1 max-w-[320px] text-xs text-text-faintest">
+              Run HuntLoop locally to upload and score your own resume.
+            </div>
+          </div>
+        ) : (
+          <div
+            className={`border-2 border-dashed p-6 text-center transition-colors ${
+              isDragOver ? "border-accent bg-accent-soft" : "border-border-strong bg-surface"
+            } ${isUploading ? "pointer-events-none opacity-70" : ""}`}
+            onDragOver={(e) => {
+              e.preventDefault();
+              setIsDragOver(true);
+            }}
+            onDragLeave={() => setIsDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDragOver(false);
+              handleFile(e.dataTransfer.files[0]);
+            }}
+          >
+            {isUploading ? (
+              <>
+                <div className="mx-auto mb-3 h-10 w-10 animate-spin rounded-full border-2 border-accent-soft border-t-accent" />
+                <div className="text-sm font-semibold text-text">Uploading &amp; processing…</div>
+                <div className="mx-auto mt-1 max-w-[280px] text-xs text-text-faintest">
+                  Extracting text and computing an embedding for this resume, this can take a few seconds.
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="mx-auto mb-3 grid h-10 w-10 place-items-center border border-border-strong bg-accent-soft">
+                  <span className="font-mono text-base font-semibold text-accent">PDF</span>
+                </div>
+                <div className="text-sm font-semibold text-text">Upload a new version</div>
+                <div className="mb-3.5 mt-1 text-xs text-text-faintest">Drop a PDF or browse</div>
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="bg-accent px-4 py-2 text-sm font-semibold text-white hover:bg-accent-hover"
+                >
+                  Choose file
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".pdf,application/pdf"
+                  className="hidden"
+                  onChange={(e) => {
+                    handleFile(e.target.files?.[0]);
+                    e.target.value = "";
+                  }}
+                />
+              </>
+            )}
+          </div>
+        )}
 
         {/* version history */}
         <div className="border border-border bg-surface p-5">
@@ -187,7 +200,7 @@ export default function ResumesPage() {
                     </span>
                   </div>
                   <p className="line-clamp-2 text-xs leading-relaxed text-text-faint">{version.text_preview}</p>
-                  {!version.is_active && (
+                  {!version.is_active && !isDemoMode() && (
                     <button
                       type="button"
                       disabled={activateMutation.isPending}
