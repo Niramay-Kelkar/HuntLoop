@@ -75,7 +75,26 @@ def test_database_url():
 
 @pytest.fixture()
 def pipeline(test_database_url):
-    """A JobDataPipeline bound to the isolated test schema, emptied after each test."""
+    """A JobDataPipeline bound to the isolated test schema, emptied after
+    each test. `JobDataPipeline.__init__` calls `create_engine(...)`, so
+    this fixture creates a brand new engine (and connection pool) per
+    test function - `pl.engine.dispose()` below closes every pooled
+    connection before the fixture returns, rather than leaving that to
+    garbage collection.
+
+    Before this was added, nothing closed the engine itself (only the
+    session, via the `with` block). A SQLAlchemy Engine/Pool holds
+    internal locks and event-listener registries that form reference
+    cycles, so CPython's refcounting alone does not reclaim it - it
+    waits on a full garbage-collection cycle, which does not necessarily
+    run between every test. Across hundreds of tests the idle pooled
+    connections from old, already-finished tests piled up and eventually
+    exhausted Postgres's max_connections (reproduced directly: a fresh
+    Postgres container with no other client, max_connections 100,
+    running this suite climbed to 97 connections, and pg_stat_activity
+    showed dozens of idle connections whose last query was this
+    teardown's own COMMIT - see SESSIONS.md for the full
+    investigation)."""
     pl = JobDataPipeline(test_database_url)
 
     yield pl
@@ -84,6 +103,8 @@ def pipeline(test_database_url):
         for table in reversed(Base.metadata.sorted_tables):
             session.execute(table.delete())
         session.commit()
+
+    pl.engine.dispose()
 
 
 @pytest.fixture()
