@@ -12001,3 +12001,24 @@ toggle, or keep as is and document the trade-off); nothing changed here.
 **Verified:** full backend suite run twice against a freshly started, dedicated Postgres container (max_connections 100, matching CI, nothing else connected) - 502 passed both times, peak connection count 4 then 3 (down from 97 before the fix). Also reran clean against the normal local dev Postgres, 502/502.
 
 **Branch:** `chore/demo-deploy-prep`.
+
+---
+
+## 2026-10-01: Fix security alerts in frontend dependencies (`fix/dependabot-alerts-oct`)
+
+**Did:** Resolved 4 open Dependabot alerts in `frontend/` by upgrading to the versions Dependabot recommends, via `npm install`/`npm audit fix`, not manual lockfile edits.
+
+**Versions, before and after:**
+- `next`: 16.3.5 -> 16.3.8 (fixes the critical Remote Code Execution advisory in `next/og` `ImageResponse`, GHSA-vcvr-r3jv-pc5j). `eslint-config-next` bumped alongside it, 16.3.5 -> 16.3.8, to stay matched to the Next.js version it lints for.
+- `dompurify`: 3.4.15 -> 3.4.16 (fixes the low-severity `IN_PLACE` node-removing-hook DOM XSS advisory, GHSA-p98j-92pf-mc4p).
+- `brace-expansion`: two separate transitive dev-only copies, both resolved by `npm audit fix` alone, no direct package.json entry needed. 1.1.18 -> 1.1.21 (via `eslint`'s `minimatch@3.1.5`) and 5.0.9 -> 5.0.12 (via `typescript-eslint`'s `minimatch@10.2.6`), closing both the moderate quadratic-expansion advisory and the related high-severity stack-exhaustion advisories in each line. `npm audit` now reports 0 vulnerabilities.
+
+**`next/og`/`ImageResponse` usage, checked before touching Next.js:** grepped the whole `frontend/` tree (every `.ts`/`.tsx`/`.js`/`.jsx` file plus any `opengraph-image`/`twitter-image` special route files) for `next/og` and `ImageResponse`. Zero matches, and no social-preview-image route files exist at all. This app does not use the vulnerable API anywhere, so the upgrade closes a real supply-chain exposure in a dependency this app ships but never exercises, not a live code path.
+
+**Breaking-change check on the Next.js bump:** `node_modules/next` ships no `CHANGELOG.md` (Next.js keeps its changelog on GitHub, not in the published package), so nothing was there to read. The bump is three patch releases within the same `16.3.x` minor version (16.3.6, 16.3.7, 16.3.8), which by semver should carry no breaking API, config-key, or app-router behavior changes. Confirmed in practice: `next.config.ts`'s one config key (`devIndicators: false`) is unchanged and still valid, and the full build and test suite below both pass clean with no new warnings.
+
+**DOMPurify call site, checked after the bump:** `frontend/src/lib/sanitizeHtml.ts`'s `sanitizeJobDescription()` calls `DOMPurify.sanitize(html, { ALLOWED_TAGS, ALLOWED_ATTR })` where `html` is a plain string, never a live DOM node, and never passes `IN_PLACE`. Read the fixed library's own source directly to confirm this call site was never exposed to the advisory in the first place, not just assumed safe: `inPlace` only evaluates true when `IN_PLACE` is set AND the input is a real DOM node (`typeof dirty !== "string" && _isNode(dirty)`) - a string input always short-circuits that to false regardless of the `IN_PLACE` option, and this code never sets that option anyway. The one installed hook (`afterSanitizeAttributes`, forcing safe `target`/`rel` on `<a>` tags) only sets attributes, it never removes nodes, so it is not the node-removing hook pattern the advisory describes either. **No code or config change was needed for the fix to take effect** - the version bump alone closes the advisory, and this call site was not in the vulnerable configuration to begin with. All 8 existing `sanitizeHtml.test.ts` cases still pass unchanged.
+
+**Verified:** `npm audit` 0 vulnerabilities (was 1 critical, 1 high via two brace-expansion copies, 1 low). Full frontend suite 118/118 passing across 19 files. `next build` completes cleanly on Next.js 16.3.8 (Turbopack), all 8 routes build successfully, no new warnings. `npm run lint` clean under the matching `eslint-config-next@16.3.8`.
+
+**Branch:** `fix/dependabot-alerts-oct`.
