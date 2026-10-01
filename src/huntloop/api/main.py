@@ -40,18 +40,31 @@ header FROM CADDY SPECIFICALLY and rewrite request.client accordingly -
 uvicorn's own ProxyHeadersMiddleware does exactly this.
 
 TRUSTED_PROXY_IPS (comma-separated, defaults to just "127.0.0.1") names
-the ONLY peer address(es) this will accept an X-Forwarded-For header
+the ONLY peer address(es) this will accept a forwarded-client-IP header
 from - deliberately not "*"/trust-everyone, which would let any request
 that ever reaches this service by any other path (e.g. if it were
 somehow exposed another way) spoof its own source IP outright.
 docker-compose.yml sets this to the `caddy` service's own pinned
 internal container address (see its `default` network entry there) when
 the "proxy" profile is used; unset/default elsewhere. A request that
-does NOT come from a trusted peer has this header ignored entirely -
-request.client.host stays the real TCP peer address, exactly as before,
-which is what keeps plain/local/non-proxied access (local dev, `docker
-compose up` without --profile proxy) resolving correctly with no
-behavior change from before this was added.
+does NOT come from a trusted peer has every one of these headers
+ignored entirely - request.client.host stays the real TCP peer address,
+exactly as before, which is what keeps plain/local/non-proxied access
+(local dev, `docker compose up` without --profile proxy) resolving
+correctly with no behavior change from before this was added.
+
+Render needs a second, different mechanism on top of the above - see
+huntloop.api.trusted_client_ip's own docstring for the full reasoning.
+Short version: on Render this process always sees request peer
+127.0.0.1 (matching the TRUSTED_PROXY_IPS default), but Render sits
+behind Cloudflare and does not strip a client-supplied X-Forwarded-For
+header, only append to it - so trusting X-Forwarded-For alone there
+would let a visitor spoof their own rate-limit identity. Cloudflare's
+own True-Client-IP/CF-Connecting-IP headers are not client-spoofable,
+so TrustedClientIPMiddleware prefers those (only from a trusted peer)
+and otherwise falls through to ProxyHeadersMiddleware's X-Forwarded-For
+handling unchanged - that keeps the Caddy path (which never sends
+either of those two headers) working exactly as before.
 
 DEMO_MODE (see huntloop.demo_mode): off by default, and off is byte for
 byte the same app this module always built before DEMO_MODE existed -
@@ -80,6 +93,7 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 from huntloop.api.routers import dashboard, demo_info, drafting, health, jobs, resumes
 from huntloop.api.routers.drafting import _RateLimiter
 from huntloop.api.routers.resumes import MAX_UPLOAD_BYTES, MaxUploadSizeMiddleware
+from huntloop.api.trusted_client_ip import TrustedClientIPMiddleware
 from huntloop.demo_mode import demo_rate_limit_max_requests, demo_rate_limit_window_seconds, is_demo_mode
 
 
@@ -124,6 +138,11 @@ def create_app() -> FastAPI:
     # above.
     _trusted_proxy_ips = [ip.strip() for ip in os.getenv("TRUSTED_PROXY_IPS", "127.0.0.1").split(",") if ip.strip()]
     app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=_trusted_proxy_ips)
+    # Added after ProxyHeadersMiddleware so it becomes the outermost layer
+    # and runs first on the way in - see this module's docstring and
+    # huntloop.api.trusted_client_ip's for why Render needs this ahead of
+    # plain X-Forwarded-For trust.
+    app.add_middleware(TrustedClientIPMiddleware, trusted_hosts=_trusted_proxy_ips)
 
     app.include_router(health.router)
     app.include_router(jobs.router)

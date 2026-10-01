@@ -1,0 +1,45 @@
+# Render Blueprint for the HuntLoop public demo API.
+#
+# One web service, built from Dockerfile.demo (the lean DEMO_MODE image -
+# see that file and src/huntloop/demo_mode.py), free plan.
+#
+# DATABASE_URL and CORS_ALLOWED_ORIGINS are deliberately left as
+# sync: false - Render prompts for these on the dashboard during Blueprint
+# creation and never reads them from this file, so no connection string or
+# deployed frontend URL is ever committed. See docs/DEPLOY_DEMO.md for what
+# to enter for each one and the full deploy walkthrough.
+#
+# Fields not verified offline (no Render account/dashboard access while
+# writing this) - double check these on the dashboard before or after the
+# first deploy, see docs/DEPLOY_DEMO.md's own note on this:
+#   - `region` is left unset (defaults to Render's own default region,
+#     currently Oregon/US West at the time this was written) - pick one
+#     near the Neon project's region instead if that matters.
+#   - `plan: free` - confirm the free web service plan is still named
+#     exactly "free" and still supports a Docker runtime service at the
+#     time of deploy.
+#   - Exact cold-start behavior and free-plan spin-down timing (referenced
+#     in docs/DEPLOY_DEMO.md) - Render's own dashboard/docs are the source
+#     of truth, not guessed here.
+
+services:
+  - type: web
+    name: huntloop-demo-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile.demo
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: DEMO_MODE
+        value: "true"
+      - key: DATABASE_URL
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: DEMO_RATE_LIMIT_MAX_REQUESTS
+        value: "120"
+      - key: DEMO_RATE_LIMIT_WINDOW_SECONDS
+        value: "60"
+      - key: TRUSTED_PROXY_IPS
+        value: "127.0.0.1"
