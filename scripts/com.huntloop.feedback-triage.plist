@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Reference copy of the feedback-triage LaunchAgent. The live copy is
+  installed (machine-local, not tracked) at
+  ~/Library/LaunchAgents/com.huntloop.feedback-triage.plist - same
+  convention as com.huntloop.scraper.plist /
+  com.huntloop.scraper-catchup.plist.
+
+  StartInterval (not StartCalendarInterval) runs
+  scripts/run_feedback_triage_cron.sh every 300 seconds (5 minutes) -
+  deliberately a separate, much more frequent schedule from the
+  once-daily scrape/skills-matching/department-categorization
+  orchestrator (com.huntloop.scraper), since feedback can arrive from a
+  public visitor at any time. RunAtLoad also fires one pass immediately
+  on install/boot/login rather than waiting for the first 5-minute mark.
+
+  Install:
+    cp scripts/com.huntloop.feedback-triage.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.huntloop.feedback-triage.plist
+  Remove:
+    launchctl bootout gui/$(id -u)/com.huntloop.feedback-triage
+    rm ~/Library/LaunchAgents/com.huntloop.feedback-triage.plist
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.huntloop.feedback-triage</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/bash</string>
+		<string>/Users/niramaykelkar/Desktop/HuntLoop/scripts/run_feedback_triage_cron.sh</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/niramaykelkar/Desktop/HuntLoop</string>
+	<key>StartInterval</key>
+	<integer>300</integer>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>StandardOutPath</key>
+	<string>/Users/niramaykelkar/Desktop/HuntLoop/logs/launchd-feedback-triage.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/niramaykelkar/Desktop/HuntLoop/logs/launchd-feedback-triage.log</string>
+</dict>
+</plist>

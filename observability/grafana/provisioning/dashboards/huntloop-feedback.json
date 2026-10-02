@@ -1,0 +1,54 @@
+{
+  "title": "HuntLoop Feedback Volume",
+  "uid": "huntloop-feedback",
+  "editable": true,
+  "schemaVersion": 39,
+  "timezone": "browser",
+  "time": { "from": "now-7d", "to": "now" },
+  "refresh": "30s",
+  "tags": ["huntloop"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Feedback volume by category, over time",
+      "description": "huntloop_feedback_submitted_total - feedback reports received via POST /feedback, broken down by category (bug/feature/question/other). Pushed once per submission from huntloop.feedback_metrics - local-only, same observability profile as the scraping/skills-matching dashboards.",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "huntloop_feedback_submitted_total",
+          "legendFormat": "{{category}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "title": "Total feedback, by category (current)",
+      "description": "huntloop_feedback_submitted_total summed across the whole history - a snapshot of category mix, not a rate.",
+      "type": "barchart",
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "huntloop_feedback_submitted_total",
+          "legendFormat": "{{category}}",
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    }
+  ]
+}

@@ -29,10 +29,13 @@ import type {
   DemoInfoResponse,
   DraftAnswerRequest,
   DraftAnswerResponse,
+  FeedbackSubmitRequest,
+  FeedbackSubmitResponse,
   HealthResponse,
   JobDetail,
   JobListResponse,
   LocationGroup,
+  PublicFeedbackItem,
   ResumeVersionSummary,
 } from "@/types/api";
 
@@ -223,4 +226,22 @@ export async function uploadResume(file: File): Promise<ResumeVersionSummary> {
 
 export function activateResume(id: number): Promise<ResumeVersionSummary> {
   return apiFetch<ResumeVersionSummary>(`/resumes/${id}/activate`, { method: "PATCH" });
+}
+
+// POST /feedback (huntloop.api.routers.feedback) - public, no auth.
+// Returns 202 with the stored row's id/triage_status/status/is_public;
+// a 429 (rate-limited) or 400 (bad category/empty description) both
+// surface as a normal ApiError via apiFetch, for the caller to show.
+export function submitFeedback(payload: FeedbackSubmitRequest): Promise<FeedbackSubmitResponse> {
+  return apiFetch<FeedbackSubmitResponse>("/feedback", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+// GET /feedback/public - only rows a human has marked is_public=true via
+// scripts/review_feedback.py. Never includes raw_text - see that
+// endpoint's docstring.
+export function getPublicFeedback(): Promise<PublicFeedbackItem[]> {
+  return apiFetch<PublicFeedbackItem[]>("/feedback/public");
 }

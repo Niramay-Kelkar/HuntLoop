@@ -31,14 +31,19 @@ def _seed(db_session):
     return job
 
 
-def test_demo_mode_off_mounts_all_twelve_routes(api_client):
+def test_demo_mode_off_mounts_all_routes(api_client):
     from huntloop.api.main import app as default_app
 
     paths = default_app.openapi()["paths"]
-    assert len(paths) == 12
+    # 12 pre-existing routes + POST /feedback + GET /feedback/public
+    # (huntloop.api.routers.feedback, mounted unconditionally in both
+    # demo and non-demo mode - see huntloop.api.main).
+    assert len(paths) == 14
     assert "/jobs/{job_id}/draft-answer" in paths
     assert "/resumes/upload" in paths
     assert "/resumes/{resume_id}/activate" in paths
+    assert "/feedback" in paths
+    assert "/feedback/public" in paths
     assert "/demo-info" not in paths
 
 

@@ -3,6 +3,7 @@ import { Public_Sans, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 import { DemoBanner } from "@/components/DemoBanner";
 import { DemoWakeUpGate } from "@/components/DemoWakeUpGate";
+import { FeedbackTrigger } from "@/components/FeedbackTrigger";
 import { NavBar } from "@/components/NavBar";
 import { Providers } from "./providers";
 
@@ -46,6 +47,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           <div className="mx-auto w-full max-w-6xl flex-1 px-6 py-7">
             <DemoWakeUpGate>{children}</DemoWakeUpGate>
           </div>
+          <FeedbackTrigger />
         </Providers>
       </body>
     </html>

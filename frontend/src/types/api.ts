@@ -189,3 +189,35 @@ export interface DemoInfoResponse {
   snapshot_date: string | null;
   message: string;
 }
+
+// POST /feedback (huntloop.api.routers.feedback) - public, no auth.
+// category is validated server-side against the fixed set; sent here as
+// a plain string (not a union) since an invalid value is a 400 from the
+// API, not something the type system needs to pre-empt.
+export type FeedbackCategory = "bug" | "feature" | "question" | "other";
+
+export interface FeedbackSubmitRequest {
+  category: FeedbackCategory;
+  description: string;
+  page_path?: string;
+  filters?: Record<string, unknown>;
+  recent_errors?: string[];
+}
+
+export interface FeedbackSubmitResponse {
+  id: number;
+  triage_status: string;
+  status: string;
+  is_public: boolean;
+}
+
+// GET /feedback/public - deliberately narrow: never raw_text. Status
+// values mirror huntloop.db_models.FeedbackStatus.
+export type FeedbackStatus = "open" | "in_progress" | "resolved" | "wont_fix";
+
+export interface PublicFeedbackItem {
+  category: FeedbackCategory;
+  llm_summary: string | null;
+  status: FeedbackStatus;
+  created_at: string;
+}

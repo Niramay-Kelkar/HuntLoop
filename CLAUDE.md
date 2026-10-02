@@ -1607,6 +1607,123 @@ conventions" and SESSIONS.md for the real current state).
   and got **0 rows left to classify** again. `pytest`: 72/72 passing,
   unchanged (this step touched no application code, only the wrapper
   script and `docker-compose.yml`).
+- **Feedback capture + triage pipeline, added 2026-10-02 (see
+  SESSIONS.md) — a new, independent concern from everything above, not
+  job scraping/matching related.** New `feedback` table (migration
+  `b7e2a5c9f1d3`, `huntloop.db_models.Feedback` + the
+  `FeedbackCategory`/`FeedbackTriageStatus`/`FeedbackStatus` enums).
+  `user_id` is nullable with no FK — there's no users table yet; it
+  exists only so a future auth migration can backfill it without a
+  schema change.
+  **`POST /feedback`** (public, no auth, `huntloop.api.routers.feedback`,
+  mounted unconditionally in both demo and non-demo mode — unlike
+  `drafting`/`resumes.unsafe_router`, it carries no BYOK key and isn't
+  gated by `DEMO_MODE`) persists a row immediately
+  (`triage_status=pending`, `status=open`, `is_public=false`) and
+  returns **202** — it never calls an LLM inline, so a traffic spike
+  costs DB rows, not LLM quota, and a provider outage can never fail a
+  submission. `category`/`description` are validated manually in the
+  router (not a Pydantic `Literal`/`Field`), so a bad value is a clear
+  **400**, not FastAPI's generic 422 — same precedent as
+  `drafting._require_api_key`. Rate limiting (5/hour, 20/day per IP) is
+  a plain `COUNT(*) FROM feedback WHERE ip_hash = ... AND created_at >=
+  ...` query against this same table — no new infrastructure (no Redis,
+  no in-memory counter), since this is low-traffic; `ip_hash` is a
+  SHA-256 hash of the submitter's IP, used for nothing else. `context`
+  (JSON) is assembled server-side from the request (page path, active
+  filters, recent client errors the frontend chose to attach) — never
+  accepted as one opaque client-asserted blob.
+  **`GET /feedback/public`** returns ONLY rows with `is_public=true`,
+  and only `category`/`llm_summary`/`status`/`created_at` — **never
+  `raw_text`**, by design: a public page rendering arbitrary
+  unauthenticated user text would be an open publishing surface, so the
+  only thing ever shown publicly is this project's own fixed-prompt LLM
+  summary, never the submitter's own words.
+  **`scripts/triage_feedback.py`** is the async triage pass — same
+  standalone-script convention as `backfill_skills_matching.py`, but on
+  its OWN short-interval schedule (`scripts/run_feedback_triage_cron.sh`
+  + reference plist `scripts/com.huntloop.feedback-triage.plist`,
+  `StartInterval=300`s — **not installed on this machine**, a standing
+  recurring job spending real LLM quota is left as a machine-config
+  decision; install/remove commands are in both files), separate from
+  the once-daily `run_orchestrator_cron.sh`. It triages
+  `triage_status=pending` rows up to `TRIAGE_DAILY_BUDGET` (env var,
+  default 100, counted as `triage_status=done AND updated_at` falling
+  today) — once hit, remaining pending rows are left exactly `pending`
+  (never `skipped_budget`, which this script never sets itself) for a
+  later run. Summarization is `huntloop.feedback_triage.
+  summarize_feedback()` — Groq-primary/Gemini-fallback via the SAME
+  `GROQ_API_KEY`/`GEMINI_API_KEY` env vars `huntloop.skills_matching*`
+  use, but its own small module with its own prompt, **not** a new mode
+  bolted onto `huntloop.skills_matching_router` (that router's
+  prompt/JSON contract is hardcoded to resume-vs-job-description
+  matching — a different task; no batching or per-day quota tracking
+  here either, since this is low-volume). No advisory lock (unlike
+  `backfill_skills_matching.py`) — a short-interval, low-volume, per-row
+  script has much lower collision stakes than the once-daily multi-hour
+  backfill the lock exists for.
+  **`scripts/review_feedback.py`** (`list [--all]` / `set <id>
+  [--status ...] [--public true|false]`) is the only way to change
+  `status`/`is_public` today — a terminal tool against the real
+  database, deliberately not a web admin panel (that comes later, after
+  auth exists, as a protected route rather than a new
+  unauthenticated-access problem).
+  **Frontend**: `frontend/src/app/status/page.tsx` (public, read-only,
+  grouped by status) and `frontend/src/components/FeedbackTrigger.tsx`
+  (a corner trigger button + panel, mounted once in `layout.tsx` so it's
+  reachable from every page — posts to `POST /feedback`, shows a
+  "Thanks, got it." toast via the existing `useToast()`; no submission
+  history shown inline). Both have no test coverage yet (same
+  not-yet-covered gap the frontend test-suite bullet above already
+  documents for pure-presentation components).
+  **Metrics/observability**: `huntloop.feedback_metrics` (own
+  `CollectorRegistry`, own Pushgateway job name `huntloop_feedback`,
+  same never-raises-on-push-failure contract as every other
+  `push_*_metrics()` in this project) pushes
+  `huntloop_feedback_submitted_total{category}` once per submission
+  (synchronously, inline in the request — this is a low-volume
+  unauthenticated endpoint, not a batch job, so there's no "end of run"
+  moment to push once at). A new provisioned Grafana dashboard,
+  "HuntLoop Feedback Volume"
+  (`observability/grafana/provisioning/dashboards/huntloop-feedback.json`,
+  uid `huntloop-feedback`), 2 panels — volume by category over time, and
+  a current-total bar chart — same local-only `observability` Compose
+  profile as every other dashboard; no Prometheus scrape-config change
+  needed (it already scrapes the one shared Pushgateway target,
+  regardless of job name). Verified end-to-end against a real
+  submission: Grafana's own datasource proxy returned the same value as
+  a direct Prometheus query.
+  **Verified for real** (see SESSIONS.md for the full list): migration
+  applied + table confirmed via direct query; a real submission through
+  the running API landed `pending`/`open`/not-public; 6 same-IP
+  submissions in an hour correctly 429'd on the 6th; a real triage run
+  populated `llm_summary` and flipped to `done`; the daily budget was
+  exercised both ways (blocks at the cap, resumes once reset); marking a
+  row public made it (and only it) appear on `GET /feedback/public` with
+  no `raw_text` anywhere in the response; the real `/status` page and
+  `FeedbackTrigger` panel were driven in an actual browser against a
+  real running API + Next.js dev server. **One real snag hit along the
+  way**: this dev machine already runs long-lived `huntloop-api`/
+  `huntloop-frontend` Docker containers bound to
+  `127.0.0.1:8000`/`127.0.0.1:3000` (pre-existing, pointed at the
+  bundled `db` Compose service — see the FastAPI bullet's own
+  `api`/`db` note above, now out of date in detail: as of whatever
+  changed `docker-compose.yml`'s `api.DATABASE_URL` to the bundled `db`
+  service, `api` is no longer pointed at `host.docker.internal`/the real
+  local system Postgres by default) — `localhost` on this machine
+  resolves IPv6 first, so a locally-run `uvicorn`/`next dev` on the same
+  port numbers bound successfully on IPv6 while curl/the browser kept
+  hitting the stale Docker containers on IPv4; verification was re-run
+  on alternate ports/`127.0.0.1`-only + an explicit `CORS_ALLOWED_ORIGINS`
+  to isolate from those containers rather than touching them.
+  **Backend suite**: 499 passed; 3 pre-existing failures in
+  `tests/test_backfill_lock.py`, unrelated to this work (a stray
+  orphaned Postgres connection predating this session holds the
+  skills-matching advisory lock on this dev machine — confirmed via
+  `pg_locks`/`pg_stat_activity`, left alone rather than unilaterally
+  terminated). `test_api_demo_mode.py`'s hardcoded route-count
+  assertion was updated 12 → 14 (the two new feedback routes mount
+  unconditionally in both demo and non-demo mode).
 
 ## Key architectural decisions (already made — don't re-litigate)
 
