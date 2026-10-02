@@ -26,8 +26,17 @@ Never called inline from any user-facing request path - backfill-only,
 same principle as huntloop.skills_matching and
 huntloop.department_categorization.
 
+--only-neon-companies restricts the run to exactly the companies whose
+name currently exists in the Neon demo database's `companies` table
+(read-only connection via NEON_DEMO_DATABASE_URL), in that same priority
+order (never-researched first, then stalest) - all other companies are
+skipped for this invocation. Without the flag, existing behavior (process
+all local companies) is unchanged. This is reusable since Neon's demo
+company set may change later - it re-reads Neon's company list fresh on
+every run rather than hardcoding one.
+
 Usage:
-    python scripts/backfill_company_research.py [--limit N] [--dry-run]
+    python scripts/backfill_company_research.py [--limit N] [--dry-run] [--only-neon-companies]
 """
 from __future__ import annotations
 
@@ -80,7 +89,23 @@ def _record_request_spent(session, usage_row: TavilyUsage) -> None:
     session.commit()
 
 
-def _companies_needing_research(session, limit: int | None):
+def _neon_company_names() -> set[str]:
+    """Read-only lookup of the company names currently in the Neon demo
+    database - NEON_DEMO_DATABASE_URL, a separate connection from this
+    script's own (local) DATABASE_URL. Never writes to Neon."""
+    neon_url = os.environ.get("NEON_DEMO_DATABASE_URL")
+    if not neon_url:
+        raise SystemExit("--only-neon-companies requires NEON_DEMO_DATABASE_URL to be set.")
+    neon_engine = create_engine(neon_url)
+    try:
+        with neon_engine.connect() as conn:
+            rows = conn.execute(select(Company.name)).all()
+        return {row[0] for row in rows}
+    finally:
+        neon_engine.dispose()
+
+
+def _companies_needing_research(session, limit: int | None, only_neon_companies: bool):
     staleness_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=RESEARCH_STALENESS_DAYS)
     query = (
         select(Company, CompanyResearch)
@@ -91,6 +116,10 @@ def _companies_needing_research(session, limit: int | None):
         # progress first.
         .order_by(CompanyResearch.fetched_at.is_(None).desc(), CompanyResearch.fetched_at.asc())
     )
+    if only_neon_companies:
+        neon_names = _neon_company_names()
+        logger.info("--only-neon-companies: restricting to %d company names present in Neon", len(neon_names))
+        query = query.where(Company.name.in_(neon_names))
     if limit is not None:
         query = query.limit(limit)
     return session.execute(query).all()
@@ -122,7 +151,7 @@ def _upsert_research(session, company: Company, existing: CompanyResearch | None
     session.commit()
 
 
-def main(limit: int | None = None, dry_run: bool = False) -> None:
+def main(limit: int | None = None, dry_run: bool = False, only_neon_companies: bool = False) -> None:
     engine = create_engine(DATABASE_URL, echo=False)
     Session = sessionmaker(bind=engine)
     session = Session()
@@ -142,7 +171,7 @@ def main(limit: int | None = None, dry_run: bool = False) -> None:
             )
             return
 
-        candidates = _companies_needing_research(session, limit)
+        candidates = _companies_needing_research(session, limit, only_neon_companies)
         logger.info("%d companies need a research snapshot (no snapshot, or older than %d days)",
                     len(candidates), RESEARCH_STALENESS_DAYS)
 
@@ -197,5 +226,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=None, help="Process at most this many companies this invocation.")
     parser.add_argument("--dry-run", action="store_true", help="Log what would be fetched without calling Tavily or writing to the DB.")
+    parser.add_argument(
+        "--only-neon-companies", action="store_true",
+        help="Restrict this run to companies whose name exists in the Neon demo DB "
+             "(NEON_DEMO_DATABASE_URL, read-only), in the same priority order.",
+    )
     args = parser.parse_args()
-    main(limit=args.limit, dry_run=args.dry_run)
+    main(limit=args.limit, dry_run=args.dry_run, only_neon_companies=args.only_neon_companies)
