@@ -510,3 +510,87 @@ class DemoMeta(Base):
 
     def __repr__(self):
         return f"<DemoMeta(snapshot_date={self.snapshot_date})>"
+
+
+# ----------------------------------------------------------------------
+# Feedback capture + triage
+# ----------------------------------------------------------------------
+class FeedbackCategory(str, enum.Enum):
+    """Fixed small set a submitter must pick from - enforced at the API
+    layer (POST /feedback rejects anything else with a 400), not just by
+    this column's DB-level check."""
+
+    BUG = "bug"
+    FEATURE = "feature"
+    QUESTION = "question"
+    OTHER = "other"
+
+
+class FeedbackTriageStatus(str, enum.Enum):
+    """Whether the async LLM triage pass (scripts/triage_feedback.py) has
+    run on this row yet - distinct from `status` below, which tracks
+    human review/resolution, not the LLM pass."""
+
+    PENDING = "pending"
+    DONE = "done"
+    SKIPPED_BUDGET = "skipped_budget"
+
+
+class FeedbackStatus(str, enum.Enum):
+    """Human-facing lifecycle, set via scripts/review_feedback.py (there
+    is no admin web UI yet - see CLAUDE.md)."""
+
+    OPEN = "open"
+    IN_PROGRESS = "in_progress"
+    RESOLVED = "resolved"
+    WONT_FIX = "wont_fix"
+
+
+class Feedback(Base):
+    """
+    A public visitor's feedback report, captured immediately by POST
+    /feedback (huntloop.api.routers.feedback) and triaged asynchronously
+    by scripts/triage_feedback.py - see that endpoint's and that
+    script's docstrings for the full design.
+
+    `user_id` is nullable with no FK constraint: there is no users table
+    in this project yet, so this column exists only so a future auth
+    migration can backfill it without a schema change - nothing writes
+    to it today.
+    """
+    __tablename__ = "feedback"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, nullable=True)
+    category = Column(
+        Enum(FeedbackCategory, name="feedback_category", values_callable=lambda cls: [e.value for e in cls]),
+        nullable=False,
+    )
+    raw_text = Column(Text, nullable=False)
+    # What the frontend sent at submission time - current page path,
+    # active filter/query state (if given), and any recent client-side
+    # errors it chose to attach. Server-populated per request, not
+    # client-trusted-as-is beyond being valid JSON - see the router.
+    context = Column(JSON, nullable=True)
+    llm_summary = Column(Text, nullable=True)
+    triage_status = Column(
+        Enum(FeedbackTriageStatus, name="feedback_triage_status", values_callable=lambda cls: [e.value for e in cls]),
+        nullable=False,
+        default=FeedbackTriageStatus.PENDING,
+        server_default=FeedbackTriageStatus.PENDING.value,
+    )
+    status = Column(
+        Enum(FeedbackStatus, name="feedback_status", values_callable=lambda cls: [e.value for e in cls]),
+        nullable=False,
+        default=FeedbackStatus.OPEN,
+        server_default=FeedbackStatus.OPEN.value,
+    )
+    is_public = Column(Boolean, nullable=False, default=False, server_default="false")
+    # A hash (never the raw IP) of the submitter's IP - used only for
+    # rate limiting (see huntloop.api.routers.feedback._check_rate_limit).
+    ip_hash = Column(String(64), nullable=True, index=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False, index=True)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    def __repr__(self):
+        return f"<Feedback(id={self.id}, category={self.category}, status={self.status})>"

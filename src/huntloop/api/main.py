@@ -90,7 +90,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from huntloop.api.routers import dashboard, demo_info, drafting, health, jobs, resumes
+from huntloop.api.routers import dashboard, demo_info, drafting, feedback, health, jobs, resumes
 from huntloop.api.routers.drafting import _RateLimiter
 from huntloop.api.routers.resumes import MAX_UPLOAD_BYTES, MaxUploadSizeMiddleware
 from huntloop.api.trusted_client_ip import TrustedClientIPMiddleware
@@ -148,6 +148,9 @@ def create_app() -> FastAPI:
     app.include_router(jobs.router)
     app.include_router(dashboard.router)
     app.include_router(resumes.router)
+    # Public in both modes - no API key/BYOK involved, so it's not
+    # subject to DEMO_MODE's drafting/resume-upload gating below.
+    app.include_router(feedback.router)
 
     if demo_mode:
         app.include_router(demo_info.router)

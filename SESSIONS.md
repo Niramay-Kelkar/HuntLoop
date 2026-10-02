@@ -12042,3 +12042,177 @@ toggle, or keep as is and document the trade-off); nothing changed here.
 **Reconciliation check (no further changes needed):** `docker-compose.yml`'s three `DATABASE_URL` defaults, the CI workflow's `DATABASE_URL`, and `.env.example`'s sample value all already spell out `postgresql+psycopg2://`, so none of them were exposed to this bug and none needed edits. `Dockerfile.demo`'s own `requirements-demo.txt` did carry the same unpinned `sqlalchemy` line as `requirements.txt` and has been pinned to match.
 
 **Branch:** `fix/pin-sqlalchemy-2-0`.
+
+---
+
+## 2026-10-02: Feedback capture and triage pipeline
+
+**Did:** Built a small incident-style feedback pipeline from scratch - public
+visitors submit a report, it's persisted immediately, and an LLM pass
+triages it out-of-band. New `feedback` table (migration `b7e2a5c9f1d3`,
+`huntloop.db_models.Feedback`), `POST /feedback` (public, 202, never calls
+an LLM inline) and `GET /feedback/public` (narrow allow-list response -
+category/llm_summary/status/created_at, never `raw_text`) in a new
+`huntloop.api.routers.feedback`, an async triage script
+(`scripts/triage_feedback.py`, Groq-primary/Gemini-fallback via a new
+`huntloop.feedback_triage` module, its own daily budget via
+`TRIAGE_DAILY_BUDGET`), a terminal review script
+(`scripts/review_feedback.py`, no admin UI yet), a public `/status`
+page + a corner `FeedbackTrigger` panel in the frontend, and a new
+Prometheus counter + Grafana dashboard for feedback volume by category.
+
+**Design notes:**
+- Rate limiting (5/hour, 20/day per IP) is a plain `COUNT(*) ... WHERE
+  ip_hash = ... AND created_at >= now() - interval` query against the
+  `feedback` table itself - no new infrastructure, matching the task's
+  explicit ask. `ip_hash` is a SHA-256 hash of the submitter's IP, never
+  the raw address, used for nothing else.
+- Category/description validation is done manually in the router (not
+  via a Pydantic `Literal`/`Field(min_length=...)`), so a bad category
+  or empty/too-long description returns a clear 400 rather than
+  FastAPI's generic 422 - same precedent as
+  `huntloop.api.routers.drafting._require_api_key`.
+- `huntloop.feedback_triage` is its OWN small Groq/Gemini module, not a
+  new mode bolted onto `huntloop.skills_matching_router` - that router's
+  prompt/JSON contract is hardcoded to resume-vs-job-description
+  matching, a genuinely different task from summarizing one short
+  free-text report. It reuses the same two providers and the same
+  `GROQ_API_KEY`/`GEMINI_API_KEY` env vars, with a much simpler
+  single-call-per-provider failover (no batching, no per-day quota
+  tracking - this is a low-volume endpoint).
+- `scripts/triage_feedback.py` has no advisory lock (unlike
+  `backfill_skills_matching.py`) - a short-interval, low-volume, per-row
+  script has much lower collision stakes than the once-daily multi-hour
+  skills-matching backfill the lock exists for. Runs on its own launchd
+  schedule (`scripts/run_feedback_triage_cron.sh` +
+  `scripts/com.huntloop.feedback-triage.plist`, `StartInterval=300`
+  seconds), separate from `run_orchestrator_cron.sh`'s once-daily
+  schedule - NOT installed on this machine as part of this session (a
+  standing recurring background job that spends real LLM quota is a
+  machine-config decision left to the user; the reference plist's
+  install/remove commands are documented in both files).
+- `GET /feedback/public` deliberately returns a narrow Pydantic model
+  (`PublicFeedbackItem`) rather than a generic row dump - the whole
+  point is that a public page never renders arbitrary unauthenticated
+  user text, only this project's own fixed-prompt LLM summary.
+
+**Verified for real, against the real local database and a real running
+API/frontend, not just by inspection:**
+- Ran the migration for real (`alembic upgrade head` was also one
+  migration behind head before this work - `a7c9e1f2b3d4` "add demo mode
+  tables" - applied that first) and confirmed the `feedback` table and
+  all 12 columns exist via a direct `information_schema.columns` query.
+- Submitted a real report through the actual running API
+  (`fastapi.testclient.TestClient` against the real `huntloop.api.main`
+  app, hitting the real local Postgres - not a mock) and confirmed via
+  direct `psql`-equivalent query: `triage_status=pending`,
+  `status=open`, `is_public=false`.
+- Submitted 6 reports from the same IP within an hour: the 6th was
+  rejected with `429 Rate limit exceeded (5 submissions per hour)`.
+- Ran `scripts/triage_feedback.py` for real (real Groq call) against
+  that pending row and confirmed via direct query: `llm_summary`
+  populated with a real one-line summary, `triage_status` flipped to
+  `done`.
+- Tested `TRIAGE_DAILY_BUDGET`: with 2 rows already triaged "today" and
+  the budget set to 1, a fresh pending row was correctly left untouched
+  (`pending`); re-running with the default budget (100) triaged it.
+- Marked that row `is_public=true` via `scripts/review_feedback.py set`,
+  then confirmed `GET /feedback/public` returns it with exactly
+  category/llm_summary/status/created_at and that `raw_text` does not
+  appear anywhere in the response body (checked via a plain
+  substring search of the raw response text, not just the parsed JSON
+  shape). A second row left `is_public=false` was confirmed absent from
+  that same response.
+- Loaded the real `/status` page and the `FeedbackTrigger` panel in an
+  actual browser (Chrome, via `claude-in-chrome`) against a real running
+  API + Next.js dev server, submitted a report through the UI, and
+  confirmed via direct DB query that it landed with the right
+  `context.page_path`. **Real snag hit and fixed while doing this**:
+  this dev machine already has long-running `huntloop-api`/
+  `huntloop-frontend` Docker containers bound to `127.0.0.1:8000`/
+  `127.0.0.1:3000` (a pre-existing, pre-this-session part of the normal
+  dev setup, pointed at the bundled `db` Compose service, not the real
+  local system Postgres) - `localhost` on this machine resolves to the
+  IPv6 loopback first, so a locally-run `uvicorn`/`next dev` on the same
+  port numbers bound successfully on IPv6 while curl/the browser kept
+  hitting the stale Docker containers on IPv4. Verification was
+  re-run cleanly on alternate ports (8010/3010, `127.0.0.1`-only) with
+  `CORS_ALLOWED_ORIGINS` set accordingly to isolate from those
+  containers entirely, rather than touching them.
+- Brought up the local observability stack
+  (`docker compose --profile observability up -d pushgateway prometheus
+  grafana` - already running from a prior session) and confirmed the new
+  `huntloop_feedback_submitted_total` counter appears in a direct
+  Prometheus query after a real submission, and that the new "HuntLoop
+  Feedback Volume" Grafana dashboard
+  (`observability/grafana/provisioning/dashboards/huntloop-feedback.json`)
+  renders the same value via its datasource proxy - same method the
+  scraping/skills-matching dashboards were verified with.
+- Full backend suite: **499 passed, 3 pre-existing failures** (all in
+  `tests/test_backfill_lock.py`, unrelated to this work - a stray
+  orphaned Postgres backend connection on this dev machine, started
+  before this session, is holding the skills-matching advisory lock
+  (`pg_stat_activity` shows it `idle`, last query
+  `SELECT pg_try_advisory_lock(1751937901)`, `backend_start` predating
+  this session's first command), which makes every test in that file
+  that expects to acquire the lock fail. Confirmed via a direct
+  `pg_locks`/`pg_stat_activity` query, not guessed; left alone rather
+  than unilaterally terminating a database backend connection this
+  session didn't start). One genuinely-expected test update was also
+  made: `test_api_demo_mode.py`'s hardcoded "non-demo-mode mounts
+  exactly 12 routes" assertion is now 14 (the two new feedback routes
+  are mounted unconditionally in both modes).
+- Full frontend suite: 118/118 passing (unchanged - no existing test
+  file was modified by this work; `FeedbackTrigger`/`/status` have no
+  new test coverage yet, same "pure-presentation components are
+  deliberately not covered yet" gap the frontend test-suite bullet in
+  CLAUDE.md already documents).
+
+**Follow-ups, left deliberately open:** no admin web UI (the review
+script is the only way to change `status`/`is_public` for now, per the
+task); the feedback-triage launchd job is documented but not installed
+on this machine; `FeedbackTrigger`/`/status` have no frontend test
+coverage yet; the stray advisory-lock-holding Postgres connection noted
+above was not terminated.
+
+---
+
+## 2026-10-02: Install the feedback-triage launchd job
+
+**Did:** Installed `scripts/com.huntloop.feedback-triage.plist` (built in
+the previous session, reference copy in the repo) as a real, loaded
+launchd job on this machine, closing the "documented but not installed"
+follow-up above. This is a local machine config change only - no code
+touched.
+
+**Commands run (exactly as documented in the plist's own header and in
+CLAUDE.md):**
+```
+cp scripts/com.huntloop.feedback-triage.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.huntloop.feedback-triage.plist
+```
+
+**Verified for real, not by inspection:**
+- `launchctl print gui/501/com.huntloop.feedback-triage` shows the job
+  loaded with `run interval = 300 seconds`, matching the plist's
+  `StartInterval`.
+- Two real firings happened **on their own**, with no manual
+  `launchctl kickstart`: the `RunAtLoad` firing at install time
+  (07:43:59 PDT) and a genuine interval-triggered firing at 07:49:02 PDT
+  - exactly ~300s later. `runs` went from 1 to 2 between these two
+    checks, confirmed via `launchctl print` before and after a real
+    ~6-minute wait (not simulated).
+- Both firings correctly no-op'd (`logs/feedback_triage.log`: "Triaging
+  0/0 pending feedback rows") since there were 0 pending rows in the
+  `feedback` table at the time - the expected, correct outcome per the
+  task, not a failure to find anything to process.
+- `launchctl list | grep huntloop` still lists `com.huntloop.scraper`
+  and `com.huntloop.scraper-catchup` exactly as before (same PIDs/run
+  counts), and `logs/last_scheduled_run.txt` is unchanged (still the
+  original 03:00:00 scrape marker) - the daily scrape/skills-matching
+  job was not touched by this install.
+
+**Nothing surprising this time** - the job behaved exactly as
+documented when it was built (see the prior "Feedback capture and
+triage pipeline" entry for the design/reasoning). No code or test
+changes in this session.
