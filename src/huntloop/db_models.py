@@ -594,3 +594,81 @@ class Feedback(Base):
 
     def __repr__(self):
         return f"<Feedback(id={self.id}, category={self.category}, status={self.status})>"
+
+
+class CompanyResearch(Base):
+    """
+    One company-level research snapshot, fetched via Tavily's search API
+    (see huntloop.company_research, scripts/backfill_company_research.py -
+    an independent integration, unrelated to the feedback/triage pipeline
+    above, sharing no code with it). Enrichment is deliberately keyed on
+    `company_id`, not `job_posting_id` - recent news/funding/hiring
+    signals are a property of a company, not of an individual job
+    listing, and many postings share one company, so fetching per-posting
+    would multiply external API calls for no benefit.
+
+    One row per company (`company_id` unique) - a refresh REPLACES the
+    existing row rather than adding a new one, same "upsert, not a
+    history table" shape as `job_applications`. A separate table (rather
+    than new nullable columns on `companies`) was chosen because this is
+    a distinct, independently-refreshed concern with its own lifecycle
+    (fetched_at/staleness), matching this project's existing convention
+    of a separate table for that shape of concern (`feedback`,
+    `resume_versions`) rather than bolting an unrelated field set onto a
+    core identity table.
+    """
+    __tablename__ = "company_research"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, unique=True)
+    summary = Column(Text, nullable=True)
+    # List of {title, url, content, score} dicts - Tavily's own search
+    # result shape for the single query this fetch makes (see
+    # huntloop.company_research). Tavily does not return a reliable
+    # per-result published-date field on this account, so none is stored.
+    recent_news = Column(JSON, nullable=True)
+    # Short heuristic extracts from the same single search response (see
+    # huntloop.company_research._extract_signal) - not a second Tavily
+    # call, to keep this at one credit per company given the tight
+    # monthly credit budget. null when no funding/hiring-related sentence
+    # was found in the response.
+    funding_signal = Column(Text, nullable=True)
+    hiring_signal = Column(Text, nullable=True)
+    fetched_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    company = relationship("Company", backref="research")
+
+    def __repr__(self):
+        return f"<CompanyResearch(company_id={self.company_id}, fetched_at={self.fetched_at})>"
+
+
+class TavilyUsage(Base):
+    """
+    A durable monthly request-count ledger for huntloop.company_research /
+    scripts/backfill_company_research.py - NOT an in-memory counter, since
+    the whole point is that it must survive the script being re-run or
+    the process restarting (Tavily's free/paid tier resets credits on a
+    CALENDAR MONTH, not a rolling window, and the account's hard cap is
+    1000 credits/month - see CLAUDE.md). One row per calendar month
+    (`month`, e.g. "2026-10"), incremented by exactly 1 immediately after
+    each real Tavily HTTP call that gets a response (whether or not that
+    response was usable) - a request that errors before any response
+    (timeout/connection failure) is not counted, since Tavily charges no
+    credit for a request it never received a chance to serve. Tavily's
+    `/search` response does not include a per-call credit-cost field on
+    this account (confirmed by inspecting a real response before writing
+    this), so this counter IS the running credit count - there is nothing
+    further to reconcile it against.
+    """
+    __tablename__ = "tavily_usage"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    month = Column(String(7), nullable=False, unique=True)
+    requests_used = Column(Integer, nullable=False, default=0, server_default="0")
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    def __repr__(self):
+        return f"<TavilyUsage(month={self.month}, requests_used={self.requests_used})>"
