@@ -12174,3 +12174,45 @@ task); the feedback-triage launchd job is documented but not installed
 on this machine; `FeedbackTrigger`/`/status` have no frontend test
 coverage yet; the stray advisory-lock-holding Postgres connection noted
 above was not terminated.
+
+---
+
+## 2026-10-02: Install the feedback-triage launchd job
+
+**Did:** Installed `scripts/com.huntloop.feedback-triage.plist` (built in
+the previous session, reference copy in the repo) as a real, loaded
+launchd job on this machine, closing the "documented but not installed"
+follow-up above. This is a local machine config change only - no code
+touched.
+
+**Commands run (exactly as documented in the plist's own header and in
+CLAUDE.md):**
+```
+cp scripts/com.huntloop.feedback-triage.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.huntloop.feedback-triage.plist
+```
+
+**Verified for real, not by inspection:**
+- `launchctl print gui/501/com.huntloop.feedback-triage` shows the job
+  loaded with `run interval = 300 seconds`, matching the plist's
+  `StartInterval`.
+- Two real firings happened **on their own**, with no manual
+  `launchctl kickstart`: the `RunAtLoad` firing at install time
+  (07:43:59 PDT) and a genuine interval-triggered firing at 07:49:02 PDT
+  - exactly ~300s later. `runs` went from 1 to 2 between these two
+    checks, confirmed via `launchctl print` before and after a real
+    ~6-minute wait (not simulated).
+- Both firings correctly no-op'd (`logs/feedback_triage.log`: "Triaging
+  0/0 pending feedback rows") since there were 0 pending rows in the
+  `feedback` table at the time - the expected, correct outcome per the
+  task, not a failure to find anything to process.
+- `launchctl list | grep huntloop` still lists `com.huntloop.scraper`
+  and `com.huntloop.scraper-catchup` exactly as before (same PIDs/run
+  counts), and `logs/last_scheduled_run.txt` is unchanged (still the
+  original 03:00:00 scrape marker) - the daily scrape/skills-matching
+  job was not touched by this install.
+
+**Nothing surprising this time** - the job behaved exactly as
+documented when it was built (see the prior "Feedback capture and
+triage pipeline" entry for the design/reasoning). No code or test
+changes in this session.

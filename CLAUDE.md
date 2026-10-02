@@ -1643,10 +1643,13 @@ conventions" and SESSIONS.md for the real current state).
   standalone-script convention as `backfill_skills_matching.py`, but on
   its OWN short-interval schedule (`scripts/run_feedback_triage_cron.sh`
   + reference plist `scripts/com.huntloop.feedback-triage.plist`,
-  `StartInterval=300`s — **not installed on this machine**, a standing
-  recurring job spending real LLM quota is left as a machine-config
-  decision; install/remove commands are in both files), separate from
-  the once-daily `run_orchestrator_cron.sh`. It triages
+  `StartInterval=300`s — **installed and running as of 2026-10-02, see
+  SESSIONS.md "Install the feedback-triage launchd job"**: `launchctl
+  print gui/<uid>/com.huntloop.feedback-triage` confirms `run interval =
+  300 seconds`, and a real interval-triggered firing (not just
+  `RunAtLoad`) was observed ~300s after install with no manual
+  `kickstart`), separate from and non-interfering with the once-daily
+  `com.huntloop.scraper` job. It triages
   `triage_status=pending` rows up to `TRIAGE_DAILY_BUDGET` (env var,
   default 100, counted as `triage_status=done AND updated_at` falling
   today) — once hit, remaining pending rows are left exactly `pending`
