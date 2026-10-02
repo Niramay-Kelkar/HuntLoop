@@ -1728,6 +1728,104 @@ conventions" and SESSIONS.md for the real current state).
   assertion was updated 12 → 14 (the two new feedback routes mount
   unconditionally in both demo and non-demo mode).
 
+- **Company-research enrichment layer added 2026-10-02 (see SESSIONS.md)
+  — a new, standalone integration via Tavily's search API, sharing no
+  code with the feedback/triage pipeline above.** Fetch, store, and
+  display only — this pass deliberately does NOT touch ranking, match
+  scoring, or job ordering. Enrichment is at the COMPANY level, not
+  per-posting, since recent news/funding/hiring signals are a property
+  of a company and many postings share one company.
+  **New tables** (migration `e4f8a2c9d7b1`): `company_research`
+  (`huntloop.db_models.CompanyResearch` — `company_id` unique, `summary`,
+  `recent_news` JSON, `funding_signal`, `hiring_signal`, `fetched_at` —
+  one row per company, a refresh REPLACES it, not a history table) and
+  `tavily_usage` (`huntloop.db_models.TavilyUsage` — one row per calendar
+  month, `requests_used`). A separate table, not new columns on
+  `companies`, was chosen because this is a distinct, independently-
+  refreshed concern with its own lifecycle, matching this project's
+  existing convention for that shape of concern (`feedback`,
+  `resume_versions`) rather than bolting an unrelated field set onto a
+  core identity table.
+  **`huntloop.company_research`** (`fetch_company_research(name, website)`)
+  makes exactly ONE Tavily `/search` call per company —
+  `search_depth="basic"` (not "advanced" — cheaper per Tavily's
+  documented pricing, and good enough in testing), `include_answer=True`,
+  `topic="general"`. Tavily's `/search` response on this account carries
+  no per-call credit-cost field (confirmed against a real response
+  before writing this), so there is nothing to reconcile a local request
+  counter against — the caller counts 1 real HTTP response received = 1
+  credit, regardless of whether the body parsed usably.
+  `funding_signal`/`hiring_signal` are extracted LOCALLY (a plain
+  keyword/sentence-match heuristic over the same single response's
+  answer + result snippets — `_extract_signal()`) rather than via a
+  second/third Tavily call, specifically to stay at one credit per
+  company given the tight monthly budget below. Returns `None` on any
+  network error, non-200, or malformed body — never raises; distinguishes
+  "no response ever came back" (no credit charged, don't count it) from
+  "a response came back but wasn't usable" (a credit WAS spent) via a
+  `(credit_spent: bool, result | None)` return.
+  **`scripts/backfill_company_research.py`** (same standalone-script
+  convention as every other backfill in this project) processes
+  companies with no snapshot, or one older than
+  `RESEARCH_STALENESS_DAYS = 30` (a once-a-month-per-company refresh,
+  not frequent polling — never-researched companies first, then the
+  stalest). **Credit budget is real and tight: this Tavily account has a
+  hard 1000 credits/month, and there were 389 companies in the DB when
+  this was built — a single full pass already costs meaningfully against
+  that cap.** `TAVILY_MONTHLY_REQUEST_BUDGET` (env var, default 600 —
+  well under the 1000 hard cap, leaving headroom for company growth and
+  manual testing) is enforced against a DURABLE ledger (`tavily_usage`,
+  one row per calendar month, incremented by 1 and committed immediately
+  after each real response received) — NOT an in-memory counter, so it
+  survives the script being re-run or the process restarting. The budget
+  is checked before EVERY call in the loop (re-reading the usage row each
+  iteration, so a month rollover mid-run is also handled), not just once
+  at startup — a run that would cross the cap stops cleanly exactly at
+  the cap, logs it plainly, and leaves the remaining companies for next
+  time, rather than degrading silently. Never called inline from any
+  user-facing request path — backfill-only, same principle as
+  `huntloop.skills_matching`/`huntloop.department_categorization`. Not
+  yet wired into the daily cron orchestrator or any launchd job — run
+  manually for now (`python scripts/backfill_company_research.py`); wire
+  it in as its own stage only once there's a deliberate decision to do
+  so (same reasoning as the feedback-triage job getting its own separate
+  schedule rather than piggybacking on the daily one).
+  **API**: `GET /jobs/{id}` gained `company_research` (null until that
+  company has a snapshot — never a stuck-loading/error state) by reading
+  the `company_research` table by `company_id`; no new endpoint, reusing
+  the existing job-detail response per the task's own instruction.
+  **Frontend**: the job-detail sidebar gained a "Company research" card
+  (`frontend/src/app/jobs/[id]/JobDetailClient.tsx`'s
+  `CompanyResearchCard`), placed next to the existing Company info panel,
+  rendered only when `detail.company_research` is non-null — summary
+  paragraph, funding/hiring signal lines, and up to 3 recent-news links,
+  each labeled "Source: Tavily search, not verified."
+  **Verified for real** (see SESSIONS.md): both tables exist via direct
+  inspection; a real 3-company run stored real fetched Tavily data
+  (Jam City funding+hiring signals, Abnormal Security's real Series D,
+  Adobe's real Q1FY2026 numbers); an immediate re-run correctly skipped
+  those 3 (`fetched_at` unchanged, usage ledger additive) and moved on to
+  new companies; the monthly budget was forced to its real current usage
+  both at-startup and mid-run and correctly stopped cleanly both times,
+  then the real default (600) was confirmed still in effect (no code
+  edit needed — the cap was only overridden via a one-off env var on the
+  command line); the real job-detail API endpoint and a real browser
+  load of the job-detail page both showed the stored research for a
+  backfilled company (Adobe), and a non-backfilled company (Checkr)
+  rendered the page with no research card at all — no error, no stuck
+  spinner. Backend suite: 502/502 passing. Frontend suite: 118/118
+  passing (two existing `JobDetail` test fixtures needed a
+  `company_research: null` field added for the new required-but-nullable
+  type). **Real Tavily credits consumed by this entire session's
+  testing: 8** (3 companies on the first real run, 3 more on the
+  immediate re-run — which correctly fetched 3 *different*,
+  previously-unresearched companies rather than wasting credits
+  re-fetching the first 3 — plus 2 more while deliberately forcing the
+  mid-run budget-cap test) — 592 of the real 600/month budget remain.
+  **The full 389(+)-company backfill was deliberately NOT run as part of
+  this work** — that's a separate, later decision once this is live for
+  a while, not bundled into the initial build.
+
 ## Key architectural decisions (already made — don't re-litigate)
 
 - **`job_url` is the canonical unique key** on `job_postings`, not `gh_job_id`.

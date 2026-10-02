@@ -21,6 +21,8 @@ from huntloop.api.dependencies import get_db
 from huntloop.api.schemas.jobs import (
     ApplicationStatusResponse,
     ApplicationStatusUpdate,
+    CompanyNewsItem,
+    CompanyResearch as CompanyResearchSchema,
     JobDetail,
     JobListResponse,
     JobSummary,
@@ -32,6 +34,7 @@ from huntloop.api.sponsor_summary import _ANNUAL_WAGE_UNIT, get_sponsorship_summ
 from huntloop.db_models import (
     ApplicationStatus,
     Company,
+    CompanyResearch,
     JobApplication,
     JobLocation,
     JobPosting,
@@ -465,6 +468,19 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
     else:
         sponsor_check_status = "not_checked"
 
+    research = db.query(CompanyResearch).filter_by(company_id=company.id).first()
+    research_response = (
+        CompanyResearchSchema(
+            summary=research.summary,
+            recent_news=[CompanyNewsItem(**item) for item in (research.recent_news or [])],
+            funding_signal=research.funding_signal,
+            hiring_signal=research.hiring_signal,
+            fetched_at=research.fetched_at,
+        )
+        if research is not None
+        else None
+    )
+
     return JobDetail(
         id=job.id,
         job_title=job.job_title,
@@ -486,6 +502,7 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
         job_description=job.job_description,
         ats_platform=company.ats_platform,
         sponsor=sponsor_response,
+        company_research=research_response,
         sponsor_check_status=sponsor_check_status,
         salary_estimate=salary_estimate,
     )

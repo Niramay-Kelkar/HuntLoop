@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 
 import { getJob } from "@/lib/api";
+import type { CompanyResearch } from "@/types/api";
 import { ErrorState } from "@/components/ErrorState";
 import { JobAssistantPanel } from "@/components/JobAssistantPanel";
 import { NotesEditor } from "@/components/NotesEditor";
@@ -226,6 +227,8 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
             )}
           </div>
 
+          {detail.company_research && <CompanyResearchCard research={detail.company_research} />}
+
           <div
             className="border border-l-2 p-5"
             style={
@@ -278,6 +281,49 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function CompanyResearchCard({ research }: { research: CompanyResearch }) {
+  return (
+    <div className="border border-border bg-surface p-5">
+      <h3 className="mb-3 text-sm font-semibold text-text">Company research</h3>
+      {research.summary && (
+        <p className="mb-3 text-sm leading-relaxed text-text-secondary">{research.summary}</p>
+      )}
+      {research.funding_signal && (
+        <div className="mb-2.5 border-t border-divider pt-2.5">
+          <p className="mb-1 font-mono text-2xs uppercase tracking-[0.04em] text-text-faint">Funding</p>
+          <p className="text-xs leading-relaxed text-text-muted">{research.funding_signal}</p>
+        </div>
+      )}
+      {research.hiring_signal && (
+        <div className="mb-2.5 border-t border-divider pt-2.5">
+          <p className="mb-1 font-mono text-2xs uppercase tracking-[0.04em] text-text-faint">Hiring</p>
+          <p className="text-xs leading-relaxed text-text-muted">{research.hiring_signal}</p>
+        </div>
+      )}
+      {research.recent_news.length > 0 && (
+        <div className="border-t border-divider pt-2.5">
+          <p className="mb-1.5 font-mono text-2xs uppercase tracking-[0.04em] text-text-faint">Recent news</p>
+          <ul className="flex flex-col gap-1.5">
+            {research.recent_news.slice(0, 3).map((item) => (
+              <li key={item.url}>
+                <a
+                  href={item.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-accent hover:underline"
+                >
+                  {item.title}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      <p className="mt-3 font-mono text-2xs leading-relaxed text-text-faintest">Source: Tavily search, not verified.</p>
     </div>
   );
 }

@@ -80,10 +80,31 @@ export interface SponsorSummary {
 // wanting.
 export type SponsorCheckStatus = "confirmed" | "checked_no_match" | "not_checked";
 
+export interface CompanyNewsItem {
+  title: string;
+  url: string;
+  content: string;
+  score: number | null;
+}
+
+// Company-level research snapshot via Tavily's search API (see
+// huntloop.company_research, scripts/backfill_company_research.py) - a
+// standalone integration, unrelated to match scoring/job ordering.
+// Present on JobDetail only once a company has been backfilled; null
+// otherwise, never an error/loading state.
+export interface CompanyResearch {
+  summary: string | null;
+  recent_news: CompanyNewsItem[];
+  funding_signal: string | null;
+  hiring_signal: string | null;
+  fetched_at: string;
+}
+
 export interface JobDetail extends JobSummary {
   job_description: string | null;
   ats_platform: string | null;
   sponsor: SponsorSummary | null;
+  company_research: CompanyResearch | null;
   sponsor_check_status: SponsorCheckStatus;
   // salary_estimate is inherited from JobSummary.
 }

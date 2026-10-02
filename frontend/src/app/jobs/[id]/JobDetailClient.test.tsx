@@ -35,6 +35,7 @@ function makeDetail(overrides: Partial<JobDetail> = {}): JobDetail {
     job_description: null,
     ats_platform: null,
     sponsor: null,
+    company_research: null,
     sponsor_check_status: "not_checked",
     ...overrides,
   };

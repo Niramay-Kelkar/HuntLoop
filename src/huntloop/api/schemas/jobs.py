@@ -144,6 +144,31 @@ class SponsorSummary(BaseModel):
     )
 
 
+class CompanyNewsItem(BaseModel):
+    """One Tavily search result, as stored in company_research.recent_news.
+    No published_date - Tavily doesn't return a reliable one on this
+    account for general-topic results."""
+
+    title: str
+    url: str
+    content: str
+    score: float | None = None
+
+
+class CompanyResearch(BaseModel):
+    """GET /jobs/{id}'s company-research snapshot - huntloop.company_research
+    / scripts/backfill_company_research.py (Tavily search API). null on
+    JobDetail when the company hasn't been backfilled yet - a separate,
+    standalone integration from sponsor/ATS data, unrelated to match
+    scoring or job ordering."""
+
+    summary: str | None = None
+    recent_news: list[CompanyNewsItem] = Field(default_factory=list)
+    funding_signal: str | None = None
+    hiring_signal: str | None = None
+    fetched_at: datetime
+
+
 class JobDetail(JobSummary):
     """GET /jobs/{id} - JobSummary plus the full job description, the
     company's detected ATS platform, and (if resolved) its DOL sponsor
@@ -152,6 +177,14 @@ class JobDetail(JobSummary):
     job_description: str | None = None
     ats_platform: str | None = None
     sponsor: SponsorSummary | None = None
+    company_research: CompanyResearch | None = Field(
+        default=None,
+        description=(
+            "Company-level research snapshot via Tavily (see huntloop.company_research). "
+            "null when the company hasn't been backfilled yet - never an error or a "
+            "stuck-loading state on the frontend."
+        ),
+    )
     sponsor_check_status: Literal["confirmed", "checked_no_match", "not_checked"] = Field(
         description=(
             "Three honest states for this job's company, distinct from the bare "
