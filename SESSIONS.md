@@ -12216,3 +12216,152 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.huntloop.feedback-tr
 documented when it was built (see the prior "Feedback capture and
 triage pipeline" entry for the design/reasoning). No code or test
 changes in this session.
+
+---
+
+## 2026-10-02: Company-research enrichment layer (Tavily)
+
+**Did:** Built a new, standalone company-research integration using
+Tavily's search API - fetch, store, and display only, no change to
+ranking/match scoring/job ordering (a deliberate scope cut). Shares no
+code with the feedback/triage pipeline above. Worked on its own branch,
+`feature/company-research-enrichment`.
+
+**New tables** (migration `e4f8a2c9d7b1`, chained off `b7e2a5c9f1d3`):
+- `company_research` (`huntloop.db_models.CompanyResearch`) - one row per
+  company (`company_id` unique), `summary`/`recent_news` (JSON)/
+  `funding_signal`/`hiring_signal`/`fetched_at`. A refresh replaces the
+  row, it's not a history table.
+- `tavily_usage` (`huntloop.db_models.TavilyUsage`) - one row per
+  calendar month (`month`, `requests_used`), the durable monthly budget
+  ledger (see below).
+
+A separate table, not new columns on `companies`, was chosen since this
+is a distinct, independently-refreshed concern with its own lifecycle -
+matching this project's existing convention (`feedback`,
+`resume_versions`) rather than widening a core identity table.
+
+**`huntloop.company_research.fetch_company_research(name, website)`**
+makes exactly ONE Tavily `/search` call per company: `search_depth="basic"`
+(not "advanced" - cheaper per Tavily's documented pricing, and the real
+test responses below were already good enough), `include_answer=True`,
+`max_results=5`, `topic="general"`. A real test call (Checkr) confirmed
+the response has no per-call credit-cost field at all - so there's
+nothing to reconcile a local counter against; 1 real HTTP response
+received = 1 credit, full stop. `funding_signal`/`hiring_signal` are
+pulled out of that SAME single response locally (`_extract_signal()` -
+keyword + sentence-match over the answer plus each result's content
+snippet), not via a second or third Tavily call, specifically to hold
+the line at one credit per company given how tight the monthly budget
+is. Returns `(credit_spent: bool, result | None)` - distinguishes "Tavily
+never responded at all" (network/timeout failure, no credit charged, the
+caller must not count it) from "a response came back but wasn't usable"
+(a credit WAS spent regardless).
+
+**`scripts/backfill_company_research.py`** (same standalone-script
+pattern as every other backfill here) picks up companies with no
+snapshot, or one older than `RESEARCH_STALENESS_DAYS = 30` (a
+once-a-month-per-company refresh, not frequent polling) - never-
+researched companies first, then the stalest existing ones.
+
+**Credit budget - the binding constraint on this whole design**: this
+Tavily account has a hard 1000 credits/month, and there were 389
+companies in the database when this was built, so a single full pass is
+already a meaningful chunk of that monthly cap.
+`TAVILY_MONTHLY_REQUEST_BUDGET` (env var, default 600 - well under 1000,
+leaving real headroom for company growth and manual testing outside this
+script) is checked against the `tavily_usage` row for the current
+calendar month - a DURABLE DB-backed counter, not an in-memory one, so it
+survives the script being re-run or the process restarting. It's
+re-checked before EVERY call inside the loop (re-reading the usage row
+each iteration, so a month rollover mid-run is handled too), not just
+once at startup, and incremented + committed immediately after each real
+response - so an interrupted run never loses count of what it already
+spent.
+
+**API**: `GET /jobs/{id}` (`huntloop.api.routers.jobs`) gained
+`company_research` (`huntloop.api.schemas.jobs.CompanyResearch`, null
+until that company has a snapshot) by reading the new table by
+`company_id` - no new endpoint, reusing the existing job-detail response
+since the shape fit naturally.
+
+**Frontend**: `frontend/src/types/api.ts` gained `CompanyResearch`/
+`CompanyNewsItem`; `JobDetailClient.tsx`'s sidebar gained a
+`CompanyResearchCard`, placed right next to the existing Company info
+panel, rendered ONLY when `detail.company_research` is non-null -
+summary paragraph, funding/hiring signal lines, up to 3 recent-news
+links, labeled "Source: Tavily search, not verified." No loading state
+needed - it's part of the existing single `getJob` query.
+
+**Verified for real, not by inspection:**
+- `company_research`/`tavily_usage` columns confirmed via direct
+  `inspect(engine).get_columns(...)` after `alembic upgrade head`.
+- A real `--limit 3` run fetched and stored real Tavily data for
+  `jamcity`, `abnormalsecurity`, and `adobe` - pasted directly from the
+  DB: Jam City's real $350M raise + Ludia acquisition, Abnormal
+  Security's real $250M Series D / $5.1B valuation, Adobe's real
+  Q1FY2026 $6.40B revenue + NVIDIA partnership. All three got real
+  funding_signal/hiring_signal extracts and 5 real news items each.
+- An immediate re-run correctly left those 3 rows' `fetched_at`
+  untouched (confirmed via direct query) and moved on to 3 *different*,
+  previously-unresearched companies (`8451`, `aaa-texas`, `6sense`) -
+  no wasted/duplicate Tavily calls. `tavily_usage` for 2026-10 went
+  3 -> 6, confirming additive, not overwritten, usage tracking.
+- Budget enforcement genuinely exercised both ways: forced
+  `TAVILY_MONTHLY_REQUEST_BUDGET=6` with usage already at 6 -> logged
+  the "already reached" warning and made zero calls; forced
+  `TAVILY_MONTHLY_REQUEST_BUDGET=8` with usage at 6 and `--limit 5` ->
+  fetched exactly 2 more companies (reaching 8), then stopped cleanly
+  mid-run with "3 companies left unprocessed this run" logged, never
+  overshooting. The real default (600) was never edited - both tests
+  used a one-off env var override on the command line only.
+- `curl`'d the real running API for a backfilled company (Adobe, job
+  id 109735) - `company_research` present with the real stored summary/
+  signals/news. For a non-backfilled company (Checkr, job id 1315) -
+  `company_research: null`.
+- Loaded both of those same job-detail pages in a real browser
+  (`next dev` against the real API, both pointed at a local
+  `.venv`-run `uvicorn`, not Docker): Adobe's page rendered a full
+  "Company research" card with the real summary/funding/hiring/news
+  content; Checkr's page rendered cleanly with NO research card at all -
+  no error, no stuck spinner, confirmed via `get_page_text`. (Hit one
+  unrelated Next.js dev-mode snag along the way: cross-origin HMR is
+  blocked by default for a `127.0.0.1` origin in this Next.js version -
+  switching the test URLs to `localhost` fixed it; not a bug in this
+  feature.)
+- Backend suite: 502/502 passing (up from the pre-existing 499 baseline
+  noted in the feedback-pipeline entry - no regressions, this work added
+  no new backend tests of its own beyond what the existing suite already
+  covers at the model/migration level).
+- Frontend suite: 118/118 passing after updating two existing
+  `JobDetail` test fixtures (`JobDetailClient.test.tsx`,
+  `JobAssistantPanel.test.tsx`) to include the new required
+  `company_research: null` field; `tsc --noEmit` clean.
+- **Real Tavily credits consumed by this session's testing: 8 total**
+  (3 + 3 across the two real fetch runs above, + 2 more during the
+  deliberate mid-run budget-cap test) - **592 of the real 600/month
+  budget remain** for the rest of October.
+
+**Docker**: not used for any part of this work (tested entirely via the
+local `.venv` and a local `next dev`/`uvicorn` pair on alternate ports).
+Pre-existing containers/images on this machine were left completely
+untouched - reported, not modified:
+containers: `huntloop-api-1`, `huntloop-grafana-1`, `huntloop-prometheus-1`,
+`huntloop-pushgateway-1`, `huntloop-frontend-1`, `huntloop-db-1` (all
+healthy/running), plus two long-exited unrelated containers
+(`discovery-replay-target_app-1`, `discovery-replay-operator_console-1`).
+images: `huntloop-api`, `huntloop-app`, `huntloop-frontend`,
+`huntloop-seed` (8.33-8.37GB each), plus the observability stack images
+and two unrelated `discovery-replay-*` images. No cleanup performed -
+that's a separate, explicit decision for later.
+
+**Deliberately NOT done in this session**: the full 389(+)-company
+backfill (`python scripts/backfill_company_research.py` with no
+`--limit`) - only a small real sample (6 companies total, 8 credits) was
+run, per the task's own instruction to verify on a small sample first,
+not spend the budget on a full pass as part of this build. Also not
+done: wiring this script into the daily cron orchestrator or any launchd
+job (it's a manual/on-demand script for now), using the research data in
+match scoring or job ranking (explicitly out of scope), and a second
+Tavily call for a dedicated funding/hiring query (deliberately avoided
+to stay at 1 credit/company).
