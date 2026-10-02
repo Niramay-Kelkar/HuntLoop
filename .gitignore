@@ -26,3 +26,4 @@ huntloop-claude-code-prompts.md
 
 # ATS onboarding operator confirmation files (see discover_and_store_*.py)
 confirmed_*.txt
+.env.deploy
