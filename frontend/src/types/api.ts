@@ -242,3 +242,29 @@ export interface PublicFeedbackItem {
   status: FeedbackStatus;
   created_at: string;
 }
+
+// GET /admin/feedback / PATCH /admin/feedback/{id}
+// (huntloop.api.routers.admin_feedback) - Clerk-session + email-allowlist
+// protected (see frontend/src/lib/adminApi.ts, src/proxy.ts). Unlike
+// PublicFeedbackItem above, this carries every row (not just
+// is_public=true) and raw_text - never render this outside
+// /admin/feedback.
+export type FeedbackTriageStatus = "pending" | "done" | "skipped_budget";
+
+export interface AdminFeedbackItem {
+  id: number;
+  category: FeedbackCategory;
+  raw_text: string;
+  context: Record<string, unknown> | null;
+  llm_summary: string | null;
+  triage_status: FeedbackTriageStatus;
+  status: FeedbackStatus;
+  is_public: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AdminFeedbackUpdateRequest {
+  status?: FeedbackStatus;
+  is_public?: boolean;
+}

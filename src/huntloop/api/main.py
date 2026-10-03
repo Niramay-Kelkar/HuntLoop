@@ -90,7 +90,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from huntloop.api.routers import dashboard, demo_info, drafting, feedback, health, jobs, resumes
+from huntloop.api.routers import admin_feedback, dashboard, demo_info, drafting, feedback, health, jobs, resumes
 from huntloop.api.routers.drafting import _RateLimiter
 from huntloop.api.routers.resumes import MAX_UPLOAD_BYTES, MaxUploadSizeMiddleware
 from huntloop.api.trusted_client_ip import TrustedClientIPMiddleware
@@ -151,6 +151,14 @@ def create_app() -> FastAPI:
     # Public in both modes - no API key/BYOK involved, so it's not
     # subject to DEMO_MODE's drafting/resume-upload gating below.
     app.include_router(feedback.router)
+    # Admin feedback review (GET/PATCH /admin/feedback*) - mounted
+    # unconditionally in both demo and non-demo mode, same as
+    # feedback.router above. Unlike that router, every route here is
+    # gated behind huntloop.api.admin_auth.require_admin (a verified,
+    # allow-listed Clerk session) regardless of DEMO_MODE - there is no
+    # separate demo-mode carve-out for this router, since it's the site
+    # owner's own review tool, not a visitor-facing feature.
+    app.include_router(admin_feedback.router)
 
     if demo_mode:
         app.include_router(demo_info.router)

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { ClerkProvider } from "@clerk/nextjs";
 import { Public_Sans, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 import { DemoBanner } from "@/components/DemoBanner";
@@ -36,20 +37,22 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html
-      lang="en"
-      className={`${publicSans.variable} ${plexMono.variable} h-full antialiased`}
-    >
-      <body className="min-h-full flex flex-col bg-bg text-text font-sans">
-        <Providers>
-          <DemoBanner />
-          <NavBar />
-          <div className="mx-auto w-full max-w-6xl flex-1 px-6 py-7">
-            <DemoWakeUpGate>{children}</DemoWakeUpGate>
-          </div>
-          <FeedbackTrigger />
-        </Providers>
-      </body>
-    </html>
+    <ClerkProvider>
+      <html
+        lang="en"
+        className={`${publicSans.variable} ${plexMono.variable} h-full antialiased`}
+      >
+        <body className="min-h-full flex flex-col bg-bg text-text font-sans">
+          <Providers>
+            <DemoBanner />
+            <NavBar />
+            <div className="mx-auto w-full max-w-6xl flex-1 px-6 py-7">
+              <DemoWakeUpGate>{children}</DemoWakeUpGate>
+            </div>
+            <FeedbackTrigger />
+          </Providers>
+        </body>
+      </html>
+    </ClerkProvider>
   );
 }

@@ -50,3 +50,10 @@ urllib3>=2.7.0
 cryptography>=46.0.7,<47
 lxml>=6.1.0
 soupsieve>=2.8.4
+# Clerk's own official Python SDK (huntloop.api.admin_auth) - verifies
+# the admin UI's Clerk session server-side via authenticate_request(),
+# deliberately not a hand-rolled JWT/JWKS implementation. Pinned (its
+# own declared range is cryptography>=45.0.0,<51.0.0, compatible with
+# the <47 cap above - confirmed via a real `pip check` before adding
+# this).
+clerk-backend-api==7.0.0

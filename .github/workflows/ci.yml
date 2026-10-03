@@ -22,6 +22,13 @@ env:
   GROQ_API_KEY: dummy-key-for-ci
   GEMINI_API_KEY: dummy-key-for-ci
   MISTRAL_API_KEY: dummy-key-for-ci
+  # huntloop.api.admin_auth fails fast with a clear error only when an
+  # admin route is actually hit without this set - tests that exercise
+  # the "no session"/"missing key" paths set/unset it themselves via
+  # monkeypatch, but this floor keeps any other test that happens to
+  # import the module from needing to know that.
+  CLERK_SECRET_KEY: dummy-key-for-ci
+  ADMIN_ALLOWED_EMAILS: niramayrkelkar@gmail.com
   # Force sentence-transformers/huggingface offline so the model fetch
   # degrades deterministically on every run instead of depending on the
   # runner's network. Tests already expect graceful degradation
