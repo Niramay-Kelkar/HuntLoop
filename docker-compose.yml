@@ -215,6 +215,15 @@ services:
       context: ./frontend
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+        # Inlined into the client bundle by `next build`, same reasoning
+        # as NEXT_PUBLIC_API_URL above - this has to be a build arg, not
+        # a runtime environment: var. Empty/unset builds a working image
+        # that just can't sign anyone in (Clerk's own ClerkProvider
+        # throws a clear error client-side rather than this build
+        # failing) - a stranger's first `docker compose up` with no
+        # Clerk keys in .env still gets a working app for every
+        # non-/admin page.
+        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
     # Loopback-only, same reasoning as `api`'s port binding above - this
     # closes the same class of gap on the frontend's own host port.
     # Caddy (proxy profile) is unaffected, reaching this over the
@@ -222,6 +231,13 @@ services:
     # caddy/Caddyfile), not via this host-side binding.
     ports:
       - "127.0.0.1:3000:3000"
+    environment:
+      # Unlike NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY above, this is a real
+      # server-side secret the Next.js proxy (frontend/src/proxy.ts)
+      # reads per-request to verify sessions - it must be a runtime env
+      # var, not baked into the build. Same CLERK_SECRET_KEY value the
+      # `api` service already gets via its own env_file below.
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
     depends_on:
       api:
         condition: service_healthy

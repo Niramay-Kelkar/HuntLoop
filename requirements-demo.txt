@@ -50,3 +50,11 @@ requests
 prometheus-client==0.26.0
 urllib3>=2.7.0
 cryptography>=46.0.7,<47
+# huntloop.api.admin_auth (imported unconditionally by
+# huntloop.api.routers.admin_feedback, mounted in both demo and
+# non-demo mode - see huntloop.api.main) imports this at module level.
+# Added here in the SAME commit as requirements.txt specifically to
+# avoid repeating the exact prometheus-client mistake documented above -
+# verified by actually building Dockerfile.demo and confirming the
+# container imports and starts, not just by diffing this file.
+clerk-backend-api==7.0.0

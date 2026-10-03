@@ -31,6 +31,14 @@ COPY . .
 # produces a working image.
 ARG NEXT_PUBLIC_API_URL=http://localhost:8000
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+# Clerk's own publishable key (see src/app/layout.tsx's ClerkProvider,
+# src/proxy.ts) - same NEXT_PUBLIC_-inlined-at-build-time reasoning as
+# NEXT_PUBLIC_API_URL above. An empty value (the default - not every
+# deployment of this repo needs the admin UI) builds a working image;
+# ClerkProvider itself surfaces a clear client-side error if a real key
+# was actually needed and wasn't provided.
+ARG NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=""
+ENV NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
 RUN npm run build
 
 # --- runner: prod-only deps + build output, non-root, minimal surface ---

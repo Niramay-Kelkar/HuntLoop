@@ -39,7 +39,10 @@ import type {
   ResumeVersionSummary,
 } from "@/types/api";
 
-const API_BASE_URL =
+// Exported so lib/adminApi.ts (a separate module since its requests need
+// an Authorization header apiFetch below doesn't carry) can hit the same
+// backend without duplicating this fallback logic.
+export const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL ??
   (process.env.NODE_ENV === "production" ? "/api" : "http://localhost:8000");
 
