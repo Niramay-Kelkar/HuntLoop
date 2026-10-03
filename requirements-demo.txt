@@ -1,11 +1,23 @@
 # Lean dependency set for the demo API image (see Dockerfile.demo,
-# huntloop.demo_mode). Confirmed empirically, not guessed: imported
-# huntloop.api.main with DEMO_MODE=true and inspected sys.modules
-# afterward for every non-stdlib top-level package actually loaded -
-# this file is exactly that list, with the same version pins/floors
+# huntloop.demo_mode). Originally built by importing huntloop.api.main
+# with DEMO_MODE=true and inspecting sys.modules for every non-stdlib
+# top-level package actually loaded, with the same version pins/floors
 # requirements.txt already uses for each one. No sentence-transformers,
 # so no torch either (torch is pulled in only transitively via
 # sentence-transformers, nothing else in this file depends on it).
+#
+# That empirical check missed prometheus-client when the feedback
+# pipeline was added (2026-10-02, see CLAUDE.md/SESSIONS.md) - it's a
+# real import of huntloop.feedback_metrics, pulled in unconditionally by
+# huntloop.api.routers.feedback, and its absence here caused a real
+# Render demo outage (ModuleNotFoundError on container startup, not
+# caught until an actual deploy). Whenever a new module is added that
+# the API imports (even indirectly, even only in demo mode), re-run the
+# sys.modules check - or at minimum re-run the real
+# `docker build -f Dockerfile.demo` + container-start verification
+# below - before trusting this file again; a requirements.txt diff alone
+# is necessary but not sufficient, since requirements.txt can be missing
+# things too.
 #
 # Left out on purpose because the API process never imports them, even
 # with every route mounted: scrapy, playwright, beautifulsoup4,
@@ -29,5 +41,12 @@ pdfplumber==0.11.9
 pgvector==0.5.0
 groq==1.6.0
 requests
+# huntloop.feedback_metrics (imported unconditionally by
+# huntloop.api.routers.feedback, which mounts in both demo and non-demo
+# mode - see CLAUDE.md) imports this at module level. Missing here caused
+# a real Render demo outage (ModuleNotFoundError on container startup) -
+# confirmed empirically this time, not just assumed: see the actual
+# Docker build/run verification before trusting this file again.
+prometheus-client==0.26.0
 urllib3>=2.7.0
 cryptography>=46.0.7,<47
