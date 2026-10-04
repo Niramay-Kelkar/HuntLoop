@@ -12365,3 +12365,167 @@ job (it's a manual/on-demand script for now), using the research data in
 match scoring or job ranking (explicitly out of scope), and a second
 Tavily call for a dedicated funding/hiring query (deliberately avoided
 to stay at 1 credit/company).
+
+---
+
+## 2026-10-02: Sync company research data to the demo database (`feature/sync-company-research-to-demo`)
+
+**Did:** Carried the Tavily company-research snapshots (see "Company-research
+enrichment layer (Tavily)" above) over to the public demo database, and
+closed a schema gap that would have broken the demo's job-detail
+endpoint once that work reached it.
+
+**`scripts/backfill_company_research.py` gained `--only-neon-companies`:**
+restricts a run to exactly the company names currently present in the
+Neon demo database (read via `NEON_DEMO_DATABASE_URL`, read-only), in
+the same priority order as normal (never-researched first, then
+stalest) - so local research runs can be prioritized around what the
+public demo actually shows, without hardcoding a company list. Without
+the flag, existing behavior is unchanged.
+
+**New `scripts/sync_company_research_to_demo.py`:** a standalone,
+one-off sync - not part of `build_demo_dataset.py`/`deploy_demo_data.py`'s
+full snapshot rebuild. Reads local `company_research` rows (read-only,
+`SOURCE_DATABASE_URL`) and upserts them into Neon's `company_research`
+table (`NEON_DEMO_DATABASE_URL`) matched by company NAME, not id - local
+and Neon company ids don't correspond to the same company, since Neon's
+dataset is an independently-sampled subset. Idempotent
+(`ON CONFLICT (company_id) DO UPDATE`); local companies with research
+that aren't in Neon's company set are logged and skipped, not silently
+dropped.
+
+**Also applied, directly against the live Neon database, the two
+migrations it was missing** (the feedback table, and the
+`company_research`/`tavily_usage` tables) - per the commit message,
+specifically so `GET /jobs/{id}` would not 500 once Render deployed the
+already-merged company-research-enrichment work.
+
+**Branch:** `feature/sync-company-research-to-demo`.
+
+---
+
+## 2026-10-02: Fix a real production outage - missing `prometheus-client` in the demo requirements (`fix/demo-missing-dependencies`)
+
+**Did:** The live Render demo container crash-looped once the feedback
+pipeline reached it - `requirements-demo.txt` never carried
+`prometheus-client`, and `huntloop.api.routers.feedback` (mounted
+unconditionally in both demo and non-demo mode) imports
+`huntloop.feedback_metrics`, which imports `prometheus_client` at
+module level, so the container `ModuleNotFoundError`'d on startup.
+
+**Root cause:** `requirements-demo.txt` was originally built by
+importing `huntloop.api.main` with `DEMO_MODE=true` and inspecting
+`sys.modules` for every third-party package actually loaded, then
+keeping exactly that list. That check was never re-run after the
+feedback pipeline was added, so the file silently fell out of sync with
+what the API process actually imports.
+
+**Fix:** added `prometheus-client==0.26.0` to `requirements-demo.txt`,
+and re-ran the same `sys.modules` check to confirm it was the only real
+gap - no Tavily SDK import exists anywhere, since
+`huntloop.company_research` only uses `requests`, already present.
+Also confirmed `feedback_metrics.record_feedback_submission()`'s
+existing broad try/except around its `push_to_gateway` call already
+degrades gracefully with no pushgateway reachable (returns in ~40ms, no
+code change needed there).
+
+**Verified:** built `Dockerfile.demo` for real and ran it with
+`DEMO_MODE=true` - uvicorn starts and `GET /health` returns 200, no
+restarts. Full local backend suite (502 tests at the time) unchanged.
+
+**Branch:** `fix/demo-missing-dependencies`.
+
+---
+
+## 2026-10-03: Add a Clerk-protected admin dashboard for feedback review (`feature/clerk-admin-auth`)
+
+**Did:** Replaced the terminal-only `scripts/review_feedback.py`
+workflow with a real web UI at `/admin/feedback`, gated behind two
+layers of auth: a valid Clerk session (verified server-side via the
+official `clerk-backend-api` SDK, not hand-rolled JWT verification) AND
+the session's real primary email being on an `ADMIN_ALLOWED_EMAILS`
+allowlist - a valid Clerk login alone isn't enough, since anyone can
+sign up for a Clerk account on the public demo.
+
+**New `huntloop.api.admin_auth`:** `require_admin()` is the FastAPI
+dependency every admin route uses - 500 if `CLERK_SECRET_KEY` itself
+isn't configured, 401 if there's no valid Clerk session, 403 if the
+session is valid but its email isn't allow-listed. The email check
+reads the user's real primary email from Clerk's Users API by the
+verified token's `sub` claim, rather than trusting a claim on the
+session token itself - a default Clerk session token doesn't carry
+email at all unless "Customize session token" is explicitly configured
+on that Clerk instance, so trusting a token claim would have silently
+admitted nobody. `_authenticate_request_state()`/`_fetch_primary_email()`
+are split out specifically so tests can monkeypatch them instead of
+needing a real signed Clerk session token.
+
+**New `huntloop.api.routers.admin_feedback`** (`GET /admin/feedback`,
+`PATCH /admin/feedback/{id}`) exposes every feedback row including
+`raw_text`, gated behind `require_admin()` on every route - a
+deliberately separate router/module from the existing public
+`POST /feedback`/`GET /feedback/public`, which stay completely
+untouched and unauthenticated.
+
+**Frontend:** `frontend/src/proxy.ts` (new - Clerk's own middleware,
+protecting the `/admin` route tree so a signed-out visitor is
+redirected to sign-in before the page ever renders; the first of the
+two checks, not a substitute for the backend's email-allowlist check)
+and `frontend/src/app/admin/feedback/page.tsx` (new admin review UI,
+driving the new endpoints via `frontend/src/lib/adminApi.ts`).
+
+**`clerk-backend-api` added to both `requirements.txt` and
+`requirements-demo.txt`** in this same commit, verified by actually
+building `Dockerfile.demo` and starting the container - the exact class
+of gap the prometheus-client incident above had just been caused by.
+
+**Tests:** 10 new backend tests (`tests/test_api_admin_feedback.py`)
+covering the new admin endpoints.
+
+**Branch:** `feature/clerk-admin-auth`.
+
+---
+
+## 2026-10-03: Fix `/admin/feedback` failing to load on the live demo; add an admin nav link (`fix/admin-feedback-load-failure`)
+
+**Did:** A real, second production incident, found and fixed against
+the live Render backend with a real production Clerk session token -
+`/admin/feedback` rejected every admin session with a 401, for both the
+allow-listed account and any other account alike.
+
+**Root cause:** `CLERK_AUTHORIZED_PARTIES` was never set on Render, so
+`huntloop.api.admin_auth._authorized_parties()` fell back to its
+localhost-only default. Every real admin session's token carries
+`azp=https://huntloop-demo.vercel.app`, which never matched that
+default, so Clerk's SDK rejected the token outright at the
+authorized-party replay-protection check - before the email-allowlist
+check ever ran, which is why it failed identically regardless of which
+account signed in.
+
+**Fix:** `_authorized_parties()` now falls back to
+`CORS_ALLOWED_ORIGINS` (already correctly set on Render, since every
+other cross-origin call already depended on it) before falling further
+back to the localhost-only default - fixing production with no new
+Render env var needed. Verified by decoding the real token's `azp`
+claim and replaying it against a local backend configured the way
+Render actually is (`CORS_ALLOWED_ORIGINS` set, `CLERK_AUTHORIZED_PARTIES`
+unset): 401 before the fix, 200 with real data after. `render.yaml`/
+`docs/DEPLOY_DEMO.md` updated to document `CLERK_SECRET_KEY`/
+`ADMIN_ALLOWED_EMAILS` and explain the fallback.
+
+**Also added an admin nav link**, shown only once a new
+`GET /admin/whoami` call succeeds for the signed-in Clerk session
+(reusing `require_admin()` rather than duplicating
+`ADMIN_ALLOWED_EMAILS` into the frontend). Caught and fixed a real bug
+while verifying this live: the nav query needs to be keyed on Clerk's
+`userId`, not a fixed query key - `enabled: false` alone doesn't clear a
+TanStack Query's previous result, so without this the admin link stayed
+visible after sign-out until a full page reload.
+
+**Tests:** 4 new backend tests (`tests/test_admin_auth.py`, exercising
+the real `_authorized_parties()` precedence logic directly) + 3 new
+backend tests (`tests/test_api_admin_whoami.py`) + 4 new frontend tests
+(`frontend/src/components/NavBar.test.tsx`, including a regression test
+for the stale-admin-link-after-sign-out bug).
+
+**Branch:** `fix/admin-feedback-load-failure`.
