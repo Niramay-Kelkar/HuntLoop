@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import { draftAnswer } from "@/lib/api";
 import { DRAFT_SETTINGS_CHANGED_EVENT, readDraftSettings } from "@/lib/draftSettings";
-import { formatWage } from "@/lib/theme";
+import { companyLabel, formatWage } from "@/lib/theme";
 import type { DraftAnswerProvider, JobDetail } from "@/types/api";
 
 /**
@@ -260,7 +260,7 @@ const QUESTIONS: Question[] = [
 ];
 
 function answerSponsor(detail: JobDetail): string {
-  const company = detail.company_name;
+  const company = companyLabel(detail);
   if (detail.sponsor_check_status === "confirmed" && detail.sponsor) {
     const s = detail.sponsor;
     const wage = s.median_wage !== null ? `, median wage ${formatWage(s.median_wage)}` : "";
@@ -286,7 +286,7 @@ function answerSponsor(detail: JobDetail): string {
 function answerSalary(detail: JobDetail): string {
   if (!detail.salary_estimate) {
     return (
-      `No salary estimate is available for this role. That's because ${detail.company_name} either has no ` +
+      `No salary estimate is available for this role. That's because ${companyLabel(detail)} either has no ` +
       `resolved DOL sponsor match or no annual-wage filings on record to estimate from — not because the ` +
       `salary is known to be zero or unlisted by choice.`
     );

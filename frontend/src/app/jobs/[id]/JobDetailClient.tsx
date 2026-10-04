@@ -10,7 +10,7 @@ import { JobAssistantPanel } from "@/components/JobAssistantPanel";
 import { NotesEditor } from "@/components/NotesEditor";
 import { ScoreIndicator } from "@/components/ScoreIndicator";
 import { StatusControl } from "@/components/StatusControl";
-import { avatarColors, formatDate, formatWage, initials, timeAgo } from "@/lib/theme";
+import { avatarColors, companyLabel, formatDate, formatWage, initials, timeAgo } from "@/lib/theme";
 import { sanitizeJobDescription } from "@/lib/sanitizeHtml";
 import { isDemoMode } from "@/lib/demoMode";
 
@@ -41,6 +41,7 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
   }
 
   const detail = job.data;
+  const company = companyLabel(detail);
   const avatar = avatarColors(detail.id);
   const postedDate = formatDate(detail.date_posted);
   const matched = detail.matched_skills ?? [];
@@ -66,14 +67,14 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
                   className="grid h-12 w-12 flex-none place-items-center rounded-sm font-mono text-base font-semibold"
                   style={{ backgroundColor: avatar.bg, color: avatar.color }}
                 >
-                  {initials(detail.company_name)}
+                  {initials(company)}
                 </div>
                 <div className="min-w-0 flex-1">
                   <h1 className="text-xl font-bold leading-tight tracking-tight text-text">
                     {detail.job_title}
                   </h1>
                   <p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-text-muted">
-                    <span>{detail.company_name}</span>
+                    <span>{company}</span>
                     {detail.department && (
                       <span className="border border-border px-1.5 py-px font-mono text-2xs uppercase tracking-[0.04em] text-text-muted">
                         {detail.department}
@@ -201,7 +202,7 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
             <h3 className="mb-3 text-sm font-semibold text-text">Company</h3>
             <div className="flex flex-col text-sm">
               <Row label="Name">
-                <span className="font-semibold text-text">{detail.company_name}</span>
+                <span className="font-semibold text-text">{company}</span>
               </Row>
               <Row label="Department">
                 <span className="flex flex-col items-end">

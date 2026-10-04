@@ -5,11 +5,12 @@ import { ScoreIndicator } from "./ScoreIndicator";
 import { SkillChipsPreview } from "./SkillChips";
 import { SponsorBadge } from "./SponsorBadge";
 import { StatusControl } from "./StatusControl";
-import { avatarColors, formatDate, formatWage, initials } from "@/lib/theme";
+import { avatarColors, companyLabel, formatDate, formatWage, initials } from "@/lib/theme";
 
 export function JobCard({ job }: { job: JobSummary }) {
   const postedDate = formatDate(job.date_posted);
   const avatar = avatarColors(job.id);
+  const company = companyLabel(job);
 
   return (
     <article className="relative flex flex-col gap-3 border border-border border-t-2 border-t-accent bg-surface p-4 transition-colors hover:border-border-strong hover:border-t-accent">
@@ -20,13 +21,13 @@ export function JobCard({ job }: { job: JobSummary }) {
           className="grid h-[34px] w-[34px] flex-none place-items-center rounded-sm font-mono text-sm font-semibold"
           style={{ backgroundColor: avatar.bg, color: avatar.color }}
         >
-          {initials(job.company_name)}
+          {initials(company)}
         </div>
         <div className="min-w-0 flex-1">
           <p className="truncate text-base font-bold leading-tight tracking-tight text-text">
             {job.job_title}
           </p>
-          <p className="mt-0.5 text-sm text-text-subtle">{job.company_name}</p>
+          <p className="mt-0.5 text-sm text-text-subtle">{company}</p>
         </div>
         <ScoreIndicator score={job.match_score} size="sm" provisional={job.score_basis === "partial"} />
       </div>

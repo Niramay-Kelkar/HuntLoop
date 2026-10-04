@@ -5,7 +5,7 @@ import Link from "next/link";
 
 import type { JobSummary } from "@/types/api";
 import { useApplicationStatusMutation } from "@/hooks/useApplicationStatus";
-import { STATUS_META, STATUS_ORDER, avatarColors, initials, scoreTier, timeAgo } from "@/lib/theme";
+import { STATUS_META, STATUS_ORDER, avatarColors, companyLabel, initials, scoreTier, timeAgo } from "@/lib/theme";
 import type { ApplicationStatus } from "@/types/api";
 
 /**
@@ -53,6 +53,7 @@ export function KanbanBoard({ jobs }: { jobs: JobSummary[] }) {
 
             {colJobs.map((job) => {
               const avatar = avatarColors(job.id);
+              const company = companyLabel(job);
               const tier = job.match_score !== null ? scoreTier(job.match_score) : null;
               const updatedLabel = timeAgo(job.status_updated_at);
               return (
@@ -71,11 +72,11 @@ export function KanbanBoard({ jobs }: { jobs: JobSummary[] }) {
                       className="grid h-[28px] w-[28px] flex-none place-items-center rounded-sm font-mono text-2xs font-semibold"
                       style={{ backgroundColor: avatar.bg, color: avatar.color }}
                     >
-                      {initials(job.company_name)}
+                      {initials(company)}
                     </div>
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-semibold text-text">{job.job_title}</div>
-                      <div className="text-xs text-text-subtle">{job.company_name}</div>
+                      <div className="text-xs text-text-subtle">{company}</div>
                     </div>
                   </div>
                   <div className="flex items-center justify-between">

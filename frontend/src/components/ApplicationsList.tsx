@@ -4,7 +4,7 @@ import type { JobSummary } from "@/types/api";
 import { EmptyState } from "./EmptyState";
 import { NotesEditor } from "./NotesEditor";
 import { StatusControl } from "./StatusControl";
-import { STATUS_ORDER, avatarColors, formatDate, initials, scoreTier, timeAgo } from "@/lib/theme";
+import { STATUS_ORDER, avatarColors, companyLabel, formatDate, initials, scoreTier, timeAgo } from "@/lib/theme";
 
 /** List view of the applications tracker - every job with a status other
  * than "not applied", ordered by STATUS_ORDER (not by date). Unlike the
@@ -30,6 +30,7 @@ export function ApplicationsList({ jobs }: { jobs: JobSummary[] }) {
     <div className="border-x border-t border-border">
       {tracked.map((job) => {
         const avatar = avatarColors(job.id);
+        const company = companyLabel(job);
         const tier = job.match_score !== null ? scoreTier(job.match_score) : null;
         const updated = timeAgo(job.status_updated_at);
         return (
@@ -40,12 +41,12 @@ export function ApplicationsList({ jobs }: { jobs: JobSummary[] }) {
                   className="grid h-[28px] w-[28px] flex-none place-items-center rounded-sm font-mono text-2xs font-semibold"
                   style={{ backgroundColor: avatar.bg, color: avatar.color }}
                 >
-                  {initials(job.company_name)}
+                  {initials(company)}
                 </div>
                 <div className="min-w-0">
                   <div className="truncate text-sm font-semibold text-text">{job.job_title}</div>
                   <div className="truncate text-xs text-text-subtle">
-                    {job.company_name}
+                    {company}
                     {job.locations.length > 0 ? ` / ${job.locations[0]}` : ""}
                   </div>
                 </div>

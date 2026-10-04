@@ -41,6 +41,7 @@ from typing import Any, Iterable
 import scrapy
 
 from .. import metrics
+from ..company_display_name import pick_smartrecruiters_display_name
 from ..items import JobPostingItem
 
 logger = logging.getLogger(__name__)
@@ -215,6 +216,10 @@ class SmartRecruitersScraper(scrapy.Spider):
         item["job_url"] = detail.get("postingUrl") or list_posting.get("postingUrl") or response.url
         item["job_description"] = self._description(detail)
         item["company_name"] = company_id
+        company = detail.get("company") or list_posting.get("company") or {}
+        item["company_display_name"] = pick_smartrecruiters_display_name(
+            company_id, company.get("identifier"), company.get("name")
+        )
         item["name"] = self.name  # source name: smartrecruiters_api
         item["date_posted"] = detail.get("releasedDate") or list_posting.get("releasedDate")
         item["department"] = dept.get("label")

@@ -11,6 +11,7 @@ function makeDetail(overrides: Partial<JobDetail> = {}): JobDetail {
     id: 1,
     job_title: "Software Engineer",
     company_name: "Acme Corp",
+    company_display_name: null,
     job_url: "https://example.com/job/1",
     department: null,
     department_category: null,

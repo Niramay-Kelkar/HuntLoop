@@ -51,7 +51,8 @@ export default function ApplicationsPage() {
         : allItems.filter(
             (j) =>
               j.job_title.toLowerCase().includes(query) ||
-              j.company_name.toLowerCase().includes(query),
+              j.company_name.toLowerCase().includes(query) ||
+              (j.company_display_name ?? "").toLowerCase().includes(query),
           ),
     [allItems, query],
   );

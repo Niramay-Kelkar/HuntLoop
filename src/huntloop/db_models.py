@@ -86,6 +86,13 @@ class Company(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(255), unique=True, nullable=False)
+    # Human-readable company name for display only - NOT a replacement for
+    # `name` (the lowercase ATS slug), which stays the dedup/sync/filter key
+    # everywhere. Nullable - populated per-platform where a reliable source
+    # exists (see scripts/backfill_company_display_names.py); NULL means
+    # "no reliable source found yet", not "blank on purpose" - callers
+    # should fall back to `name` when this is NULL.
+    display_name = Column(String(255), nullable=True)
     website = Column(String(255), nullable=True)
     # Kept for now even though real sponsorship data will live in a
     # separate table later.

@@ -32,6 +32,10 @@ class JobPostingItem(scrapy.Item):
     # Data for 'companies' Table
     # We only need the name to check/insert the company
     company_name = scrapy.Field()
+    # Optional: a human-readable company name, when the source exposes one
+    # alongside the slug (e.g. SmartRecruiters' own posting responses).
+    # Populates companies.display_name; never used for dedup/matching.
+    company_display_name = scrapy.Field()
 
     metadata_json = scrapy.Field()
 
