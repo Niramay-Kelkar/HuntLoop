@@ -62,3 +62,14 @@ export function updateAdminFeedback(
     body: JSON.stringify(payload),
   });
 }
+
+// GET /admin/whoami (huntloop.api.routers.admin) - succeeds (200) only
+// for a verified, allow-listed Clerk session, same two-layer check
+// every other /admin/* route enforces. NavBar.tsx uses only
+// success/failure of this call to decide whether to render a link to
+// /admin/feedback - deliberately NOT a second, frontend-side copy of
+// ADMIN_ALLOWED_EMAILS, which would be a config value that could
+// silently drift from the backend's real one.
+export function getAdminWhoami(token: string): Promise<{ email: string }> {
+  return adminFetch<{ email: string }>("/admin/whoami", token);
+}

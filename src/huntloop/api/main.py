@@ -90,7 +90,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from huntloop.api.routers import admin_feedback, dashboard, demo_info, drafting, feedback, health, jobs, resumes
+from huntloop.api.routers import admin, admin_feedback, dashboard, demo_info, drafting, feedback, health, jobs, resumes
 from huntloop.api.routers.drafting import _RateLimiter
 from huntloop.api.routers.resumes import MAX_UPLOAD_BYTES, MaxUploadSizeMiddleware
 from huntloop.api.trusted_client_ip import TrustedClientIPMiddleware
@@ -159,6 +159,10 @@ def create_app() -> FastAPI:
     # separate demo-mode carve-out for this router, since it's the site
     # owner's own review tool, not a visitor-facing feature.
     app.include_router(admin_feedback.router)
+    # GET /admin/whoami - same unconditional-in-both-modes, require_admin-gated
+    # treatment as admin_feedback.router above. Used only by the frontend
+    # nav to decide whether to render a link to /admin/feedback at all.
+    app.include_router(admin.router)
 
     if demo_mode:
         app.include_router(demo_info.router)

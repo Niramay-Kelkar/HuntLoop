@@ -50,11 +50,9 @@ from fastapi import HTTPException, Request
 
 logger = logging.getLogger(__name__)
 
-# Same default origins huntloop.api.main's CORS_ALLOWED_ORIGINS already
-# uses - kept as a separate env var (not read from CORS_ALLOWED_ORIGINS
-# directly) since the two are conceptually different allowlists (CORS
-# vs. Clerk's own replay-protection "authorized parties" check) that
-# happen to usually be the same set of origins; see .env.example.
+# Last-resort fallback only - see _authorized_parties() below, which
+# prefers CLERK_AUTHORIZED_PARTIES, then CORS_ALLOWED_ORIGINS, before
+# ever reaching this.
 _DEFAULT_AUTHORIZED_PARTIES = "http://localhost:3000,http://127.0.0.1:3000"
 _DEFAULT_ADMIN_ALLOWED_EMAILS = "niramayrkelkar@gmail.com"
 
@@ -84,7 +82,30 @@ def _clerk_client() -> Clerk:
 
 
 def _authorized_parties() -> list[str]:
-    raw = os.getenv("CLERK_AUTHORIZED_PARTIES", _DEFAULT_AUTHORIZED_PARTIES)
+    # Falls back to CORS_ALLOWED_ORIGINS (huntloop.api.main), not
+    # straight to the localhost-only default, when CLERK_AUTHORIZED_PARTIES
+    # itself is unset. Root-caused 2026-10 (see SESSIONS.md): the live
+    # Render deploy had CORS_ALLOWED_ORIGINS correctly set to the real
+    # Vercel origin (every other cross-origin call already worked) but
+    # no one had ever been told CLERK_AUTHORIZED_PARTIES was a SEPARATE
+    # var it also needed - so it silently defaulted to localhost-only,
+    # and every real admin session (right email or wrong) failed Clerk's
+    # own azp/authorized-party check with a 401 "Invalid or missing
+    # admin session" before the email-allowlist check ever ran -
+    # confirmed by decoding a real production session token's `azp`
+    # claim (https://huntloop-demo.vercel.app) against the stale default.
+    # These two vars are conceptually distinct (CORS vs. Clerk's replay
+    # protection) but in every deployment this project runs, the set of
+    # trusted frontend origins is identical - so reusing CORS_ALLOWED_ORIGINS
+    # as the default means a correctly-configured deployment doesn't
+    # ALSO need to remember a second, Clerk-specific copy of the same
+    # list. CLERK_AUTHORIZED_PARTIES still works as an explicit override
+    # for the rare case the two should ever diverge.
+    raw = (
+        os.getenv("CLERK_AUTHORIZED_PARTIES")
+        or os.getenv("CORS_ALLOWED_ORIGINS")
+        or _DEFAULT_AUTHORIZED_PARTIES
+    )
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 

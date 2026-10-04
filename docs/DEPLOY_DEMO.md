@@ -121,9 +121,21 @@ just rerun the same command.
      Vercel URL once step 4 gives you one (see "Wire CORS" below). Render
      lets you edit env vars after the first deploy without needing to
      re-run the Blueprint.
+   - `CLERK_SECRET_KEY` - from your Clerk app's dashboard (Configure ->
+     API Keys). This must be the same Clerk application whose
+     publishable key you set on Vercel in step 4 below - Clerk issues
+     one secret key per application, shared by both the frontend's own
+     Next.js proxy and this API.
+   - `ADMIN_ALLOWED_EMAILS` - comma-separated Clerk account email(s)
+     allowed to reach `/admin/feedback` (huntloop.api.admin_auth). A
+     valid Clerk login alone is not enough - anyone can sign up for a
+     Clerk account on the public demo, so this allowlist is what
+     actually gates admin access.
 5. Every other env var (`DEMO_MODE`, `DEMO_RATE_LIMIT_MAX_REQUESTS`,
    `DEMO_RATE_LIMIT_WINDOW_SECONDS`, `TRUSTED_PROXY_IPS`) already has a
-   fixed value in `render.yaml` - nothing else to fill in.
+   fixed value in `render.yaml` - nothing else to fill in. (There is
+   deliberately no `CLERK_AUTHORIZED_PARTIES` var - see "Wire CORS"
+   below for why `CORS_ALLOWED_ORIGINS` alone already covers it.)
 6. Deploy. Watch the build logs, then once it's live, hit
    `https://<your-service>.onrender.com/health` and confirm it returns
    `{"status": "ok"}`.
@@ -171,6 +183,17 @@ what `render.yaml` already sets.
    - `NEXT_PUBLIC_API_URL` = your Render service's URL from step 3
      (`https://<your-service>.onrender.com`), no trailing slash.
    - `NEXT_PUBLIC_DEMO_MODE` = `true`.
+   - `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` = from the same Clerk app
+     whose secret key you set on Render in step 3 (Clerk dashboard ->
+     Configure -> API Keys).
+   - `CLERK_SECRET_KEY` - yes, also here, not just on Render: the
+     frontend's own proxy (`frontend/src/proxy.ts`) verifies the Clerk
+     session itself (to redirect a signed-out visitor to sign-in before
+     `/admin/feedback` ever renders) and needs this server-side secret
+     to do so, separately from this API's own verification of the same
+     token. Set as a plain (non-`NEXT_PUBLIC_`) environment variable -
+     never prefix it with `NEXT_PUBLIC_`, which would bake a real
+     secret into the public browser bundle.
 5. Deploy. Vercel gives you a URL
    (`https://<your-project>.vercel.app` or similar).
 
@@ -181,6 +204,25 @@ variables, and set `CORS_ALLOWED_ORIGINS` to your real Vercel URL from
 step 4 (exact origin, e.g. `https://your-project.vercel.app`, no
 trailing slash, comma-separated if you also want to allow a custom
 domain). Save - Render redeploys the service with the new value.
+
+### Why this also fixes Clerk admin logins, not just CORS
+
+`CORS_ALLOWED_ORIGINS` isn't only a CORS setting here.
+`huntloop.api.admin_auth._authorized_parties()` (the Clerk SDK's own
+replay-protection check - it rejects a session token whose `azp` claim
+isn't a trusted origin) falls back to this same `CORS_ALLOWED_ORIGINS`
+value whenever `CLERK_AUTHORIZED_PARTIES` itself is unset, which it
+deliberately is in `render.yaml` (see that file's own comment). **This
+step is therefore required for `/admin/feedback` to work at all, not
+just for the frontend to be able to call the API** - skipping it, or
+setting `CORS_ALLOWED_ORIGINS` to the wrong origin, makes every admin
+session fail Clerk's authorized-party check with a 401, regardless of
+whether the signed-in email is on `ADMIN_ALLOWED_EMAILS` (this is
+exactly what happened in the 2026-10 incident that added this
+paragraph - see SESSIONS.md "Admin feedback page failed to load on the
+live demo"). If you ever need the Clerk-trusted origin to genuinely
+differ from the CORS origin, set `CLERK_AUTHORIZED_PARTIES` explicitly
+on Render to override this fallback.
 
 ## 6. Run the smoke test against the live URLs
 

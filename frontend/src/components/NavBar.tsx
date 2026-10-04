@@ -2,8 +2,11 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useAuth } from "@clerk/nextjs";
+import { useQuery } from "@tanstack/react-query";
 
 import { DraftSettingsModal } from "@/components/DraftSettingsModal";
+import { getAdminWhoami } from "@/lib/adminApi";
 import { isDemoMode } from "@/lib/demoMode";
 
 const NAV_ITEMS = [
@@ -13,8 +16,47 @@ const NAV_ITEMS = [
   { href: "/resumes", label: "Resume" },
 ];
 
+/**
+ * Whether to show the Admin nav link - true only once GET /admin/whoami
+ * (huntloop.api.routers.admin) actually succeeds for this signed-in
+ * Clerk session, never from a frontend-side copy of ADMIN_ALLOWED_EMAILS
+ * (see lib/adminApi.ts's getAdminWhoami docstring for why). The query is
+ * disabled entirely for a signed-out visitor - the overwhelming majority
+ * of public-demo traffic - so this costs nothing for them.
+ *
+ * The query key includes userId (not just a fixed "admin-whoami"
+ * string) specifically so a client-side sign-out, or switching to a
+ * different Clerk account, doesn't leave a stale successful result
+ * around - `enabled: false` alone does NOT clear a query's previous
+ * data/isSuccess in TanStack Query, so without this the Admin link
+ * would keep showing after sign-out until a full page reload (caught
+ * live while verifying this: sign out via the SPA, client-navigate
+ * elsewhere, and the link was still there). A signed-out userId is
+ * `null`/`undefined`, giving a key this hook never actually fetches for
+ * (enabled stays false), so it carries no stale data of its own either.
+ */
+function useIsAdmin(): boolean {
+  const { isSignedIn, userId, getToken } = useAuth();
+
+  const whoami = useQuery({
+    queryKey: ["admin-whoami", userId],
+    queryFn: async () => {
+      const token = await getToken();
+      if (!token) throw new Error("Not signed in.");
+      return getAdminWhoami(token);
+    },
+    enabled: isSignedIn === true,
+    staleTime: Infinity,
+    retry: false,
+  });
+
+  return whoami.isSuccess;
+}
+
 export function NavBar() {
   const pathname = usePathname();
+  const isAdmin = useIsAdmin();
+  const navItems = isAdmin ? [...NAV_ITEMS, { href: "/admin/feedback", label: "Admin" }] : NAV_ITEMS;
 
   return (
     <div className="sticky top-0 z-30 border-b border-border bg-surface">
@@ -26,7 +68,7 @@ export function NavBar() {
           <span className="font-mono text-base font-semibold tracking-tight">HuntLoop</span>
         </Link>
         <nav className="flex flex-wrap items-center gap-0.5">
-          {NAV_ITEMS.map((item) => {
+          {navItems.map((item) => {
             // /jobs/[id] should still highlight the Jobs tab.
             const isActive = item.href === "/jobs" ? pathname.startsWith("/jobs") : pathname === item.href;
             return (

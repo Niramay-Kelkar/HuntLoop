@@ -35,11 +35,11 @@ def test_demo_mode_off_mounts_all_routes(api_client):
     from huntloop.api.main import app as default_app
 
     paths = default_app.openapi()["paths"]
-    # 14 pre-existing routes (12 + POST /feedback + GET /feedback/public)
-    # + GET /admin/feedback + PATCH /admin/feedback/{feedback_id}
-    # (huntloop.api.routers.admin_feedback, mounted unconditionally in
-    # both demo and non-demo mode - see huntloop.api.main).
-    assert len(paths) == 16
+    # 16 pre-existing routes (12 + POST /feedback + GET /feedback/public
+    # + GET /admin/feedback + PATCH /admin/feedback/{feedback_id}) +
+    # GET /admin/whoami (huntloop.api.routers.admin, mounted
+    # unconditionally in both demo and non-demo mode - see huntloop.api.main).
+    assert len(paths) == 17
     assert "/jobs/{job_id}/draft-answer" in paths
     assert "/resumes/upload" in paths
     assert "/resumes/{resume_id}/activate" in paths
@@ -47,6 +47,7 @@ def test_demo_mode_off_mounts_all_routes(api_client):
     assert "/feedback/public" in paths
     assert "/admin/feedback" in paths
     assert "/admin/feedback/{feedback_id}" in paths
+    assert "/admin/whoami" in paths
     assert "/demo-info" not in paths
 
 
