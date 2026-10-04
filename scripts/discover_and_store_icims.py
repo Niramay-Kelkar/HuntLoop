@@ -160,14 +160,24 @@ def upsert(session, to_store: list[dict]) -> tuple[int, int]:
             continue
         done.add(slug)
         careers_url = f"https://careers-{slug}.icims.com"
+        # org_name was already fetched during evaluate()'s confidence
+        # check (the same title-minus-"Job Listings at " extraction
+        # huntloop.company_display_name.fetch_icims_display_name does) -
+        # no extra network call here.
+        display_name = r.get("org_name")
         existing = session.query(Company).filter_by(name=slug).first()
         if existing is None:
-            session.add(Company(name=slug, ats_platform="icims", ats_token=slug, careers_url=careers_url))
+            session.add(Company(
+                name=slug, ats_platform="icims", ats_token=slug, careers_url=careers_url,
+                display_name=display_name,
+            ))
             inserted += 1
         elif existing.ats_platform in (None, "unknown"):
             existing.ats_platform = "icims"
             existing.ats_token = slug
             existing.careers_url = existing.careers_url or careers_url
+            if display_name and not existing.display_name:
+                existing.display_name = display_name
             updated += 1
     session.commit()
     return inserted, updated
