@@ -132,6 +132,16 @@ def discover_one(hit):
 
 
 def upsert(session, stored):
+    # No display_name is set here, deliberately - a brand-new Workday
+    # company has no companies.matched_sponsor_employer_name yet (that
+    # column is only populated later, by a separate manual run of
+    # scripts/resolve_sponsor_matches.py - never inline during
+    # onboarding), and Workday has no ATS-side proper-name source to
+    # fall back to otherwise (see huntloop.company_display_name's module
+    # docstring). resolve_sponsor_matches.py is the correct hook point
+    # for this platform's display_name fallback; it fills it in once a
+    # sponsor match exists, whether that's on this company's first
+    # sponsor-resolution run or a later one.
     inserted = updated = 0
     for r in stored:
         slug = r["slug"]

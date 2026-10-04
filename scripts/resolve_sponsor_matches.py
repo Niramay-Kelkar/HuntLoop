@@ -28,6 +28,25 @@ Also stamps `companies.sponsor_checked_at` with the current time for
 every row it processes, whether or not a match is found - this is what
 distinguishes "checked, no match" from "never checked" downstream (see
 migration d4e5f6a7b8c9).
+
+**Also the correct "going forward" hook point for Workday's
+companies.display_name fallback** (huntloop.company_display_name.
+casefold_legal_entity_name) - NOT Workday's onboarding/discovery script
+(scripts/discover_and_store_workday.py). Checked the real order of
+operations before wiring this: a brand-new Workday company is inserted
+by that discovery script with matched_sponsor_employer_name still NULL
+- this script is the one that fills that column in, and it runs later,
+manually, as its own separate step (see above), never inline during
+onboarding. So onboarding is the wrong place to compute this fallback;
+this script - which already has the resolved name in hand for every
+company it processes - is the only place a Workday company's
+display_name can be derived from, both for new companies and for a
+future re-run after sponsor_name_overrides changes. Scoped to
+ats_platform == "workday" specifically (Lever/Ashby/iCIMS/Greenhouse/
+SmartRecruiters/Gem already get a display_name from a real ATS-side
+source elsewhere - this fallback is never used to override or
+second-guess that), and only ever fills a currently-NULL display_name,
+never overwrites one.
 """
 
 import logging
@@ -46,6 +65,7 @@ load_dotenv()
 from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
+from huntloop.company_display_name import casefold_legal_entity_name  # noqa: E402
 from huntloop.db_models import Company  # noqa: E402
 from huntloop.logging_config import setup_logging  # noqa: E402
 from huntloop.matching.fuzzy_match import find_matching_employers  # noqa: E402
@@ -75,6 +95,8 @@ def main():
             if matches:
                 top = matches[0]
                 company.matched_sponsor_employer_name = top.employer_name_normalized
+                if company.ats_platform == "workday" and not company.display_name:
+                    company.display_name = casefold_legal_entity_name(top.employer_name_normalized)
                 resolved += 1
                 logger.info(
                     f"{company.name!r} -> {top.employer_name_normalized!r} "
