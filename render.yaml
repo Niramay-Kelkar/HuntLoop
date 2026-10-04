@@ -43,3 +43,23 @@ services:
         value: "60"
       - key: TRUSTED_PROXY_IPS
         value: "127.0.0.1"
+      # Required for the Clerk-protected /admin/feedback API
+      # (huntloop.api.admin_auth) - sync: false, same reasoning as
+      # DATABASE_URL/CORS_ALLOWED_ORIGINS above, never committed. Get
+      # CLERK_SECRET_KEY from the Clerk dashboard (Configure -> API
+      # Keys); it must be the SAME Clerk application the frontend's own
+      # NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY (Vercel) uses.
+      #
+      # CLERK_AUTHORIZED_PARTIES is deliberately NOT listed here - as of
+      # the 2026-10 "admin feedback page failed to load" incident (see
+      # SESSIONS.md), huntloop.api.admin_auth._authorized_parties()
+      # falls back to this same CORS_ALLOWED_ORIGINS value when
+      # CLERK_AUTHORIZED_PARTIES itself is unset, so a correctly-set
+      # CORS_ALLOWED_ORIGINS (above) is sufficient on its own - don't
+      # add a separate CLERK_AUTHORIZED_PARTIES var here unless the
+      # trusted Clerk origin ever needs to genuinely differ from the
+      # CORS origin.
+      - key: CLERK_SECRET_KEY
+        sync: false
+      - key: ADMIN_ALLOWED_EMAILS
+        sync: false
