@@ -164,6 +164,7 @@ def _row_to_summary(row) -> JobSummary:
         id=job.id,
         job_title=job.job_title,
         company_name=row.company_name,
+        company_display_name=row.company_display_name,
         job_url=job.job_url,
         department=job.department,
         department_category=job.department_category,
@@ -360,6 +361,7 @@ def list_jobs(
         select(
             JobPosting,
             Company.name.label("company_name"),
+            Company.display_name.label("company_display_name"),
             Company.matched_sponsor_employer_name,
             score_expr,
             basis_expr,
@@ -485,6 +487,7 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
         id=job.id,
         job_title=job.job_title,
         company_name=company.name,
+        company_display_name=company.display_name,
         job_url=job.job_url,
         department=job.department,
         department_category=job.department_category,

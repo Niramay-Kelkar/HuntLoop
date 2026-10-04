@@ -159,10 +159,19 @@ class JobDataPipeline:
                 metrics.scrape_errors_total.labels(company="unknown", source=source_name).inc()
                 return item
 
+            company_display_name = item.get("company_display_name") or None
             company = session.query(Company).filter_by(name=company_name).first()
             if not company:
-                company = Company(name=company_name)
+                company = Company(name=company_name, display_name=company_display_name)
                 session.add(company)
+                session.commit()
+            elif company_display_name and company.display_name != company_display_name:
+                # Opportunistic refresh - only sources that already carry a
+                # proper name alongside the slug (currently SmartRecruiters)
+                # ever set this on the item, so this never overwrites a
+                # value populated by a platform-specific backfill with
+                # something worse.
+                company.display_name = company_display_name
                 session.commit()
 
             # 2️⃣ Source (Greenhouse / Lever)

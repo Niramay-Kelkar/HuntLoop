@@ -4,7 +4,7 @@ import type { JobSummary } from "@/types/api";
 import { ProvisionalScoreNote, ScoreIndicator } from "./ScoreIndicator";
 import { SponsorBadge } from "./SponsorBadge";
 import { StatusControl } from "./StatusControl";
-import { avatarColors, formatWage, initials } from "@/lib/theme";
+import { avatarColors, companyLabel, formatWage, initials } from "@/lib/theme";
 
 export function JobTable({ jobs }: { jobs: JobSummary[] }) {
   return (
@@ -24,6 +24,7 @@ export function JobTable({ jobs }: { jobs: JobSummary[] }) {
           <tbody>
             {jobs.map((job) => {
               const avatar = avatarColors(job.id);
+              const company = companyLabel(job);
               return (
                 <tr key={job.id} className="border-t border-divider hover:bg-surface-alt">
                   <td className="px-4 py-2.5">
@@ -35,12 +36,12 @@ export function JobTable({ jobs }: { jobs: JobSummary[] }) {
                         className="grid h-[28px] w-[28px] flex-none place-items-center rounded-sm font-mono text-2xs font-semibold"
                         style={{ backgroundColor: avatar.bg, color: avatar.color }}
                       >
-                        {initials(job.company_name)}
+                        {initials(company)}
                       </div>
                       <div className="min-w-0">
                         <div className="truncate text-sm font-semibold text-text">{job.job_title}</div>
                         <div className="flex items-center gap-1.5 text-xs text-text-subtle">
-                          <span className="truncate">{job.company_name}</span>
+                          <span className="truncate">{company}</span>
                           {job.employment_type && (
                             <span className="flex-none border border-border px-1 py-px font-mono text-2xs uppercase tracking-[0.04em] text-text-muted">
                               {job.employment_type}

@@ -155,16 +155,22 @@ def upsert(session, to_store: list[dict]) -> tuple[int, int]:
     for r in to_store:
         slug = r["resolved_slug"].lower()
         careers_url = f"https://jobs.gem.com/{slug}"
+        # teamDisplayName was already fetched during evaluate()'s
+        # confidence check (board_org_name) - no extra network call here.
+        display_name = r.get("board_org_name")
         existing = session.query(Company).filter_by(name=slug).first()
         if existing is None:
             session.add(Company(
                 name=slug, ats_platform="gem", ats_token=slug, careers_url=careers_url,
+                display_name=display_name,
             ))
             inserted += 1
         elif existing.ats_platform in (None, "unknown"):
             existing.ats_platform = "gem"
             existing.ats_token = slug
             existing.careers_url = existing.careers_url or careers_url
+            if display_name and not existing.display_name:
+                existing.display_name = display_name
             updated += 1
     session.commit()
     return inserted, updated
