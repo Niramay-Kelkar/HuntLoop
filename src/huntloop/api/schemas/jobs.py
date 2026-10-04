@@ -39,6 +39,15 @@ class JobSummary(BaseModel):
     id: int
     job_title: str
     company_name: str
+    company_display_name: str | None = Field(
+        default=None,
+        description=(
+            "Human-readable company name, where a reliable source exists "
+            "(companies.display_name) - see huntloop.company_display_name. "
+            "null for companies not yet covered; frontend should fall back "
+            "to company_name (the slug) when this is null."
+        ),
+    )
     job_url: str
     department: str | None = Field(
         default=None,

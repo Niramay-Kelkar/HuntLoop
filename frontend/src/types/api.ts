@@ -26,6 +26,10 @@ export interface JobSummary {
   id: number;
   job_title: string;
   company_name: string;
+  // Human-readable company name, where a reliable source exists (see
+  // huntloop.company_display_name). null for companies not yet covered -
+  // fall back to company_name (the ATS slug) when this is null.
+  company_display_name: string | null;
   job_url: string;
   department: string | null;
   // Canonical category the raw department is mapped onto (see

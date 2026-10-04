@@ -96,6 +96,7 @@ from sqlalchemy.orm import sessionmaker
 
 load_dotenv()
 
+from huntloop.company_display_name import fetch_greenhouse_display_name
 from huntloop.db_models import Company
 from huntloop.matching.normalize import normalize_employer_name
 from huntloop.settings import DATABASE_URL
@@ -396,13 +397,23 @@ def upsert_hits(session, hits: list[dict]) -> tuple[int, int]:
     inserted = updated = 0
     for h in hits:
         slug = h["slug"]
+        # Greenhouse-only, real proper-name source (see
+        # huntloop.company_display_name) - fetched here so a newly
+        # onboarded Greenhouse company gets display_name populated at
+        # discovery time, not just via a later one-off backfill. Lever
+        # hits get no equivalent call - out of scope for this phase.
+        display_name = fetch_greenhouse_display_name(slug) if h["ats"] == "greenhouse" else None
         existing = session.query(Company).filter_by(name=slug).first()
         if existing is None:
-            session.add(Company(name=slug, ats_platform=h["ats"], ats_token=slug))
+            session.add(Company(
+                name=slug, ats_platform=h["ats"], ats_token=slug, display_name=display_name,
+            ))
             inserted += 1
         elif existing.ats_platform in (None, "unknown"):
             existing.ats_platform = h["ats"]
             existing.ats_token = slug
+            if display_name and not existing.display_name:
+                existing.display_name = display_name
             updated += 1
     session.commit()
     return inserted, updated

@@ -43,6 +43,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from huntloop.ats_detection import detect_ats
+from huntloop.company_display_name import fetch_greenhouse_display_name
 from huntloop.db_models import Company
 
 load_dotenv()
@@ -98,6 +99,8 @@ def upsert_company_ats(session, company_name: str, careers_url: str, result: dic
     else:
         company.ats_platform = result["ats"]
         company.ats_token = result["identifier"]
+        if result["ats"] == "greenhouse" and not company.display_name:
+            company.display_name = fetch_greenhouse_display_name(result["identifier"])
 
     session.commit()
 

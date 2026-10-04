@@ -41,6 +41,17 @@ export function avatarColors(id: number): { bg: string; color: string } {
   return { bg, color };
 }
 
+/**
+ * The company label to show the user: display_name when the backend has
+ * one (see huntloop.company_display_name - currently Greenhouse /
+ * SmartRecruiters / Gem only), falling back to company_name (the raw ATS
+ * slug, exactly as rendered before this existed) for every other
+ * platform or any company the fetch/heuristic didn't resolve.
+ */
+export function companyLabel(job: { company_name: string; company_display_name: string | null }): string {
+  return job.company_display_name ?? job.company_name;
+}
+
 export function initials(companyName: string): string {
   const trimmed = companyName.trim();
   if (trimmed.length === 0) return "?";
