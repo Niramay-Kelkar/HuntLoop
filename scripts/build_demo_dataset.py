@@ -58,6 +58,19 @@ What gets copied, and what does not:
     /demo-info (huntloop.api.routers.demo_info) for the frontend
     banner.
 
+Every rebuild gives the copied companies brand-new auto-increment ids
+(the companies table is wiped and reinserted fresh), which would
+silently blank out two things keyed to the OLD ids if nothing else ran
+afterward: companies.display_name and the company_research table (both
+built by separate, narrower sync scripts - see
+scripts/sync_company_display_names_to_demo.py and
+scripts/sync_company_research_to_demo.py). This script therefore calls
+both of those, in-process, as a required last step of every real
+rebuild (both --force and the first-ever populate of an empty target) -
+not optional, and not something a caller needs to remember to run
+separately. Both are themselves idempotent against the same source/
+target pair, so this is safe to run every time.
+
 The target must already have the schema migrated (alembic upgrade head
 against TARGET_DATABASE_URL) before running this - same convention as
 every other path in this project, see CLAUDE.md. This script is meant
@@ -84,6 +97,8 @@ from datetime import date
 
 SRC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
 sys.path.insert(0, SRC_DIR)
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPTS_DIR)
 
 from dotenv import load_dotenv  # noqa: E402
 
@@ -109,6 +124,9 @@ from huntloop.db_models import (  # noqa: E402
 )
 from huntloop.logging_config import setup_logging  # noqa: E402
 from huntloop.text_cleaning import clean_text  # noqa: E402
+
+import sync_company_display_names_to_demo  # noqa: E402
+import sync_company_research_to_demo  # noqa: E402
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -532,6 +550,17 @@ def main() -> None:
     finally:
         source_session.close()
         target_session.close()
+
+    # Required, not optional: every full rebuild gives the copied companies
+    # brand-new auto-increment ids, so display_name and company_research -
+    # both keyed off the old ids and therefore silently blown away by the
+    # rebuild above - must be repopulated every time, not just the first
+    # time. Each of these opens its own fresh connections and is itself
+    # idempotent (a second run is a safe no-op), so running them here
+    # unconditionally after a real rebuild is safe.
+    logger.info("build_demo_dataset: running required post-build syncs (company display names, company research)...")
+    sync_company_display_names_to_demo.main(source_url=source_url, neon_url=target_url)
+    sync_company_research_to_demo.main(source_url=source_url, neon_url=target_url)
 
     elapsed = time.perf_counter() - t0
     logger.info(f"build_demo_dataset: complete. Elapsed: {elapsed:.1f}s")
