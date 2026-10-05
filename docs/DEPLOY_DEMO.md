@@ -82,13 +82,13 @@ This one command:
 2. Runs `alembic upgrade head` against the target - creates the full
    schema and enables the `vector` extension.
 3. Runs `scripts/build_demo_dataset.py --force` - copies a small, safe
-   sample (about 10,000 relevant, already-embedded postings spread
-   across companies and platforms, their companies/sources/locations,
-   sponsor aggregates for resolved companies, one fictional resume) from
-   the source into the target. `--force` means this is safe to rerun any
-   time you want a fresh snapshot - it clears the target's demo-relevant
-   tables first, every time, rather than skipping because the target
-   already has data.
+   sample (essentially every company with a relevant, already-embedded
+   posting, each capped at 40 postings, their companies/sources/
+   locations, sponsor aggregates for resolved companies, one fictional
+   resume) from the source into the target. `--force` means this is safe
+   to rerun any time you want a fresh snapshot - it clears the target's
+   demo-relevant tables first, every time, rather than skipping because
+   the target already has data.
 4. Prints row counts per table and the target database's total size.
 
 This needs the `app` Docker image (built from the repo root's

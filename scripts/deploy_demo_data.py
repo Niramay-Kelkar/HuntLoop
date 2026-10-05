@@ -79,6 +79,7 @@ _DEMO_TABLES = (
     "sponsor_fiscal_year_aggregates",
     "sponsor_overall_aggregates",
     "demo_meta",
+    "company_research",
 )
 
 

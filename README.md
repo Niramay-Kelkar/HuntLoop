@@ -614,10 +614,11 @@ route are not mounted, the tracker PATCH becomes a no-op, and every
 route gets a per-IP rate limit. `requirements-demo.txt` +
 `Dockerfile.demo` build a lean image with no torch/sentence-transformers
 at all. `scripts/build_demo_dataset.py` builds a small, safe sample
-database (about 10,000 real postings, per-company sponsor aggregates
-instead of raw LCA rows, one fictional resume) from a source database
-into a target database, and refuses to run if they are the same
-database. On the frontend, `NEXT_PUBLIC_DEMO_MODE=true` (build time)
+database (essentially every company with a relevant, embedded posting
+across all 7 ATS platforms, capped at 40 postings per company,
+per-company sponsor aggregates instead of raw LCA rows, one fictional
+resume) from a source database into a target database, and refuses to
+run if they are the same database. On the frontend, `NEXT_PUBLIC_DEMO_MODE=true` (build time)
 shows a banner, hides the AI assistant and resume-upload controls, and
 shows a wake-up message if a sleeping free-tier backend is slow to
 answer. See `SESSIONS.md`'s "Add read-only demo mode and a demo dataset
