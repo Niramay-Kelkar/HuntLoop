@@ -12,12 +12,17 @@ never issuing a write against it, and the script refuses outright if
 source and target resolve to the same host, port and database name.
 
 What gets copied, and what does not:
-  - About 10,000 job postings that are relevant and already have an
-    embedding, preferring postings with a US location, spread across
-    all 7 ATS platforms, capped per company (PER_COMPANY_CAP) so the
-    demo shows many companies rather than a few large ones. Their
-    matching companies, job_sources, job_locations and job_metadata
-    rows come with them.
+  - Essentially every company with at least one relevant, already-
+    embedded posting (is_relevant IS TRUE AND embedding IS NOT NULL) on
+    any of the 7 ATS platforms - not a fixed total-postings sample
+    capped at a round number. Each company's postings are capped at
+    PER_COMPANY_CAP, preferring postings with a US location, so a
+    handful of very large boards (Workday, iCIMS) don't crowd out
+    coverage of the many smaller ones - but every eligible company
+    itself is included, since company-count coverage (not postings
+    volume) is what the demo is actually selling. Their matching
+    companies, job_sources, job_locations and job_metadata rows come
+    with them.
   - Sponsorship data is NOT copied as raw lca_disclosures rows. Instead
     this builds sponsor_fiscal_year_aggregates (a per fiscal year
     breakdown: total filings, distinct titles, median wage) and
@@ -53,6 +58,19 @@ What gets copied, and what does not:
     /demo-info (huntloop.api.routers.demo_info) for the frontend
     banner.
 
+Every rebuild gives the copied companies brand-new auto-increment ids
+(the companies table is wiped and reinserted fresh), which would
+silently blank out two things keyed to the OLD ids if nothing else ran
+afterward: companies.display_name and the company_research table (both
+built by separate, narrower sync scripts - see
+scripts/sync_company_display_names_to_demo.py and
+scripts/sync_company_research_to_demo.py). This script therefore calls
+both of those, in-process, as a required last step of every real
+rebuild (both --force and the first-ever populate of an empty target) -
+not optional, and not something a caller needs to remember to run
+separately. Both are themselves idempotent against the same source/
+target pair, so this is safe to run every time.
+
 The target must already have the schema migrated (alembic upgrade head
 against TARGET_DATABASE_URL) before running this - same convention as
 every other path in this project, see CLAUDE.md. This script is meant
@@ -79,6 +97,8 @@ from datetime import date
 
 SRC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
 sys.path.insert(0, SRC_DIR)
+SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, SCRIPTS_DIR)
 
 from dotenv import load_dotenv  # noqa: E402
 
@@ -105,11 +125,18 @@ from huntloop.db_models import (  # noqa: E402
 from huntloop.logging_config import setup_logging  # noqa: E402
 from huntloop.text_cleaning import clean_text  # noqa: E402
 
+import sync_company_display_names_to_demo  # noqa: E402
+import sync_company_research_to_demo  # noqa: E402
+
 setup_logging()
 logger = logging.getLogger(__name__)
 
-SAMPLE_SIZE = 10000
 PER_COMPANY_CAP = 40
+# A single INSERT statement covering every selected posting (now ~19,000
+# rather than the old ~10,000) proved too large for Neon's direct
+# connection in practice - it dropped the SSL connection mid-statement.
+# Chunking keeps each round trip small regardless of total dataset size.
+COPY_CHUNK_SIZE = 1000
 ATS_PLATFORMS = (
     "greenhouse_api",
     "lever_api",
@@ -173,6 +200,10 @@ downstream projects.
 """
 
 
+def _chunks(values: list[dict], size: int) -> list[list[dict]]:
+    return [values[i : i + size] for i in range(0, len(values), size)]
+
+
 def _refuse_if_same_database(source_url: str, target_url: str) -> None:
     source = make_url(source_url)
     target = make_url(target_url)
@@ -193,15 +224,14 @@ def _make_source_engine(source_url: str):
 
 
 def _select_sample_postings(source_session) -> list[dict]:
-    """Returns one dict per sampled posting (id, company_id, source
-    name), spread across all 7 platforms, capped per company, preferring
-    postings with a US location. Per-platform targets are an even split
-    of SAMPLE_SIZE, with any platform short of eligible rows (gem_api,
-    the smallest real platform, has only a few hundred) giving its
-    shortfall back to the other platforms."""
-    platform_targets = {p: SAMPLE_SIZE // len(ATS_PLATFORMS) for p in ATS_PLATFORMS}
-
-    eligible_by_platform: dict[str, list[dict]] = {}
+    """Returns one dict per selected posting (id, company_id, platform).
+    Includes every company on every platform that has at least one
+    eligible posting (is_relevant IS TRUE AND embedding IS NOT NULL) -
+    company coverage is the goal, not a fixed total-postings count - with
+    each company's own postings capped at PER_COMPANY_CAP, preferring
+    postings with a US location, so one huge board doesn't balloon the
+    copy at the expense of row count elsewhere."""
+    selected: list[dict] = []
     for platform in ATS_PLATFORMS:
         has_us_location = (
             select(JobLocation.id)
@@ -218,38 +248,21 @@ def _select_sample_postings(source_session) -> list[dict]:
             )
             .order_by(has_us_location.desc(), JobPosting.id.asc())
         ).all()
-        eligible_by_platform[platform] = [
-            {"id": r.id, "company_id": r.company_id} for r in rows
-        ]
 
-    # Redistribute any shortfall from platforms with fewer eligible rows
-    # than their even share onto the platforms that have plenty.
-    shortfall = sum(
-        max(0, platform_targets[p] - len(eligible_by_platform[p])) for p in ATS_PLATFORMS
-    )
-    if shortfall:
-        rich_platforms = [
-            p for p in ATS_PLATFORMS if len(eligible_by_platform[p]) > platform_targets[p]
-        ]
-        if rich_platforms:
-            bonus = shortfall // len(rich_platforms)
-            for p in rich_platforms:
-                platform_targets[p] += bonus
-
-    selected: list[dict] = []
-    for platform in ATS_PLATFORMS:
-        target = min(platform_targets[platform], len(eligible_by_platform[platform]))
         company_counts: dict[int, int] = defaultdict(int)
+        companies_seen: set[int] = set()
         taken = 0
-        for row in eligible_by_platform[platform]:
-            if taken >= target:
-                break
-            if company_counts[row["company_id"]] >= PER_COMPANY_CAP:
+        for row in rows:
+            companies_seen.add(row.company_id)
+            if company_counts[row.company_id] >= PER_COMPANY_CAP:
                 continue
-            company_counts[row["company_id"]] += 1
-            selected.append({"id": row["id"], "company_id": row["company_id"], "platform": platform})
+            company_counts[row.company_id] += 1
+            selected.append({"id": row.id, "company_id": row.company_id, "platform": platform})
             taken += 1
-        logger.info(f"build_demo_dataset: {platform} - selected {taken} of a {target} target.")
+        logger.info(
+            f"build_demo_dataset: {platform} - selected {taken} postings across "
+            f"{len(companies_seen)} companies (all eligible companies on this platform)."
+        )
 
     return selected
 
@@ -326,9 +339,10 @@ def _copy_postings(
             }
         )
 
-    stmt = pg_insert(JobPosting).values(values).on_conflict_do_nothing(index_elements=["job_url"])
-    target_session.execute(stmt)
-    target_session.commit()
+    for chunk in _chunks(values, COPY_CHUNK_SIZE):
+        stmt = pg_insert(JobPosting).values(chunk).on_conflict_do_nothing(index_elements=["job_url"])
+        target_session.execute(stmt)
+        target_session.commit()
 
     urls = [v["job_url"] for v in values]
     new_id_by_url = dict(
@@ -355,8 +369,8 @@ def _copy_job_locations(source_session, target_session, job_id_map: dict[int, in
         for r in rows
         if r.job_id in job_id_map
     ]
-    if values:
-        target_session.bulk_insert_mappings(JobLocation, values)
+    for chunk in _chunks(values, COPY_CHUNK_SIZE):
+        target_session.bulk_insert_mappings(JobLocation, chunk)
         target_session.commit()
     logger.info(f"build_demo_dataset: job_locations - {len(values)} copied.")
 
@@ -369,8 +383,8 @@ def _copy_job_metadata(source_session, target_session, job_id_map: dict[int, int
         for r in rows
         if r.job_id in job_id_map
     ]
-    if values:
-        target_session.bulk_insert_mappings(JobMetadata, values)
+    for chunk in _chunks(values, COPY_CHUNK_SIZE):
+        target_session.bulk_insert_mappings(JobMetadata, chunk)
         target_session.commit()
     logger.info(f"build_demo_dataset: job_metadata - {len(values)} copied.")
 
@@ -472,6 +486,7 @@ def _force_clear_target(target_session) -> None:
         "resume_versions",
         "job_applications",
         "demo_meta",
+        "company_research",
         "companies",
         "job_sources",
     ):
@@ -535,6 +550,17 @@ def main() -> None:
     finally:
         source_session.close()
         target_session.close()
+
+    # Required, not optional: every full rebuild gives the copied companies
+    # brand-new auto-increment ids, so display_name and company_research -
+    # both keyed off the old ids and therefore silently blown away by the
+    # rebuild above - must be repopulated every time, not just the first
+    # time. Each of these opens its own fresh connections and is itself
+    # idempotent (a second run is a safe no-op), so running them here
+    # unconditionally after a real rebuild is safe.
+    logger.info("build_demo_dataset: running required post-build syncs (company display names, company research)...")
+    sync_company_display_names_to_demo.main(source_url=source_url, neon_url=target_url)
+    sync_company_research_to_demo.main(source_url=source_url, neon_url=target_url)
 
     elapsed = time.perf_counter() - t0
     logger.info(f"build_demo_dataset: complete. Elapsed: {elapsed:.1f}s")

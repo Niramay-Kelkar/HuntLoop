@@ -12529,3 +12529,126 @@ backend tests (`tests/test_api_admin_whoami.py`) + 4 new frontend tests
 for the stale-admin-link-after-sign-out bug).
 
 **Branch:** `fix/admin-feedback-load-failure`.
+
+---
+
+## 2026-10-05: Sync company display names to the Neon demo database (`sync/display-name-to-neon-demo`)
+
+**Did:** New `scripts/sync_company_display_names_to_demo.py` reads
+`companies.display_name` from local production Postgres (read-only) and
+writes it to the separately-seeded Neon demo database, matched by
+`company.name` - the only reliable join key, since local and Neon
+company ids don't correspond to the same company (Neon's dataset is an
+independently-built sample). The only Neon column this script ever
+writes is `display_name`; `name`/`id` are never touched on either side.
+Idempotent - each company's `display_name` is set by its Neon id to
+whatever local currently has (including null), a straight overwrite
+rather than a merge, so a later re-run with fresher local data is safe.
+
+A first real run, against the Neon demo database as it stood at the
+time (389 companies, predating this branch's reseed), matched and
+updated 373 of the 389 by name - the rest were left alone and logged
+separately by the script as either having no same-named company
+locally at all, or a local `display_name` that was itself still null.
+
+**Branch:** `sync/display-name-to-neon-demo`.
+
+---
+
+## 2026-10-05: Expand the public demo dataset from 389 to 738 companies (`expand/demo-dataset-full-company-coverage`)
+
+**Did:** `scripts/build_demo_dataset.py` previously picked demo
+postings by splitting a fixed `SAMPLE_SIZE=10,000` target evenly across
+the 7 ATS platforms (preferring a US location, capped at
+`PER_COMPANY_CAP=40`/company) - which meant Greenhouse (42 of 350
+real eligible companies) and SmartRecruiters (184 of 223) were
+artificially starved of coverage well before storage was ever the real
+constraint (the existing 389-company snapshot used only ~64MB against
+Neon's 1GB cap). Rewrote `_select_sample_postings` to drop the
+per-platform posting-count target entirely and instead include every
+company with at least one eligible posting (`is_relevant IS TRUE AND
+embedding IS NOT NULL`) on each platform, still capped at
+`PER_COMPANY_CAP` postings/company so one very large board (Workday,
+iCIMS) can't crowd out the smaller ones.
+
+**Two real bugs surfaced and fixed while actually running this against
+Neon, not caught by review:**
+- `_force_clear_target`'s `DELETE` list predates the `company_research`
+  table (added by a separate, later feature) and never cleared it - a
+  `--force` rebuild failed outright the first time it was tried against
+  real data, with a foreign-key violation
+  (`update or delete on table "companies" violates foreign key
+  constraint "company_research_company_id_fkey"`). Added
+  `company_research` to the clear list, ordered before `companies`.
+- A single `pg_insert().values(...)` statement for the full ~19k
+  selected postings dropped the SSL connection to Neon partway through
+  (`psycopg2.OperationalError: SSL connection has been closed
+  unexpectedly`) - the old ~10k-posting version fit in one statement
+  fine, the larger one didn't. Chunked the `job_postings`/
+  `job_locations`/`job_metadata` bulk inserts into batches of 1,000
+  (`COPY_CHUNK_SIZE`).
+
+**Verified end-to-end** with a real `scripts/deploy_demo_data.py` run
+against Neon (via `docker compose run --rm app python
+scripts/deploy_demo_data.py`, needed for the fictional resume's
+torch/sentence-transformers embedding): per-platform company counts
+after match the full local-eligible counts exactly - greenhouse 350,
+lever 63, workday 38, smartrecruiters 223, ashby 28, icims 24, gem 12,
+738 total; `job_postings` 8,277 -> 19,294; Neon database size 140MB,
+still comfortably under the 1GB limit. The live `/jobs` page was loaded
+in a real browser against the deployed demo - 19,294 postings shown,
+and a newly-added company (Zocdoc) renders with its real name and full
+sponsor/salary data, not a slug. A `pg_dump` snapshot of the prior
+389-company Neon database was taken before running `--force` against
+it, as a rollback point.
+
+**Tests:** no existing test imports `build_demo_dataset.py`; none added
+(same as every other one-off operational script in this project).
+
+**Branch:** `expand/demo-dataset-full-company-coverage`.
+
+---
+
+## 2026-10-05: Keep company display names and research synced on every demo rebuild (`expand/demo-dataset-full-company-coverage`)
+
+**Did:** Discovered, while rebuilding the expanded demo above, that
+`company_research` (the Tavily company-enrichment snapshots) had also
+been silently wiped by the same reseed the display-name sync needed a
+manual re-run after: `build_demo_dataset.py`'s `--force` gives every
+reseeded company a brand-new auto-increment id, and nothing had been
+repopulating `company_research` afterward - the same class of gap the
+display-name sync above had already hit once.
+
+Ran `scripts/sync_company_research_to_demo.py` - first confirmed, by
+reading it, that it makes no external API calls (only two Postgres
+connections: reads `company_research` from local, read-only, and
+upserts into Neon's by `company_id`; no Tavily traffic) - against the
+newly 738-company Neon dataset: all 392 local `company_research` rows
+matched by name and synced, 0 skipped as missing-in-Neon.
+
+**Then closed the actual gap, rather than leaving it a one-off fix.**
+Checked whether `company_research` could simply be excluded from
+`--force`'s clear step and left untouched across a reseed: its
+`company_id` column is a `NOT NULL` foreign key to `companies.id` with
+no `ON DELETE CASCADE`, so this isn't just blocked by that constraint
+(the exact failure the bug above hit) - it's unsafe in principle, since
+every reseed reassigns company ids from scratch, so even an untouched
+row would end up pointing at a stale or wrong company afterward.
+Instead, refactored both `sync_company_display_names_to_demo.py` and
+`sync_company_research_to_demo.py`'s `main()` to accept `source_url`/
+`neon_url` directly (CLI behavior unchanged - still falls back to
+`SOURCE_DATABASE_URL`/`NEON_DEMO_DATABASE_URL` from the environment),
+and `build_demo_dataset.py` now calls both, in-process, as a required
+last step of every successful build - not gated narrowly on `--force`,
+so a brand-new target's first-ever load is covered too.
+
+**Verified** with a second real `--force` reseed against Neon: the
+run's own log now shows `running required post-build syncs` followed
+by both scripts' own output with no separate command run -
+`715 companies' display_name updated`, `392 companies synced to Neon's
+company_research table` - and a direct query afterward confirmed
+`companies`=738, `company_research`=392, `display_name` populated on
+715/738 (the remaining 23 are genuinely null locally too), matching the
+earlier one-off run exactly.
+
+**Branch:** `expand/demo-dataset-full-company-coverage`.

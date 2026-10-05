@@ -100,9 +100,15 @@ def _neon_company_ids_by_name(neon_url: str) -> dict[str, int]:
         engine.dispose()
 
 
-def main(dry_run: bool = False) -> None:
-    source_url = _require_env("SOURCE_DATABASE_URL")
-    neon_url = _require_env("NEON_DEMO_DATABASE_URL")
+def main(source_url: str | None = None, neon_url: str | None = None, dry_run: bool = False) -> None:
+    """source_url/neon_url let a caller already holding these values (e.g.
+    scripts/build_demo_dataset.py, which reads SOURCE_DATABASE_URL/
+    TARGET_DATABASE_URL under those exact names) pass them in directly
+    instead of this script re-reading the environment under its own
+    NEON_DEMO_DATABASE_URL name. The CLI entrypoint below still reads
+    both from the environment, unchanged."""
+    source_url = source_url or _require_env("SOURCE_DATABASE_URL")
+    neon_url = neon_url or _require_env("NEON_DEMO_DATABASE_URL")
 
     local_research = _local_research_by_company_name(source_url)
     logger.info("%d local companies have a company_research snapshot", len(local_research))
