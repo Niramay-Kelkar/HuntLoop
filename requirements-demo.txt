@@ -58,3 +58,10 @@ cryptography>=46.0.7,<47
 # verified by actually building Dockerfile.demo and confirming the
 # container imports and starts, not just by diffing this file.
 clerk-backend-api==7.0.0
+# huntloop.modal_resume_processing is imported unconditionally by
+# huntloop.api.routers.resumes (mounted in both demo and non-demo mode -
+# only its unsafe_router, upload/activate, is demo-gated, the module
+# import itself is not). Same version floor/cap as requirements.txt.
+modal>=1.5.0,<2
+# Same cbor2 pin, same reason, as requirements.txt - see there.
+cbor2==5.9.0

@@ -50,6 +50,26 @@ def _reset_resume_rate_limiters():
     _upload_rate_limiter.reset()
     _activate_rate_limiter.reset()
 
+
+@pytest.fixture(autouse=True)
+def _force_modal_not_configured(monkeypatch):
+    """This suite must stay hermetic regardless of what's in a real
+    developer's .env - huntloop.modal_resume_processing.load_dotenv()
+    picks up MODAL_TOKEN_ID/MODAL_TOKEN_SECRET from the real .env the
+    moment it's present on the machine running the tests, which lets
+    POST /resumes/upload and PATCH /resumes/{id}/activate genuinely reach
+    the real deployed Modal app over the network instead of exercising
+    the local stub_embed_text path these tests are built around -
+    confirmed live: test_activate_computes_missing_embedding_before_activating
+    failed for exactly this reason once a real Modal deployment existed
+    (see CLAUDE.md). Clearing both env vars for every test in this module
+    forces huntloop.modal_resume_processing._modal_configured() to False,
+    so every test deterministically exercises the local fallback it was
+    written against - same guarantee tests/test_modal_resume_processing.py
+    gives its own tests, applied here too."""
+    monkeypatch.delenv("MODAL_TOKEN_ID", raising=False)
+    monkeypatch.delenv("MODAL_TOKEN_SECRET", raising=False)
+
 EMBEDDING_DIM = 384
 
 
