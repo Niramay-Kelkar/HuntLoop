@@ -12652,3 +12652,68 @@ company_research table` - and a direct query afterward confirmed
 earlier one-off run exactly.
 
 **Branch:** `expand/demo-dataset-full-company-coverage`.
+
+---
+
+## 2026-10-06: Docker Desktop recovery + disk cleanup (local-machine only, no code changes)
+
+**Did:** Two unrelated pieces of work on this dev machine's Docker
+Desktop install, triggered during the Modal Phase A verification above -
+not a code change, no PR, logged here per standing instruction since
+there's nothing else to bundle this into.
+
+**1. Docker Desktop was genuinely wedged, not just slow.** Mid-session,
+a `docker compose run` for the Modal fallback verification failed with
+`error creating temporary lease: ... input/output error` on the VM's
+containerd metadata DB, and every running container (including the
+long-lived `api`/`db`/`frontend`/`grafana`/`prometheus`/`pushgateway`)
+immediately flipped to `unhealthy`. Confirmed this wasn't transient: a
+later `docker info` hung with zero CPU usage for several minutes
+(verified via `ps -o etime=,stat=` on the hung process), and `docker
+desktop restart`'s own graceful stop then failed with `context deadline
+exceeded` against the same backend processes - real evidence the VM
+backend was unresponsive, not just busy. Fixed by escalating past the
+graceful path: `osascript -e 'quit app "Docker"'` (also didn't stop the
+backend), then `pkill -9` on every `Docker.app`/`com.docker.*` process,
+then `open -a Docker` to relaunch clean. Confirmed healthy afterward via
+`docker system df`/`docker ps`. `grafana`/`prometheus`/`pushgateway`
+auto-restarted on their own (`restart: unless-stopped`, working exactly
+as CLAUDE.md documents); `api`/`frontend`/`db` do NOT carry that policy
+and stayed exited until a plain `docker compose up -d api frontend db`
+brought them back - all six confirmed `healthy` afterward.
+
+**2. Disk cleanup, scoped and reported before any deletion.** Docker's
+disk was reported ~5GB full. `docker system df -v` + `docker images -a`/
+`docker ps -a`, cross-referenced against the real `docker-compose.yml`
+service list (`db`/`app`/`seed`/`api`/`frontend`/`caddy`/`pushgateway`/
+`prometheus`/`grafana`), separated what's actually in use from what
+isn't - reported in full before touching anything, approved, then
+removed only the approved items (never a blanket `docker system prune
+-a`): 8 dangling `<none>:<none>` images (superseded `app`/`seed`/`api`
+build layers), the `postgres:18` image (orphaned since the `db` service
+switched to `pgvector/pgvector:pg18` back on 2026-08-22, confirmed 0
+containers referenced it and it's not named anywhere in
+`docker-compose.yml`), two images + their stopped containers from an
+entirely unrelated project (`discovery-replay-target_app`/
+`discovery-replay-operator_console`, last run 3 weeks ago), and the
+`huntloop_hfcache` volume (0 bytes, not referenced in
+`docker-compose.yml` at all - genuinely orphaned, not just unused this
+session). Explicitly kept: every image/container/volume backing the six
+real services above, and `huntloop_caddy_data` (0 links right now since
+the `caddy` service sits behind the `proxy` Compose profile and wasn't
+running, but it's a real, currently-configured volume in
+`docker-compose.yml`, not orphaned). Also ran `docker builder prune -f`
+(unused build cache only - never touches images/volumes/containers).
+
+**Verified with real before/after `docker system df` numbers, not
+estimated:** images 20→9 (36.33GB→28.76GB on disk), containers 9→7,
+volumes 5→4, build cache 42 entries/30.96GB→15 entries/18.16GB (0B
+reclaimable left). **Total disk freed: ~20.4GB** (7.57GB from images +
+12.8GB from build cache - more than the 5.8GB the build cache's own
+reclaimable estimate had shown before the image cleanup, since removing
+the dangling images freed cache layers that had still been counted as
+shared). All six real HuntLoop containers confirmed still `healthy`
+after every step.
+
+**Branch:** `chore/docker-desktop-disk-cleanup` (this entry only - no
+code/config changed).
