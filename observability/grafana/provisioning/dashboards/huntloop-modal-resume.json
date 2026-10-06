@@ -1,0 +1,106 @@
+{
+  "title": "HuntLoop Modal Resume Processing",
+  "uid": "huntloop-modal-resume",
+  "editable": true,
+  "schemaVersion": 39,
+  "timezone": "browser",
+  "time": { "from": "now-7d", "to": "now" },
+  "refresh": "30s",
+  "tags": ["huntloop"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Invocations by function and outcome, over time",
+      "description": "huntloop_modal_resume_invocations_total - every resume-processing/embedding call routed through huntloop.modal_resume_processing, split by function (process_resume_remote / embed_text_remote) and outcome (success / fallback_not_configured / fallback_lookup_failed / fallback_budget_exhausted / fallback_invocation_error). Pushed once per call, from POST /resumes/upload and PATCH /resumes/{id}/activate.",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "huntloop_modal_resume_invocations_total",
+          "legendFormat": "{{function}} - {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "title": "Successful Modal calls vs. fallback-to-local (current)",
+      "description": "huntloop_modal_resume_invocations_total summed across the whole history, grouped into success vs. any fallback_* outcome - a snapshot of how often Modal is actually being used vs. falling back, not a rate.",
+      "type": "barchart",
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (outcome) (huntloop_modal_resume_invocations_total)",
+          "legendFormat": "{{outcome}}",
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "Budget-cap rejections, over time",
+      "description": "huntloop_modal_resume_invocations_total{outcome=\"fallback_budget_exhausted\"} - calls that fell back to the local path specifically because this month's MODAL_MONTHLY_INVOCATION_BUDGET was already spent, as opposed to Modal not being configured or erroring.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "huntloop_modal_resume_invocations_total{outcome=\"fallback_budget_exhausted\"}",
+          "legendFormat": "{{function}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "Monthly invocation budget used vs. cap",
+      "description": "huntloop_modal_invocation_budget_used / huntloop_modal_invocation_budget_cap - the modal_usage ledger's current-month invocations_used against MODAL_MONTHLY_INVOCATION_BUDGET (default 500), updated on every budget check (POST /resumes/upload, PATCH /resumes/{id}/activate). Resets to 0 at the start of each calendar month.",
+      "type": "gauge",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "huntloop_modal_invocation_budget_used",
+          "legendFormat": "used",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 500,
+          "thresholds": {
+            "mode": "percentage",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

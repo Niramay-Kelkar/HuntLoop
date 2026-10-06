@@ -12826,3 +12826,95 @@ before this follow-up.
 **Verified `git diff` after both items**: only `frontend/next.config.ts`
 changed (15 lines added) - the `braces` investigation left no trace in
 the working tree (dry-run only).
+
+## Modal Phase C: Prometheus/Grafana metrics for resume processing
+
+Branch `feature/modal-resume-metrics`. Confirmed ground truth first:
+`feature/modal-resume-processing` (Phase A) is merged into `master` (PR
+#60, commit `6315922`) and both `modal_resume_functions.py`/
+`modal_resume_processing.py` are present in the current checkout before
+writing anything.
+
+Mirrored `huntloop.feedback_metrics` exactly, per the task's own
+instruction: new `src/huntloop/modal_metrics.py` with its own
+`CollectorRegistry`, its own Pushgateway job name
+(`huntloop_modal_resume`, distinct from `huntloop_feedback`/
+`huntloop_orchestrator`/`huntloop_skills_matching_backfill`), and the
+same "push immediately, never raise, log a WARNING on failure" contract.
+No new dependency - `prometheus-client` was already in both
+`requirements.txt` and `requirements-demo.txt` from the feedback-metrics
+step, so neither file needed a change.
+
+Metrics, chosen against what Phase A actually built (read in full
+before deciding): `huntloop_modal_resume_invocations_total{function,
+outcome}` - `function` is `process_resume_remote`/`embed_text_remote`
+(the real Modal function names from `modal_resume_functions.py`),
+`outcome` is `success` or one of four `fallback_*` values. The four
+fallback reasons needed a small, surgical addition to
+`modal_resume_processing.py`: `ModalUnavailable` gained a `reason`
+parameter (`not_configured` / `lookup_failed` / `budget_exhausted` /
+`invocation_error`), set at each of its four existing raise sites, so
+the single existing `except ModalUnavailable` catch block in
+`process_resume()`/`embed_resume_text()` can label the metric
+(`fallback_{e.reason}`) without restructuring the control flow Phase A
+already built - this gives "fallback-to-local calls" as the sum of the
+four `fallback_*` outcomes and "budget-cap rejections" as exactly
+`fallback_budget_exhausted`, both asked for by name in the task.
+Also added `huntloop_modal_invocation_budget_used`/
+`..._budget_cap` gauges, set inside `_reserve_invocation_slot()` (both
+the success and the budget-exhausted return branches) from the real
+`modal_usage` ledger values already being computed there - no new query,
+just surfacing numbers that function already had in hand.
+
+New Grafana dashboard `observability/grafana/provisioning/dashboards/
+huntloop-modal-resume.json` (uid `huntloop-modal-resume`), same
+file-provisioning convention as `huntloop-feedback.json` - no
+`dashboards.yml` change needed, it already watches the whole directory.
+4 panels: invocations by function/outcome over time, a success-vs-any-
+fallback bar chart (mirrors the feedback dashboard's "total by category"
+panel), budget-cap rejections over time, and a budget-used-vs-cap gauge
+(the "monthly budget used vs. cap" visualization the task suggested,
+since it's a real thing worth glancing at here).
+
+**Verification, all real, not just "it compiles":**
+- Backend suite: **535/535 passing**, both before and after the change
+  (same count CLAUDE.md's Modal-integration entry already reported for
+  Phase A, confirming no regression).
+- Started the real observability stack
+  (`docker compose --profile observability up -d prometheus pushgateway
+  grafana` - already running via `restart: unless-stopped` from a prior
+  session). Queried Grafana's own `/api/search` and confirmed the new
+  dashboard (`uid: huntloop-modal-resume`) auto-loaded with all 4 panels
+  present (`/api/dashboards/uid/huntloop-modal-resume` listed all 4 by
+  title/type) - no manual import, same as every other provisioned
+  dashboard in this project.
+- Triggered real calls against the actually-deployed Modal app (this
+  machine's real `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` are in `.env`,
+  confirmed already deployed per Phase A's own verification): one real
+  `process_resume()` call (success, 5195 chars extracted from a real
+  resume PDF) and one real `embed_resume_text()` call (success, 384-dim
+  embedding) against the live Modal app, plus one forced
+  `fallback_not_configured` call (cleared `MODAL_TOKEN_ID`/`_SECRET` in
+  the script's own process env only). A direct Prometheus query
+  (`huntloop_modal_resume_invocations_total`) showed exactly the 3
+  expected series afterward: `process_resume_remote`/`success`,
+  `embed_text_remote`/`success`, `process_resume_remote`/
+  `fallback_not_configured`, each at value 1; `huntloop_
+  modal_invocation_budget_used` read 5 (this account's real cumulative
+  invocation count for the current calendar month, ledger-confirmed).
+  **Grafana's own datasource proxy
+  (`/api/datasources/proxy/uid/prometheus/api/v1/query`) returned
+  byte-identical values to the direct Prometheus query** - the same
+  method the original scraping dashboard was verified with.
+- The fourth triggered call's local-fallback path itself then hit a
+  pre-existing, already-documented environment limitation (this dev
+  machine's local `.venv` has no `sentence-transformers`/torch - see
+  CLAUDE.md's embeddings section) after the metric for that call had
+  already been recorded - not a bug introduced by this change, and
+  irrelevant to what was being verified (the metric point, not the
+  fallback's own success).
+
+Not touched: Phase A's budget/locking/fallback logic itself (only the
+one additive `reason` field), `modal_resume_functions.py` (the deployed
+Modal app), any other metrics module, Render/Vercel env vars, or
+`requirements*.txt` (no new dependency).
