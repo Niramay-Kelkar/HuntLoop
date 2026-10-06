@@ -57,3 +57,20 @@ soupsieve>=2.8.4
 # the <47 cap above - confirmed via a real `pip check` before adding
 # this).
 clerk-backend-api==7.0.0
+# huntloop.modal_resume_processing - runs resume parsing+embedding on
+# Modal (serverless compute), with a local in-process fallback (see
+# CLAUDE.md). Floor/cap chosen from the real current release (1.5.x,
+# confirmed via `pip index versions modal` at the time this was added) -
+# capped below 2 since Modal has not committed to 1.x API stability
+# across a major bump.
+modal>=1.5.0,<2
+# modal depends on cbor2 (unpinned on its side). cbor2>=6 dropped its
+# plain-C extension for a Rust one (setuptools-rust) with no prebuilt
+# wheel for this project's own dev machine (macOS Intel, cp313) - `pip
+# install` fails there with "can't find Rust compiler" (confirmed by
+# trying). cbor2==5.9.0 is the latest 5.x release and ships a pure-Python
+# py3-none-any wheel - installs cleanly everywhere (this machine, Docker/
+# Linux, CI) with no Rust toolchain needed anywhere, at the cost of pure-
+# Python (not C/Rust-accelerated) CBOR encode/decode - acceptable for the
+# small control messages Modal's client uses it for.
+cbor2==5.9.0

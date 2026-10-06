@@ -1826,6 +1826,115 @@ conventions" and SESSIONS.md for the real current state).
   this work** — that's a separate, later decision once this is live for
   a while, not bundled into the initial build.
 
+- **Modal integration, Phase A: resume parsing + embedding generation
+  moved to a Modal function, added 2026-10-06 — a standalone integration,
+  shares no code with Tavily/feedback-triage/skills-matching, but mirrors
+  the Tavily budget-ledger pattern deliberately.** Previously, `POST
+  /resumes/upload` ran `extract_text()` (pdfplumber) and `embed_text()`
+  (sentence-transformers) fully inline, in-request, blocking the HTTP
+  response on model load + encode. Both now go through
+  `huntloop.modal_resume_processing.process_resume()`/`embed_resume_text()`,
+  which try a Modal remote function first and fall back to the exact
+  same original in-process calls (unchanged) on any failure — Modal not
+  configured, the invocation budget exhausted, or the remote call
+  erroring for any reason. Neither function raises; a Modal outage never
+  breaks resume upload or activation. **Split into two files, for a real
+  reason found the hard way, not a style preference**:
+  `huntloop.modal_resume_functions` (the actual `modal.App`/`Image`/
+  `@app.function`-decorated remote functions — deployed via `modal
+  deploy src/huntloop/modal_resume_functions.py`, re-run after any change
+  to that file) is deliberately minimal (only `modal` + lazy pdfplumber/
+  sentence-transformers imports inside the function bodies), while
+  `huntloop.modal_resume_processing` (the budget ledger, SQLAlchemy,
+  `python-dotenv`, the actual `process_resume()`/`embed_resume_text()`
+  entry points `huntloop.api.routers.resumes` calls) is never deployed.
+  **Why the split is load-bearing**: Modal imports the WHOLE file
+  containing an `@app.function`-decorated function inside the remote
+  container just to discover it, before either function is ever invoked
+  — confirmed live, the hard way: the first real deploy+invoke attempt
+  put `load_dotenv()`/SQLAlchemy/`huntloop.db_models` at the same
+  module's top level and crash-looped the remote container twice in a
+  row (`ModuleNotFoundError: No module named 'dotenv'`, then, after
+  adding `python-dotenv` to the image and redeploying, `'sqlalchemy'`) —
+  neither package is installed in, or needed by, the remote side at all.
+  Both crash-looping invocations still cost real Modal compute and still
+  correctly incremented the ledger (see below) — confirmed directly
+  against the real table, not assumed.
+  **Routing is async/sync-aware, also found live**: Modal's own SDK
+  warned, while running this project's real test suite, that calling the
+  blocking `.remote()` from inside `async def upload_resume` would stall
+  the process's one event loop for every other concurrent request —
+  `process_resume()` (used by the `async def` upload route) uses
+  `_invoke_modal_async()`/`fn.remote.aio()`; `embed_resume_text()` (used
+  by the plain `def` activate route, which FastAPI runs in a worker
+  thread, not the event loop) uses the blocking `_invoke_modal()`/
+  `fn.remote()` — same characteristic the original in-process
+  `embed_text()` call there already had, not a new blocking concern.
+  **Auth**: `MODAL_TOKEN_ID` + `MODAL_TOKEN_SECRET` env vars (Modal's own
+  two-part token, `modal token new`), stored the same way
+  GROQ_API_KEY/GEMINI_API_KEY/TAVILY_API_KEY are (see `.env.example`).
+  Either missing is treated as "not configured" — no partial-config
+  attempt, falls back immediately.
+  **Budget ledger**: `modal_usage` (migration `b9c1d3e5f7a2`, one row per
+  calendar month), modeled directly on `tavily_usage`/`TavilyUsage`, but
+  counting INVOCATIONS, not a provider-reported credit — Modal's
+  response has no per-call cost field to reconcile against (same
+  situation Tavily's ledger is in), and resume parsing+embedding is a
+  short, bounded, CPU-only operation (no GPU needed — the embedding
+  model is CPU-only) where one invocation is a reasonable, simple cost
+  proxy. Default budget `MODAL_MONTHLY_INVOCATION_BUDGET=500`, sized
+  against Modal's real current Starter-plan free tier — **confirmed
+  directly against https://modal.com/pricing, not guessed: $30/month in
+  free compute credits, reset monthly, no rollover.**
+  **Locking — the one deliberate deviation from the Tavily reference
+  pattern, not an oversight**: Tavily's ledger is read/incremented only
+  by a single serial backfill script, so a bare read-then-write race was
+  never a real risk there. This ledger is read/incremented from live,
+  potentially-concurrent HTTP requests (`POST /resumes/upload` and
+  `PATCH /resumes/{id}/activate` can genuinely overlap), so
+  `_reserve_invocation_slot()` takes a `SELECT ... FOR UPDATE` row lock
+  on the current month's row for the short check-then-increment,
+  committing (and releasing the lock) immediately — a small, cheap
+  addition over the Tavily pattern (one extra `.with_for_update()`), not
+  a new subsystem. The budget slot is reserved only once a real Modal
+  function handle is in hand (right before dispatch), never on a pure
+  lookup failure (app not deployed, bad token, no network) — a lookup
+  failure means nothing was ever dispatched to Modal, so it must not
+  count against the budget; a dispatch that fails mid-call DOES still
+  count, since real compute was spent.
+  **Verified for real, end-to-end, against a real Modal account** (this
+  session signed up and deployed for real — not simulated): uploaded the
+  project owner's own real resume PDF through `process_resume()` against
+  the live deployed app — `used_modal=True`, extracted text **byte-for-
+  byte identical** to the same file run through the original local path
+  (verified via the `app` Docker image, the only environment on this dev
+  machine with working torch), embedding values matching to float32
+  precision (max abs diff ~6e-8). The real `modal_usage` ledger showed 3
+  invocations recorded after this session's testing (the two crash-loop
+  attempts above, plus the one successful call) — confirmed via direct
+  query, not assumed. Budget-cap-reached and lookup-failure/dispatch-
+  failure fallback are both covered by `tests/test_modal_resume_processing.py`
+  (16 tests, mocking `modal.Function.from_name` rather than calling real
+  Modal — deterministic, no token needed, no network, safe for CI) —
+  each proven to fall back to the local path without over- or
+  under-charging the ledger. **A real test-hermeticity bug was found and
+  fixed in the same session**: once a real Modal deployment existed,
+  `tests/test_api_resumes.py`'s `test_activate_computes_missing_embedding_before_activating`
+  started genuinely reaching the live deployed function over the network
+  (since `huntloop.modal_resume_processing`'s `load_dotenv()` picks up
+  this machine's real `.env`), bypassing the local-fallback stub that
+  test was written around — fixed with an autouse fixture in that file
+  clearing `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` for every test in the
+  module, so the suite stays hermetic regardless of what's in a real
+  developer's `.env`. Full suite: 535/535 passing.
+  **Not yet done, deliberately out of scope for this step**: the actual
+  Resume Deep-Dive feature and its request/202/background/poll async
+  flow (Phase B), and a Grafana panel for this ledger/invocation activity
+  (Phase C) — see the investigation this phase was scoped from for why
+  those are separate, later steps, including a real open question Phase
+  B will need to resolve (no submitter-facing poll-by-id endpoint exists
+  anywhere in this codebase yet to copy from).
+
 ## Key architectural decisions (already made — don't re-litigate)
 
 - **`job_url` is the canonical unique key** on `job_postings`, not `gh_job_id`.

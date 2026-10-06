@@ -3,21 +3,35 @@ GET /resumes, POST /resumes/upload, PATCH /resumes/{id}/activate -
 resume-version management, layered on top of the existing
 resume_versions table and Phase 3's extraction/embedding logic
 (huntloop.resume_ingestion.extract_text(), huntloop.embeddings.embed_text())
-- both reused unchanged here, not reimplemented.
+- both reused unchanged, not reimplemented.
 
-huntloop.embeddings is imported lazily, inside the two functions that
-actually need it, not at module level. It requires a working torch
-install, which this project's local dev venv doesn't have (see
-huntloop.embeddings' own docstring - confirmed by trying:
-`ModuleNotFoundError: No module named 'sentence_transformers'` on this
-machine). huntloop.api.main imports every router together, so a
-module-level import here would make importing the whole API - GET
-/health, /jobs, /dashboard/stats included - fail on this machine, not
-just the two endpoints that actually need the model. Real, end-to-end
-verification of the embedding-dependent paths (upload, and activating a
-version with no stored embedding) runs inside the app/api Docker image
-instead - the same convention scripts/backfill_embeddings.py already
-established for exactly this constraint (see CLAUDE.md/SESSIONS.md).
+As of the Modal integration (see CLAUDE.md), extraction+embedding
+(upload) and embedding alone (activate's backfill-missing-embedding
+branch) are no longer called directly here - both routes go through
+huntloop.modal_resume_processing.process_resume()/embed_resume_text(),
+which try a Modal remote function first and fall back to running
+extract_text()/embed_text() locally (the original, pre-Modal behavior,
+unchanged) on any failure - not configured, monthly invocation budget
+exhausted, or the remote call erroring. Neither function raises, so
+these two endpoints don't need their own fallback logic - see that
+module's docstring for the full design (budget ledger, locking,
+deployment).
+
+huntloop.modal_resume_processing itself imports `modal` at module level
+but defers huntloop.embeddings/pdfplumber-dependent work (the fallback
+path, and everything inside the remote function bodies) to lazy imports
+- so importing it here does NOT require a working torch install, same
+constraint as before (this project's local dev venv can't run torch -
+see huntloop.embeddings' own docstring). huntloop.api.main imports every
+router together, so a module-level import of anything torch-dependent
+here would still break importing the whole API on this machine - that's
+why the actual extract_text()/embed_text() calls stay inside lazily-
+imported fallback code paths, not why the module import itself is
+guarded. Real, end-to-end verification of the embedding-dependent local
+fallback path runs inside the app/api Docker image, same convention
+scripts/backfill_embeddings.py established (see CLAUDE.md/SESSIONS.md);
+the real Modal path is verified against a real Modal deployment+token
+(see CLAUDE.md's Modal integration write-up).
 
 The GET /jobs match-score query (huntloop.api.routers.jobs) already
 resolves "the active resume" dynamically at query time - a plain
@@ -81,7 +95,8 @@ from huntloop.api.dependencies import get_db
 from huntloop.api.routers.drafting import _RateLimiter
 from huntloop.api.schemas.resumes import ResumeVersionSummary
 from huntloop.db_models import JobPosting, ResumeVersion
-from huntloop.resume_ingestion import extract_text, save_uploaded_pdf
+from huntloop.modal_resume_processing import embed_resume_text, process_resume
+from huntloop.resume_ingestion import save_uploaded_pdf
 from huntloop.text_cleaning import clean_text
 
 logger = logging.getLogger(__name__)
@@ -311,7 +326,8 @@ async def upload_resume(request: Request, file: UploadFile = File(...), db: Sess
     # of placed there manually first.
     saved_path = save_uploaded_pdf(next_version, file.filename, content)
 
-    extracted_text = extract_text(saved_path)
+    processed = await process_resume(db, saved_path)
+    extracted_text = processed.extracted_text
     if not extracted_text.strip():
         raise HTTPException(
             422,
@@ -319,9 +335,7 @@ async def upload_resume(request: Request, file: UploadFile = File(...), db: Sess
             f"with no text layer, or an empty/corrupt PDF.",
         )
 
-    from huntloop.embeddings import embed_text  # lazy - see module docstring
-
-    embedding = embed_text(extracted_text)
+    embedding = processed.embedding
 
     # Must be read BEFORE the is_active swap below, and compared against
     # this upload's extracted text (not the raw bytes) - see the module
@@ -346,16 +360,18 @@ async def upload_resume(request: Request, file: UploadFile = File(...), db: Sess
     db.commit()
     db.refresh(resume)
 
+    processed_via = "Modal" if processed.used_modal else "local"
     if content_unchanged:
         logger.info(
-            f"Uploaded resume version {next_version} ({len(extracted_text)} chars extracted), "
-            f"marked active - content identical to the previously active version, "
-            f"skipped the matched/missing_skills reset"
+            f"Uploaded resume version {next_version} ({len(extracted_text)} chars extracted via "
+            f"{processed_via}), marked active - content identical to the previously active "
+            f"version, skipped the matched/missing_skills reset"
         )
     else:
         logger.info(
-            f"Uploaded resume version {next_version} ({len(extracted_text)} chars extracted), "
-            f"marked active, cleared matched/missing_skills on {cleared} job_postings rows"
+            f"Uploaded resume version {next_version} ({len(extracted_text)} chars extracted via "
+            f"{processed_via}), marked active, cleared matched/missing_skills on {cleared} "
+            f"job_postings rows"
         )
     return _to_summary(resume)
 
@@ -375,10 +391,13 @@ def activate_resume(resume_id: int, request: Request, db: Session = Depends(get_
         return _to_summary(resume)
 
     if resume.embedding is None:
-        from huntloop.embeddings import embed_text  # lazy - see module docstring
-
-        resume.embedding = embed_text(resume.extracted_text)
-        logger.info(f"Computed missing embedding for resume version {resume.version_number} before activating")
+        embedding, used_modal = embed_resume_text(db, resume.extracted_text)
+        resume.embedding = embedding
+        via = "Modal" if used_modal else "local"
+        logger.info(
+            f"Computed missing embedding for resume version {resume.version_number} via {via} "
+            f"before activating"
+        )
 
     # Same content-hash no-op check as upload_resume() above - read
     # before the is_active swap below.

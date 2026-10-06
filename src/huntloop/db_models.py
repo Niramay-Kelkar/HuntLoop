@@ -679,3 +679,35 @@ class TavilyUsage(Base):
 
     def __repr__(self):
         return f"<TavilyUsage(month={self.month}, requests_used={self.requests_used})>"
+
+
+class ModalUsage(Base):
+    """
+    A durable monthly invocation-count ledger for
+    huntloop.modal_resume_processing (resume parsing + embedding
+    generation moved to a Modal function - see CLAUDE.md), modeled
+    directly on TavilyUsage above. One row per calendar month (`month`,
+    e.g. "2026-10"), incremented by exactly 1 for each Modal invocation
+    this process reserves (see
+    huntloop.modal_resume_processing._reserve_invocation_slot) - counting
+    INVOCATIONS, not a provider-reported credit, since Modal has no
+    per-call cost field to reconcile against the way Tavily's response
+    doesn't either, and resume parsing+embedding is a short, predictable
+    operation where invocation count is a reasonable cost proxy.
+
+    Unlike TavilyUsage (read/incremented only by a single serial backfill
+    script, with no locking), this ledger is read/incremented from live,
+    potentially-concurrent HTTP requests (POST /resumes/upload, PATCH
+    /resumes/{id}/activate) - so the check-then-increment here is done
+    under a `SELECT ... FOR UPDATE` row lock, not a bare read then write.
+    """
+    __tablename__ = "modal_usage"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    month = Column(String(7), nullable=False, unique=True)
+    invocations_used = Column(Integer, nullable=False, default=0, server_default="0")
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    def __repr__(self):
+        return f"<ModalUsage(month={self.month}, invocations_used={self.invocations_used})>"
