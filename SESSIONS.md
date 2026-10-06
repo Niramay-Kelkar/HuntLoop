@@ -12767,3 +12767,62 @@ code touched.
 **Branch:** `security/fix-source-map-js-and-sharp-advisories` (pushed,
 no PR opened per standing instruction - stops at commit/push for manual
 merge via GitHub Desktop).
+
+**Follow-up, same branch, same day: closed out the `braces` question
+left open above, and hardened the `/_next/image` route.**
+
+**1. `braces`/`eslint-config-next` - investigated in full, deliberately
+NOT applied.** Confirmed exact versions: `braces@3.0.3` installed via
+`micromatch` -> `fast-glob` -> `@next/eslint-plugin-next` ->
+`eslint-config-next@16.3.8` (a devDependency - lint tooling only, never
+shipped to production). Checked npm's own registry listing for
+`braces` directly: **the package has never released anything past
+`3.0.3`** - there is no patched version to move to from any path, full
+stop. `npm audit fix --force --dry-run` (dry-run only, nothing applied)
+confirmed this concretely rather than leaving it as a theory: it would
+downgrade `eslint-config-next` to `14.2.35` - a real `ERESOLVE`
+conflict, since `14.2.35` only supports `eslint: ^7.23.0 || ^8.0.0`
+while this project runs `eslint@9.39.5` (`^9` in `package.json`) - npm
+has to force-override that peer-dependency mismatch just to install it.
+It would also churn ~79 packages (removing `typescript-eslint` entirely
+in favor of older separate `@typescript-eslint/*` packages, swapping
+`eslint-plugin-react-hooks` for a **2023-era canary prerelease**,
+`5.0.0-canary-7118f5dd7-20230705`) - and the dry-run's own simulated
+post-fix `npm audit` output still reported the exact same "5 high
+severity vulnerabilities, braces... fix available via `npm audit fix
+--force`" afterward, confirming the downgrade doesn't actually resolve
+anything, it just walks back to an older, ESLint-9-incompatible
+toolchain for no real security benefit. Left entirely untouched, per
+standing instruction - `eslint-config-next` is still `16.3.8`,
+confirmed via `npm ls` after the dry-run.
+
+**2. Disabled the unused `/_next/image` route.** Re-confirmed nothing
+under `frontend/src/` references `next/image`, `NextImage`, or
+`images:` config, and a broader case-insensitive grep for "image"
+across every `.ts`/`.tsx` file returned zero matches. The route is
+still part of every Next.js app regardless (not opt-in), and it's what
+`sharp` - the package just patched above for a real CVE - actually
+processes requests through. Rather than trust a config key from memory,
+checked the *installed* Next 16.3.8 package's own server source
+directly: `node_modules/next/dist/server/next-server.js` shows
+`imagesConfig.unoptimized` triggers a genuine `this.render404(...)`
+before the image optimizer (and therefore `sharp`) is ever reached, and
+`node_modules/next/dist/server/config-schema.js` confirms `unoptimized`
+is a currently-validated `images` config key in this exact version, not
+a deprecated/renamed one. Added `images: { unoptimized: true }` to
+`next.config.ts`.
+
+**Verified for real, not just configured:** `npm run build` succeeded,
+same 10 routes generated as before. Built the app with `next start` on
+a scratch port and hit it directly - `curl .../\_next/image?url=...` **returned a
+real HTTP 404**, not a 200 or a silent pass-through. (The same local run
+also 500'd on `/` and `/jobs` - traced via its own server log to a
+missing Clerk env var in that ad hoc standalone invocation, which never
+loaded `.env.local` the way the real container does - confirmed
+unrelated to this change, not glossed over.) `npm test` -
+**122/122 tests passed across all 19 test files**, unchanged from
+before this follow-up.
+
+**Verified `git diff` after both items**: only `frontend/next.config.ts`
+changed (15 lines added) - the `braces` investigation left no trace in
+the working tree (dry-run only).
