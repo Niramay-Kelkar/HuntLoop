@@ -69,6 +69,12 @@ a small, cheap addition over the Tavily pattern (one extra `.with_for_update()`
 on a query that already has to run), not a new subsystem, so there's no
 real reason to skip it here even though the Tavily reference pattern
 doesn't have it.
+
+Metrics: every invocation (success or fallback) and every budget-ledger
+check is also recorded to Prometheus via huntloop.modal_metrics - Phase C
+of the Modal integration, the exact same CollectorRegistry/Pushgateway
+pattern huntloop.feedback_metrics already established. See that module's
+docstring for the metric names and the Grafana dashboard that renders them.
 """
 import logging
 import os
@@ -80,6 +86,7 @@ from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
 from huntloop.db_models import ModalUsage
+from huntloop.modal_metrics import record_modal_budget, record_modal_invocation
 from huntloop.modal_resume_functions import EMBED_TEXT_FUNCTION, MODAL_APP_NAME, PROCESS_RESUME_FUNCTION
 
 load_dotenv()
@@ -102,7 +109,18 @@ class ModalUnavailable(Exception):
     not configured, this month's invocation budget exhausted, or the
     remote call itself failing for any reason. Always caught inside this
     module's own process_resume()/embed_resume_text(); never escapes to
-    huntloop.api.routers.resumes."""
+    huntloop.api.routers.resumes.
+
+    `reason` is a short machine-readable tag (not_configured /
+    lookup_failed / budget_exhausted / invocation_error) set at each raise
+    site below - used only to label the fallback metric in
+    huntloop.modal_metrics so a Grafana panel can tell "Modal isn't set up
+    here" apart from "the budget is spent" apart from "Modal itself
+    errored", rather than lumping every fallback into one bucket."""
+
+    def __init__(self, message: str, reason: str = "error"):
+        super().__init__(message)
+        self.reason = reason
 
 
 def _modal_configured() -> bool:
@@ -142,9 +160,11 @@ def _reserve_invocation_slot(db: Session) -> tuple[bool, int, int]:
     used_before = row.invocations_used
     if used_before >= budget:
         db.commit()  # releases the row lock; nothing incremented
+        record_modal_budget(used=used_before, cap=budget)
         return False, used_before, budget
     row.invocations_used = used_before + 1
     db.commit()
+    record_modal_budget(used=used_before + 1, cap=budget)
     return True, used_before, budget
 
 
@@ -163,21 +183,25 @@ def _prepare_invocation(db: Session, function_name: str):
     real invocation (and its cost) begins, even if it then fails partway
     through the actual dispatch, which happens in the caller."""
     if not _modal_configured():
-        raise ModalUnavailable("MODAL_TOKEN_ID/MODAL_TOKEN_SECRET are not both set")
+        raise ModalUnavailable(
+            "MODAL_TOKEN_ID/MODAL_TOKEN_SECRET are not both set", reason="not_configured"
+        )
 
     try:
         fn = modal.Function.from_name(MODAL_APP_NAME, function_name)
     except Exception as e:
         raise ModalUnavailable(
             f"Could not look up Modal function {function_name!r} - not deployed yet, or a "
-            f"connectivity/auth problem ({type(e).__name__}): {e}"
+            f"connectivity/auth problem ({type(e).__name__}): {e}",
+            reason="lookup_failed",
         ) from e
 
     reserved, used_before, budget = _reserve_invocation_slot(db)
     if not reserved:
         raise ModalUnavailable(
             f"Modal monthly invocation budget reached ({used_before}/{budget} for "
-            f"{_current_month_key()}) - no new Modal invocations until next calendar month"
+            f"{_current_month_key()}) - no new Modal invocations until next calendar month",
+            reason="budget_exhausted",
         )
     return fn
 
@@ -193,7 +217,8 @@ def _invoke_modal(db: Session, function_name: str, args: tuple, label: str):
         return fn.remote(*args)
     except Exception as e:
         raise ModalUnavailable(
-            f"Modal invocation of {function_name!r} for {label} failed ({type(e).__name__}): {e}"
+            f"Modal invocation of {function_name!r} for {label} failed ({type(e).__name__}): {e}",
+            reason="invocation_error",
         ) from e
 
 
@@ -210,7 +235,8 @@ async def _invoke_modal_async(db: Session, function_name: str, args: tuple, labe
         return await fn.remote.aio(*args)
     except Exception as e:
         raise ModalUnavailable(
-            f"Modal invocation of {function_name!r} for {label} failed ({type(e).__name__}): {e}"
+            f"Modal invocation of {function_name!r} for {label} failed ({type(e).__name__}): {e}",
+            reason="invocation_error",
         ) from e
 
 
@@ -238,6 +264,7 @@ async def process_resume(db: Session, pdf_path: str) -> ResumeProcessingResult:
             pdf_bytes = f.read()
         result = await _invoke_modal_async(db, PROCESS_RESUME_FUNCTION, (pdf_bytes,), "resume processing")
         logger.info(f"Processed resume via Modal ({len(result['extracted_text'])} chars extracted)")
+        record_modal_invocation(function=PROCESS_RESUME_FUNCTION, outcome="success")
         return ResumeProcessingResult(
             extracted_text=result["extracted_text"],
             embedding=result["embedding"],
@@ -245,6 +272,7 @@ async def process_resume(db: Session, pdf_path: str) -> ResumeProcessingResult:
         )
     except ModalUnavailable as e:
         logger.warning(f"Modal unavailable for resume processing, falling back to the local path: {e}")
+        record_modal_invocation(function=PROCESS_RESUME_FUNCTION, outcome=f"fallback_{e.reason}")
         return _process_resume_locally(pdf_path)
 
 
@@ -272,9 +300,11 @@ def embed_resume_text(db: Session, text: str) -> tuple[list[float], bool]:
     try:
         embedding = _invoke_modal(db, EMBED_TEXT_FUNCTION, (text,), "resume embedding")
         logger.info("Computed resume embedding via Modal")
+        record_modal_invocation(function=EMBED_TEXT_FUNCTION, outcome="success")
         return embedding, True
     except ModalUnavailable as e:
         logger.warning(f"Modal unavailable for resume embedding, falling back to the local path: {e}")
+        record_modal_invocation(function=EMBED_TEXT_FUNCTION, outcome=f"fallback_{e.reason}")
         from huntloop.embeddings import embed_text  # lazy
 
         return embed_text(text), False
