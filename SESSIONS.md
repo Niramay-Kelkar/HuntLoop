@@ -12717,3 +12717,53 @@ after every step.
 
 **Branch:** `chore/docker-desktop-disk-cleanup` (this entry only - no
 code/config changed).
+
+---
+
+## 2026-10-06: Fix two high-severity Dependabot alerts on master (`security/fix-source-map-js-and-sharp-advisories`)
+
+**Did:** GitHub flagged 2 high-severity Dependabot alerts on master, both
+in `frontend/package-lock.json` - alert #11
+(`source-map-js` - GHSA-68fv-2mgg-jv7q, event-loop DoS via crafted
+source-map section offsets) and alert #12 (`sharp` - GHSA-wq5f-xc86-pv6w
+/ CVE-2026-96889, a use-after-free in sharp's `librsvg` dependency).
+Investigated both read-only first, confirmed neither is a direct
+dependency - `npm ls source-map-js` showed it pulled in by
+`@tailwindcss/postcss` (dev), `jsdom` (dev), and `next`'s own `postcss`;
+`npm ls sharp` showed it as an *optional* dependency of `next@16.3.8`
+itself (Next.js's built-in image-optimization pipeline - confirmed
+nothing in `src/` imports `next/image` and `next.config.ts` sets no
+`images` config, but the framework's `/_next/image` route is still
+present on the deployed container regardless). `npm audit`'s own report
+confirmed both were clean patch bumps already inside every parent's
+existing declared range (`source-map-js` `1.2.1` -> `1.2.2`, `sharp`
+`0.35.4` -> `0.35.5`, both `fixAvailable: true`, no parent package needed
+a version change) - not something that needed confirming by digging
+through separate advisory pages.
+
+`npm audit fix` (no `--force`) resolved both cleanly - only
+`frontend/package-lock.json` changed (121 lines each way, pure
+re-resolution; `package.json` itself untouched). Confirmed via
+`npm ls source-map-js sharp` afterward: both now resolve to `1.2.2` and
+`0.35.5` everywhere in the tree.
+
+**A third, unrelated advisory surfaced mid-fix and was deliberately left
+alone**: `npm audit fix` also reported `braces` (stack-exhaustion DoS,
+GHSA-vfj7-8cjw-p6xm) via `micromatch` -> `fast-glob` ->
+`@next/eslint-plugin-next` -> `eslint-config-next` (a devDependency, lint
+tooling only) - fixing it needs `npm audit fix --force` and would
+downgrade `eslint-config-next` to `14.2.35`, a real breaking change. Per
+standing instruction, this was not touched and is flagged here rather
+than silently left off the record - a separate decision for later, not
+bundled into this fix.
+
+**Verified for real:** `npm run build` - compiled successfully, all 10
+routes generated, no new TypeScript errors. `npm test` -
+**122/122 tests passed across all 19 test files**, same as before this
+change (no test regressions from the version bump). `git diff --stat`
+confirmed only `frontend/package-lock.json` changed - no application
+code touched.
+
+**Branch:** `security/fix-source-map-js-and-sharp-advisories` (pushed,
+no PR opened per standing instruction - stops at commit/push for manual
+merge via GitHub Desktop).
