@@ -37,6 +37,7 @@ import type {
   LocationGroup,
   PublicFeedbackItem,
   ResumeVersionSummary,
+  AtsReportResponse,
 } from "@/types/api";
 
 // Exported so lib/adminApi.ts (a separate module since its requests need
@@ -229,6 +230,15 @@ export async function uploadResume(file: File): Promise<ResumeVersionSummary> {
 
 export function activateResume(id: number): Promise<ResumeVersionSummary> {
   return apiFetch<ResumeVersionSummary>(`/resumes/${id}/activate`, { method: "PATCH" });
+}
+
+// GET /resumes/active/ats-report - cached per resume version server-side,
+// so this can be called freely (e.g. on page load) without worrying
+// about re-triggering an LLM call. The first call for a given resume
+// version can take a few seconds (live LLM call); every call after that
+// is a plain cache read.
+export function getActiveAtsReport(): Promise<AtsReportResponse> {
+  return apiFetch<AtsReportResponse>("/resumes/active/ats-report");
 }
 
 // POST /feedback (huntloop.api.routers.feedback) - public, no auth.

@@ -711,3 +711,34 @@ class ModalUsage(Base):
 
     def __repr__(self):
         return f"<ModalUsage(month={self.month}, invocations_used={self.invocations_used})>"
+
+
+class ResumeAtsReport(Base):
+    """
+    A cache row for huntloop.resume_ats_report / GET
+    /resumes/active/ats-report - one LLM-generated ATS-compatibility
+    report per resume_versions.id, computed once and served from cache
+    on every later request (see that router's docstring). `score` is a
+    0-100 integer; `keyword_feedback`/`wording_feedback`/
+    `formatting_feedback` are each a JSON list of short, concrete
+    strings - kept as three separate typed columns rather than one
+    blob, the same convention job_postings.matched_skills/missing_skills
+    already uses for this project's other LLM-derived JSON fields.
+
+    This is a brand-new, purely additive table with its own unique
+    constraint on resume_version_id - nothing here reads from or writes
+    to matched_skills/missing_skills, resume_versions.is_active, or any
+    other column the skill-gap backfill job or resumes.activate() touch.
+    """
+    __tablename__ = "resume_ats_reports"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    resume_version_id = Column(Integer, ForeignKey("resume_versions.id"), nullable=False, unique=True)
+    score = Column(Integer, nullable=False)
+    keyword_feedback = Column(JSON, nullable=False)
+    wording_feedback = Column(JSON, nullable=False)
+    formatting_feedback = Column(JSON, nullable=False)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+    def __repr__(self):
+        return f"<ResumeAtsReport(resume_version_id={self.resume_version_id}, score={self.score})>"

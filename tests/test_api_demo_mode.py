@@ -35,14 +35,17 @@ def test_demo_mode_off_mounts_all_routes(api_client):
     from huntloop.api.main import app as default_app
 
     paths = default_app.openapi()["paths"]
-    # 16 pre-existing routes (12 + POST /feedback + GET /feedback/public
-    # + GET /admin/feedback + PATCH /admin/feedback/{feedback_id}) +
-    # GET /admin/whoami (huntloop.api.routers.admin, mounted
-    # unconditionally in both demo and non-demo mode - see huntloop.api.main).
-    assert len(paths) == 17
+    # 17 pre-existing routes (12 + POST /feedback + GET /feedback/public
+    # + GET /admin/feedback + PATCH /admin/feedback/{feedback_id} +
+    # GET /admin/whoami) + GET /resumes/active/ats-report (huntloop.api.
+    # routers.resumes, added for the resume ATS-report feature - mounted
+    # on the safe `router`, unconditionally in both demo and non-demo
+    # mode, same as GET /resumes itself).
+    assert len(paths) == 18
     assert "/jobs/{job_id}/draft-answer" in paths
     assert "/resumes/upload" in paths
     assert "/resumes/{resume_id}/activate" in paths
+    assert "/resumes/active/ats-report" in paths
     assert "/feedback" in paths
     assert "/feedback/public" in paths
     assert "/admin/feedback" in paths
@@ -84,6 +87,33 @@ def test_demo_mode_on_resumes_list_still_works(demo_api_client, db_session):
     body = resp.json()
     assert len(body) == 1
     assert body[0]["is_active"] is True
+
+
+def test_demo_mode_on_ats_report_still_works(demo_api_client, db_session, monkeypatch):
+    """GET /resumes/active/ats-report is on the safe router (unlike
+    upload/activate), so it should be reachable in demo mode too - this
+    is explicitly meant to showcase an analysis of the one demo resume,
+    not a write/upload feature."""
+    import huntloop.resume_ats_report as resume_ats_report
+
+    monkeypatch.setattr(
+        resume_ats_report,
+        "generate_ats_report",
+        lambda resume_text: {
+            "score": 80,
+            "keyword_feedback": ["looks fine"],
+            "wording_feedback": ["looks fine"],
+            "formatting_feedback": ["looks fine"],
+        },
+    )
+
+    resume = ResumeVersion(version_number=1, file_path="x.pdf", extracted_text="fictional resume text", is_active=True)
+    db_session.add(resume)
+    db_session.commit()
+
+    resp = demo_api_client.get("/resumes/active/ats-report")
+    assert resp.status_code == 200
+    assert resp.json()["score"] == 80
 
 
 def test_demo_mode_application_patch_is_noop(demo_api_client, db_session):

@@ -188,6 +188,19 @@ export interface ResumeVersionSummary {
   text_preview: string;
 }
 
+// GET /resumes/active/ats-report (huntloop.api.routers.resumes) - one
+// LLM-generated ATS-compatibility report per resume version, computed
+// once and cached server-side (see huntloop.resume_ats_report). Never
+// per-job - this scores the resume on its own.
+export interface AtsReportResponse {
+  resume_version_id: number;
+  score: number;
+  keyword_feedback: string[];
+  wording_feedback: string[];
+  formatting_feedback: string[];
+  created_at: string;
+}
+
 // POST /jobs/{id}/draft-answer (huntloop.api.routers.drafting) - slice 2
 // of the job-detail chat assistant. BYOK: api_key is the user's OWN
 // third-party provider key, sent per-request, never stored by this app
