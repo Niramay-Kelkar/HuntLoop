@@ -16,7 +16,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 import backfill_skills_matching as b  # noqa: E402
 
-from huntloop.db_models import JobPosting, ResumeVersion
+from huntloop.db_models import JobPosting, ResumeSkillMatch, ResumeVersion
 from huntloop import skills_matching_metrics as sm_metrics
 
 
@@ -35,13 +35,10 @@ def _seed(db_session, *, job_count=2):
         embedding=None,
     )
     db_session.add(resume)
-    # Deliberately don't pass matched_skills=None here: as documented in
-    # CLAUDE.md (the resume-activation reset bug), binding plain Python
-    # None to this JSON column stores the literal JSON scalar `null`, not
-    # a real SQL NULL - `matched_skills IS NULL` would then be false and
-    # _run_backfill's own `matched_skills IS NULL` filter would find
-    # nothing. Leaving the column untouched lets it default to a real
-    # SQL NULL instead.
+    # "No result yet" for _run_backfill's job-selection query is now
+    # "no resume_skill_matches row exists for this resume_version_id"
+    # (see huntloop.db_models.ResumeSkillMatch) - true by default here
+    # since this test seeds no such rows upfront.
     jobs = [
         JobPosting(
             job_title=f"Software Engineer {i}",
@@ -106,10 +103,12 @@ def test_run_attributes_processed_succeeded_failed_to_the_handling_provider(
     assert sm_metrics.skills_matching_backlog_remaining._value.get() == 1
     assert pushed == [True]
 
-    db_session.refresh(jobs[0])
-    db_session.refresh(jobs[1])
-    stored = [j for j in jobs if j.matched_skills is not None]
-    still_null = [j for j in jobs if j.matched_skills is None]
+    matches = {
+        row.job_posting_id: row
+        for row in db_session.query(ResumeSkillMatch).filter_by(resume_version_id=_resume.id).all()
+    }
+    stored = [j for j in jobs if j.id in matches]
+    still_null = [j for j in jobs if j.id not in matches]
     assert len(stored) == 1
     assert len(still_null) == 1
 
@@ -144,5 +143,9 @@ def test_a_giveup_batch_is_labeled_none_not_the_prior_batchs_provider(
 
     assert sm_metrics.skills_matching_jobs_processed_total.labels(provider="none")._value.get() == 1
     assert sm_metrics.skills_matching_jobs_failed_total.labels(provider="none")._value.get() == 1
-    db_session.refresh(jobs[0])
-    assert jobs[0].matched_skills is None
+    assert (
+        db_session.query(ResumeSkillMatch)
+        .filter_by(job_posting_id=jobs[0].id, resume_version_id=_resume.id)
+        .first()
+        is None
+    )

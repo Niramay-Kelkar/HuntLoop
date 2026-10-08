@@ -36,35 +36,40 @@ the real Modal path is verified against a real Modal deployment+token
 The GET /jobs match-score query (huntloop.api.routers.jobs) already
 resolves "the active resume" dynamically at query time - a plain
 `SELECT ... WHERE is_active = true` issued fresh on every request (see
-_active_resume_embedding() there), not a cached/hardcoded resume id -
+_active_resume() there), not a cached/hardcoded resume id -
 confirmed by reading that code again as part of this step, not assumed.
 That's precisely what makes activating a different version here actually
 change every job's live match_score on the very next /jobs request, with
 no change needed to the jobs router itself.
 
 SECURITY: both endpoints below are unauthenticated (same as every other
-endpoint in this API today) and each call to _reset_skills_matching()
-below is a full-table UPDATE across job_postings - at 2026-09 scale
-that's ~97k rows. Before this hardening, a client could repeatedly
-re-upload (or re-activate) the same file and trigger that full wipe on
-every single call, with no cap on request rate or file size - a trivial
-unauthenticated DoS against the skills-matching backlog (every wipe
-forces the whole table back into the days-long Groq/Gemini re-matching
-queue, see CLAUDE.md's skills-matching section). Fixed three ways below,
-same order as the actual risk:
+endpoint in this API today).
+
+Historical note, since the reasoning below predates it: this docstring
+originally described a full-table UPDATE across job_postings.
+matched_skills/missing_skills on every upload/activate call (a client
+could repeatedly re-upload the same file and force the whole ~97k-row
+table back into the days-long Groq/Gemini re-matching queue on every
+single call - a trivial unauthenticated DoS). That vector is gone by
+construction now that skill-match results live in resume_skill_matches,
+keyed by (job_posting_id, resume_version_id) - see huntloop.db_models.
+ResumeSkillMatch: activating or uploading a resume never writes to or
+deletes from that table at all. A new resume_versions row simply starts
+with zero resume_skill_matches rows for its own id (nothing to reset),
+and every other version's rows - including the one that was just
+deactivated - are left completely alone. Re-uploading or reactivating
+repeatedly can still cost real resources (Modal/embedding compute per
+call, and a fresh multi-day backfill cycle for each genuinely-new
+version id), so the mitigations below are kept for that reason, not for
+the (no longer possible) data-wipe:
 
 1. Content-hash check (_content_hash / _active_resume_content_hash) -
-   the real root cause. A byte-identical re-upload, or reactivating a
-   version whose extracted text already matches what's currently active,
-   is now a safe no-op with respect to the skills-matching table: the
-   reset is skipped entirely. Hashing the *extracted text*, not the raw
-   PDF bytes, is the logically correct comparison - two different PDF
-   files (different metadata, re-saved from a different tool, etc.) that
-   extract to identical text represent the same resume *content* as far
-   as skills-matching cares, and re-triggering a reset for those would
-   be exactly the same wasted-wipe problem this fix targets. A genuinely
-   different resume (different extracted text) still triggers the reset
-   normally - this only short-circuits the true no-op case.
+   still used by both endpoints below purely for logging/no-op detection
+   (a byte-identical re-upload, or reactivating a version whose
+   extracted text already matches what's currently active, is logged as
+   a content-unchanged no-op) - hashing the *extracted text*, not the
+   raw PDF bytes, since two different PDF files that extract to
+   identical text represent the same resume content either way.
 2. Per-IP rate limiting on both endpoints, reusing the exact same
    _RateLimiter class huntloop.api.routers.drafting already built and
    validated for exactly this problem (an unauthenticated endpoint that
@@ -88,7 +93,7 @@ import logging
 import threading
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
-from sqlalchemy import func, null, update
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
@@ -97,7 +102,7 @@ from huntloop.api.dependencies import get_db
 from huntloop.api.routers.drafting import _RateLimiter
 from huntloop.api.schemas.resume_ats_report import AtsReportResponse
 from huntloop.api.schemas.resumes import ResumeVersionSummary
-from huntloop.db_models import JobPosting, ResumeAtsReport, ResumeVersion
+from huntloop.db_models import ResumeAtsReport, ResumeVersion
 from huntloop.modal_resume_processing import embed_resume_text, process_resume
 from huntloop.resume_ingestion import save_uploaded_pdf
 from huntloop.text_cleaning import clean_text
@@ -274,31 +279,6 @@ def _to_summary(resume: ResumeVersion) -> ResumeVersionSummary:
     )
 
 
-def _reset_skills_matching(db: Session) -> int:
-    """Clears matched_skills/missing_skills on every job_postings row -
-    called on every resume-activation change (new upload or
-    reactivation), so the daily cron's skills-matching stage
-    (huntloop.skills_matching, scripts/backfill_skills_matching.py, see
-    CLAUDE.md) naturally reprocesses every job against whichever resume
-    is now active instead of continuing to show matches computed against
-    the old one. Returns the number of rows cleared (for logging).
-
-    Uses sqlalchemy.null(), not plain Python None, as the bind value -
-    confirmed live against real Postgres (not assumed) that
-    `update(JobPosting).values(matched_skills=None, ...)` on this JSON
-    column stores the literal JSON scalar `null` (`matched_skills IS
-    NULL` false, `matched_skills::text` = `'null'`), not a real SQL
-    NULL - the ORM's round-trip back to Python still reads that as
-    `None` (json.loads('null') == None), so a plain
-    `assert row.matched_skills is None` doesn't catch it either. That
-    silently breaks backfill_skills_matching.py's own
-    `.filter(JobPosting.matched_skills.is_(None))` reprocessing query -
-    those rows would never be picked up again. null() forces a genuine
-    SQL NULL bind instead."""
-    result = db.execute(update(JobPosting).values(matched_skills=null(), missing_skills=null()))
-    return result.rowcount
-
-
 @router.get("", response_model=list[ResumeVersionSummary])
 def list_resumes(db: Session = Depends(get_db)) -> list[ResumeVersionSummary]:
     """In demo mode this always returns just the fictional resume the
@@ -443,9 +423,9 @@ async def upload_resume(request: Request, file: UploadFile = File(...), db: Sess
 
     embedding = processed.embedding
 
-    # Must be read BEFORE the is_active swap below, and compared against
-    # this upload's extracted text (not the raw bytes) - see the module
-    # docstring's content-hash-check paragraph for why.
+    # Read BEFORE the is_active swap below, purely for the log line -
+    # compared against this upload's extracted text (not the raw bytes),
+    # see the module docstring's content-hash-check paragraph for why.
     previous_active_hash = _active_resume_content_hash(db)
     content_unchanged = previous_active_hash is not None and previous_active_hash == _content_hash(extracted_text)
 
@@ -459,26 +439,20 @@ async def upload_resume(request: Request, file: UploadFile = File(...), db: Sess
         embedding=embedding,
     )
     db.add(resume)
-    if content_unchanged:
-        cleared = 0
-    else:
-        cleared = _reset_skills_matching(db)
     db.commit()
     db.refresh(resume)
 
     processed_via = "Modal" if processed.used_modal else "local"
-    if content_unchanged:
-        logger.info(
-            f"Uploaded resume version {next_version} ({len(extracted_text)} chars extracted via "
-            f"{processed_via}), marked active - content identical to the previously active "
-            f"version, skipped the matched/missing_skills reset"
-        )
-    else:
-        logger.info(
-            f"Uploaded resume version {next_version} ({len(extracted_text)} chars extracted via "
-            f"{processed_via}), marked active, cleared matched/missing_skills on {cleared} "
-            f"job_postings rows"
-        )
+    content_note = (
+        " (content identical to the previously active version)" if content_unchanged else ""
+    )
+    logger.info(
+        f"Uploaded resume version {next_version} ({len(extracted_text)} chars extracted via "
+        f"{processed_via}), marked active{content_note}. It starts with zero "
+        f"resume_skill_matches rows of its own - the daily skills-matching backfill "
+        f"(scripts/backfill_skills_matching.py) will populate them over time; no existing "
+        f"version's rows were touched."
+    )
     return _to_summary(resume)
 
 
@@ -505,22 +479,23 @@ def activate_resume(resume_id: int, request: Request, db: Session = Depends(get_
             f"before activating"
         )
 
-    # Same content-hash no-op check as upload_resume() above - read
-    # before the is_active swap below.
+    # Same content-hash no-op check as upload_resume() above, purely for
+    # the log line - read before the is_active swap below.
     previous_active_hash = _active_resume_content_hash(db)
     content_unchanged = previous_active_hash is not None and previous_active_hash == _content_hash(resume.extracted_text)
 
     db.query(ResumeVersion).filter_by(is_active=True).update({"is_active": False})
     resume.is_active = True
-    if content_unchanged:
-        cleared = 0
-    else:
-        cleared = _reset_skills_matching(db)
     db.commit()
     db.refresh(resume)
 
+    content_note = (
+        " (content identical to the previously active version)" if content_unchanged else ""
+    )
     logger.info(
-        f"Activated resume version {resume.version_number}, "
-        f"cleared matched/missing_skills on {cleared} job_postings rows"
+        f"Activated resume version {resume.version_number}{content_note}. Existing "
+        f"resume_skill_matches rows for every version, including the one just deactivated, "
+        f"were left untouched; this version's own rows (if any from a prior activation) "
+        f"stay as they were."
     )
     return _to_summary(resume)

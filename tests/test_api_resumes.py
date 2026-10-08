@@ -35,7 +35,7 @@ import types
 import pytest
 
 from huntloop.api.routers.resumes import MAX_UPLOAD_BYTES, _activate_rate_limiter, _upload_rate_limiter
-from huntloop.db_models import Company, JobPosting, JobSource, ResumeVersion
+from huntloop.db_models import Company, JobPosting, JobSource, ResumeSkillMatch, ResumeVersion
 from huntloop.resume_ingestion import RESUMES_DIR
 
 
@@ -170,7 +170,13 @@ def _seed_resume(db_session, version_number, is_active, embedding=None, text="re
     return resume
 
 
-def _seed_job(db_session, company, source, title, embedding, matched=None, missing=None):
+def _seed_job(db_session, company, source, title, embedding, matched=None, missing=None, resume_version_id=None):
+    """matched/missing, when given, are stored as a resume_skill_matches
+    row for resume_version_id (not on JobPosting directly - see
+    huntloop.db_models.ResumeSkillMatch; the old job_postings.
+    matched_skills/missing_skills columns are no longer read or written
+    by the app). Pass resume_version_id whenever matched/missing is
+    given."""
     job = JobPosting(
         job_title=title,
         job_url=f"https://example.com/jobs/{title}",
@@ -178,12 +184,33 @@ def _seed_job(db_session, company, source, title, embedding, matched=None, missi
         company_id=company.id,
         source_id=source.id,
         embedding=embedding,
-        matched_skills=matched,
-        missing_skills=missing,
     )
     db_session.add(job)
     db_session.commit()
+    if matched is not None or missing is not None:
+        assert resume_version_id is not None, "resume_version_id required when seeding matched/missing"
+        _seed_skill_match(db_session, job.id, resume_version_id, matched, missing)
     return job
+
+
+def _seed_skill_match(db_session, job_posting_id, resume_version_id, matched, missing):
+    row = ResumeSkillMatch(
+        job_posting_id=job_posting_id,
+        resume_version_id=resume_version_id,
+        matched_skills=matched,
+        missing_skills=missing,
+    )
+    db_session.add(row)
+    db_session.commit()
+    return row
+
+
+def _get_skill_match(db_session, job_posting_id, resume_version_id):
+    return (
+        db_session.query(ResumeSkillMatch)
+        .filter_by(job_posting_id=job_posting_id, resume_version_id=resume_version_id)
+        .first()
+    )
 
 
 # ---------------------------------------------------------------------
@@ -244,37 +271,38 @@ def test_upload_creates_new_active_version_and_deactivates_old(api_client, db_se
     assert new_row.file_path.startswith(RESUMES_DIR)
 
 
-def test_upload_resets_matched_and_missing_skills_on_all_jobs(api_client, db_session, stub_embed_text, _uploaded_paths):
-    _seed_resume(db_session, 1, is_active=True, embedding=EMBEDDING_A)
+def test_upload_leaves_existing_resume_skill_matches_untouched(api_client, db_session, stub_embed_text, _uploaded_paths):
+    """Uploading a new resume version must NOT destroy the previously
+    active version's resume_skill_matches rows - see
+    huntloop.db_models.ResumeSkillMatch and the module docstring's
+    historical-note paragraph. This replaces a prior version of this
+    test that asserted the opposite (a full-table reset), from before
+    skill-match results moved off job_postings.matched_skills/
+    missing_skills onto this per-resume-version table."""
+    old_version = _seed_resume(db_session, 1, is_active=True, embedding=EMBEDDING_A)
     company = Company(name="checkr")
     source = JobSource(name="greenhouse_api")
     db_session.add_all([company, source])
     db_session.commit()
     job = _seed_job(
         db_session, company, source, "Backend Engineer", EMBEDDING_A,
-        matched=["Python", "AWS"], missing=["Go"],
+        matched=["Python", "AWS"], missing=["Go"], resume_version_id=old_version.id,
     )
 
     pdf_bytes = _minimal_pdf_bytes("New resume AAA")
     response = api_client.post("/resumes/upload", files={"file": ("r.pdf", pdf_bytes, "application/pdf")})
     assert response.status_code == 201
+    new_version_id = response.json()["id"]
 
     db_session.expire_all()
-    reloaded = db_session.get(JobPosting, job.id)
-    assert reloaded.matched_skills is None
-    assert reloaded.missing_skills is None
-    # A stronger check than the ORM-level assertion above: a JSON column
-    # holding the *JSON* scalar null (as opposed to a real SQL NULL) also
-    # deserializes to Python None via the ORM (json.loads('null') ==
-    # None), so the assertions above alone would NOT catch a reset that
-    # writes JSON 'null' instead of SQL NULL - a real bug found while
-    # verifying this endpoint against production data (see
-    # SESSIONS.md/the _reset_skills_matching docstring). This queries the
-    # exact same way scripts/backfill_skills_matching.py's own
-    # reprocessing query does (`.filter(JobPosting.matched_skills.is_(None))`)
-    # - the thing that would have silently stopped picking up these rows.
-    assert db_session.query(JobPosting).filter(JobPosting.matched_skills.is_(None)).count() == 1
-    assert db_session.query(JobPosting).filter(JobPosting.missing_skills.is_(None)).count() == 1
+    # The old version's row must be exactly as it was.
+    old_match = _get_skill_match(db_session, job.id, old_version.id)
+    assert old_match is not None
+    assert old_match.matched_skills == ["Python", "AWS"]
+    assert old_match.missing_skills == ["Go"]
+    # The new version starts with zero rows of its own for this job -
+    # nothing copied forward, nothing pre-populated.
+    assert _get_skill_match(db_session, job.id, new_version_id) is None
 
 
 def test_upload_rejects_non_pdf_file(api_client, db_session):
@@ -309,13 +337,7 @@ def test_upload_422_when_no_text_extracted(api_client, db_session, _uploaded_pat
 # ---------------------------------------------------------------------
 
 
-def test_activate_switches_active_version_and_resets_skills(api_client, db_session):
-    # Distinct text (not just distinct embeddings) - the new content-hash
-    # no-op check (see huntloop.api.routers.resumes) compares extracted
-    # text, so two versions sharing the same seeded default text would
-    # incorrectly look like a no-op re-upload and this test's whole
-    # premise (activating a genuinely different resume DOES reset
-    # matched/missing_skills) wouldn't be exercised.
+def test_activate_switches_active_version_and_does_not_touch_resume_skill_matches(api_client, db_session):
     version_a = _seed_resume(db_session, 1, is_active=True, embedding=EMBEDDING_A, text="resume text AAA")
     version_b = _seed_resume(db_session, 2, is_active=False, embedding=EMBEDDING_B, text="resume text BBB")
     company = Company(name="checkr")
@@ -324,7 +346,7 @@ def test_activate_switches_active_version_and_resets_skills(api_client, db_sessi
     db_session.commit()
     job = _seed_job(
         db_session, company, source, "Backend Engineer", EMBEDDING_A,
-        matched=["Python"], missing=["Go"],
+        matched=["Python"], missing=["Go"], resume_version_id=version_a.id,
     )
 
     response = api_client.patch(f"/resumes/{version_b.id}/activate")
@@ -337,14 +359,13 @@ def test_activate_switches_active_version_and_resets_skills(api_client, db_sessi
     assert db_session.get(ResumeVersion, version_a.id).is_active is False
     assert db_session.get(ResumeVersion, version_b.id).is_active is True
 
-    reloaded_job = db_session.get(JobPosting, job.id)
-    assert reloaded_job.matched_skills is None
-    assert reloaded_job.missing_skills is None
-    # See the equivalent assertion in test_upload_resets_matched_and_
-    # missing_skills_on_all_jobs for why this SQL-level IS NULL check is
-    # necessary and not redundant with the two assertions above.
-    assert db_session.query(JobPosting).filter(JobPosting.matched_skills.is_(None)).count() == 1
-    assert db_session.query(JobPosting).filter(JobPosting.missing_skills.is_(None)).count() == 1
+    # version_a's existing results are untouched by switching away from it.
+    a_match = _get_skill_match(db_session, job.id, version_a.id)
+    assert a_match is not None
+    assert a_match.matched_skills == ["Python"]
+    assert a_match.missing_skills == ["Go"]
+    # version_b starts with zero rows of its own for this job.
+    assert _get_skill_match(db_session, job.id, version_b.id) is None
 
 
 def test_activate_computes_missing_embedding_before_activating(api_client, db_session, stub_embed_text):
@@ -369,7 +390,7 @@ def test_activate_already_active_is_noop_and_preserves_skills(api_client, db_ses
     db_session.commit()
     job = _seed_job(
         db_session, company, source, "Backend Engineer", EMBEDDING_A,
-        matched=["Python"], missing=["Go"],
+        matched=["Python"], missing=["Go"], resume_version_id=active.id,
     )
 
     response = api_client.patch(f"/resumes/{active.id}/activate")
@@ -379,9 +400,9 @@ def test_activate_already_active_is_noop_and_preserves_skills(api_client, db_ses
     db_session.expire_all()
     # Already active - reactivating it is a no-op, so matched/missing_skills
     # must NOT have been wiped.
-    reloaded_job = db_session.get(JobPosting, job.id)
-    assert reloaded_job.matched_skills == ["Python"]
-    assert reloaded_job.missing_skills == ["Go"]
+    match = _get_skill_match(db_session, job.id, active.id)
+    assert match.matched_skills == ["Python"]
+    assert match.missing_skills == ["Go"]
 
 
 def test_activate_404_for_missing_resume(api_client, db_session):
@@ -440,23 +461,27 @@ def test_activating_a_different_resume_changes_live_match_scores(api_client, db_
 
 
 # ---------------------------------------------------------------------
-# Content-hash no-op check (huntloop.api.routers.resumes) - repeated
-# uploads of byte-identical content must not repeatedly wipe
-# matched_skills/missing_skills across the whole job_postings table.
+# Content-hash no-op check (huntloop.api.routers.resumes) - now purely a
+# logging distinction (see the module docstring's historical-note
+# paragraph): since resume_skill_matches is keyed per resume_version_id,
+# no upload or activation ever touches another version's rows, whether
+# or not the new/reactivated version's content happens to match what was
+# previously active. These tests confirm that holds in both the
+# content-identical and content-different cases.
 # ---------------------------------------------------------------------
 
 
-def test_reuploading_identical_resume_content_skips_the_skills_reset(
+def test_reuploading_identical_resume_content_does_not_touch_existing_skill_matches(
     api_client, db_session, stub_embed_text, _uploaded_paths
 ):
-    _seed_resume(db_session, 1, is_active=True, embedding=EMBEDDING_A, text="AAA original")
+    old_version = _seed_resume(db_session, 1, is_active=True, embedding=EMBEDDING_A, text="AAA original")
     company = Company(name="checkr")
     source = JobSource(name="greenhouse_api")
     db_session.add_all([company, source])
     db_session.commit()
     job = _seed_job(
         db_session, company, source, "Backend Engineer", EMBEDDING_A,
-        matched=["Python", "AWS"], missing=["Go"],
+        matched=["Python", "AWS"], missing=["Go"], resume_version_id=old_version.id,
     )
 
     # Same extracted-text content as the currently-active version 1
@@ -466,54 +491,53 @@ def test_reuploading_identical_resume_content_skips_the_skills_reset(
     response = api_client.post("/resumes/upload", files={"file": ("resume.pdf", pdf_bytes, "application/pdf")})
     assert response.status_code == 201
     assert response.json()["version_number"] == 2
+    new_version_id = response.json()["id"]
 
     db_session.expire_all()
-    # The reset must NOT have run - this job's real, previously-computed
-    # skills-match data should be completely untouched.
-    reloaded_job = db_session.get(JobPosting, job.id)
-    assert reloaded_job.matched_skills == ["Python", "AWS"]
-    assert reloaded_job.missing_skills == ["Go"]
+    old_match = _get_skill_match(db_session, job.id, old_version.id)
+    assert old_match.matched_skills == ["Python", "AWS"]
+    assert old_match.missing_skills == ["Go"]
+    assert _get_skill_match(db_session, job.id, new_version_id) is None
 
-    # A genuinely new, different resume version should still have been
-    # created and marked active - only the reset is skipped, nothing else.
+    # A genuinely new resume version should still have been created and
+    # marked active.
     new_active = db_session.query(ResumeVersion).filter_by(version_number=2).one()
     assert new_active.is_active is True
     old = db_session.query(ResumeVersion).filter_by(version_number=1).one()
     assert old.is_active is False
 
 
-def test_reuploading_genuinely_different_resume_content_still_resets_skills(
+def test_reuploading_different_resume_content_also_does_not_touch_existing_skill_matches(
     api_client, db_session, stub_embed_text, _uploaded_paths
 ):
-    _seed_resume(db_session, 1, is_active=True, embedding=EMBEDDING_A, text="AAA original")
+    old_version = _seed_resume(db_session, 1, is_active=True, embedding=EMBEDDING_A, text="AAA original")
     company = Company(name="checkr")
     source = JobSource(name="greenhouse_api")
     db_session.add_all([company, source])
     db_session.commit()
     job = _seed_job(
         db_session, company, source, "Backend Engineer", EMBEDDING_A,
-        matched=["Python", "AWS"], missing=["Go"],
+        matched=["Python", "AWS"], missing=["Go"], resume_version_id=old_version.id,
     )
 
     pdf_bytes = _minimal_pdf_bytes("BBB completely different content")
     response = api_client.post("/resumes/upload", files={"file": ("resume2.pdf", pdf_bytes, "application/pdf")})
     assert response.status_code == 201
+    new_version_id = response.json()["id"]
 
     db_session.expire_all()
-    reloaded_job = db_session.get(JobPosting, job.id)
-    assert reloaded_job.matched_skills is None
-    assert reloaded_job.missing_skills is None
+    old_match = _get_skill_match(db_session, job.id, old_version.id)
+    assert old_match.matched_skills == ["Python", "AWS"]
+    assert old_match.missing_skills == ["Go"]
+    assert _get_skill_match(db_session, job.id, new_version_id) is None
 
 
-def test_reactivating_a_version_with_identical_content_skips_the_skills_reset(api_client, db_session):
+def test_reactivating_a_version_with_identical_content_does_not_touch_skill_matches(api_client, db_session):
     # Two DB rows, deliberately given the SAME extracted text (e.g. the
     # same file uploaded twice at different times, each creating its own
-    # resume_versions row) - reactivating the older one should be
-    # recognized as a content no-op even though it's a different row id
-    # than the one currently active.
-    _seed_resume(db_session, 1, is_active=False, embedding=EMBEDDING_A, text="identical content")
+    # resume_versions row).
+    older = _seed_resume(db_session, 1, is_active=False, embedding=EMBEDDING_A, text="identical content")
     active = _seed_resume(db_session, 2, is_active=True, embedding=EMBEDDING_A, text="identical content")
-    older = db_session.query(ResumeVersion).filter_by(version_number=1).one()
 
     company = Company(name="checkr")
     source = JobSource(name="greenhouse_api")
@@ -521,16 +545,19 @@ def test_reactivating_a_version_with_identical_content_skips_the_skills_reset(ap
     db_session.commit()
     job = _seed_job(
         db_session, company, source, "Backend Engineer", EMBEDDING_A,
-        matched=["Python"], missing=["Go"],
+        matched=["Python"], missing=["Go"], resume_version_id=active.id,
     )
 
     response = api_client.patch(f"/resumes/{older.id}/activate")
     assert response.status_code == 200
 
     db_session.expire_all()
-    reloaded_job = db_session.get(JobPosting, job.id)
-    assert reloaded_job.matched_skills == ["Python"]
-    assert reloaded_job.missing_skills == ["Go"]
+    # The version being deactivated keeps its existing results.
+    active_match = _get_skill_match(db_session, job.id, active.id)
+    assert active_match.matched_skills == ["Python"]
+    assert active_match.missing_skills == ["Go"]
+    # The newly-activated version starts with zero rows of its own.
+    assert _get_skill_match(db_session, job.id, older.id) is None
     assert db_session.get(ResumeVersion, older.id).is_active is True
     assert db_session.get(ResumeVersion, active.id).is_active is False
 

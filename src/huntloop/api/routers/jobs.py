@@ -43,7 +43,12 @@ from huntloop.db_models import (
     SponsorOverallAggregate,
 )
 from huntloop.demo_mode import is_demo_mode
-from huntloop.match_scoring import match_score_expr, match_score_order_by, score_basis_expr
+from huntloop.match_scoring import (
+    match_score_expr,
+    match_score_order_by,
+    resume_skill_columns,
+    score_basis_expr,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,27 +131,32 @@ def _salary_estimate_expr():
     )
 
 
-def _active_resume_embedding(db: Session):
-    """The active resume's embedding, or None if there's no active resume
-    or it hasn't been embedded yet (see scripts/backfill_embeddings.py).
-    Callers degrade gracefully to a null match_score in either case."""
-    resume = db.query(ResumeVersion).filter_by(is_active=True).first()
-    return resume.embedding if resume is not None else None
+def _active_resume(db: Session):
+    """The active ResumeVersion row (queried fresh, not cached), or None
+    if there isn't one. Callers read both its id (to filter
+    resume_skill_matches) and its embedding (possibly None if it hasn't
+    been embedded yet - see scripts/backfill_embeddings.py) and degrade
+    gracefully to a null match_score when either is missing."""
+    return db.query(ResumeVersion).filter_by(is_active=True).first()
 
 
-def _score_and_status_columns(resume_embedding):
+def _score_and_status_columns(resume_embedding, resume_version_id):
     """The computed columns every /jobs query needs: match_score (the
     composite score, null if there's no active resume - see
     huntloop.match_scoring), score_basis ('full' / 'partial' / null -
     tells the frontend which postings show the "score provisional"
-    marker), and application_status (defaults to not_applied when no
-    job_applications row exists - see ApplicationStatus)."""
-    score_expr = match_score_expr(resume_embedding)
-    basis_expr = score_basis_expr(resume_embedding)
+    marker), matched_skills/missing_skills (sourced from
+    resume_skill_matches for resume_version_id, not from JobPosting -
+    see huntloop.db_models.ResumeSkillMatch), and application_status
+    (defaults to not_applied when no job_applications row exists - see
+    ApplicationStatus)."""
+    score_expr = match_score_expr(resume_embedding, resume_version_id)
+    basis_expr = score_basis_expr(resume_embedding, resume_version_id)
+    matched_col, missing_col = resume_skill_columns(resume_version_id)
     status_expr = func.coalesce(JobApplication.status, ApplicationStatus.NOT_APPLIED.value).label(
         "application_status"
     )
-    return score_expr, basis_expr, status_expr
+    return score_expr, basis_expr, matched_col, missing_col, status_expr
 
 
 # The application-row columns (notes + last-updated timestamp) that both
@@ -172,8 +182,8 @@ def _row_to_summary(row) -> JobSummary:
         date_posted=job.date_posted,
         match_score=row.match_score,
         score_basis=row.score_basis,
-        matched_skills=job.matched_skills,
-        missing_skills=job.missing_skills,
+        matched_skills=row.matched_skills,
+        missing_skills=row.missing_skills,
         locations=[loc.location_name for loc in job.locations],
         application_status=row.application_status,
         application_notes=row.application_notes,
@@ -350,11 +360,15 @@ def list_jobs(
             400, f"Invalid sort {sort!r} - expected one of {', '.join(_SORT_OPTIONS)}"
         )
 
-    resume_embedding = _active_resume_embedding(db)
+    active_resume = _active_resume(db)
+    resume_embedding = active_resume.embedding if active_resume is not None else None
+    resume_version_id = active_resume.id if active_resume is not None else None
     if min_score is not None and resume_embedding is None:
         raise HTTPException(400, "min_score filter requires an active resume with a computed embedding")
 
-    score_expr, basis_expr, status_expr = _score_and_status_columns(resume_embedding)
+    score_expr, basis_expr, matched_col, missing_col, status_expr = _score_and_status_columns(
+        resume_embedding, resume_version_id
+    )
     salary_expr = _salary_estimate_expr()
 
     query = (
@@ -365,6 +379,8 @@ def list_jobs(
             Company.matched_sponsor_employer_name,
             score_expr,
             basis_expr,
+            matched_col,
+            missing_col,
             status_expr,
             *_APPLICATION_DETAIL_COLUMNS,
             salary_expr.label("salary_estimate_amount"),
@@ -426,7 +442,7 @@ def list_jobs(
     elif sort == "-salary":
         order_by = [salary_expr.desc().nulls_last()]
     else:  # "-score"
-        order_by = match_score_order_by(resume_embedding, descending=True)
+        order_by = match_score_order_by(resume_embedding, resume_version_id, descending=True)
     query = query.order_by(*order_by, JobPosting.id.asc())
 
     query = query.limit(limit).offset(offset)
@@ -442,11 +458,18 @@ def list_jobs(
 
 @router.get("/{job_id}", response_model=JobDetail)
 def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
-    resume_embedding = _active_resume_embedding(db)
-    score_expr, basis_expr, status_expr = _score_and_status_columns(resume_embedding)
+    active_resume = _active_resume(db)
+    resume_embedding = active_resume.embedding if active_resume is not None else None
+    resume_version_id = active_resume.id if active_resume is not None else None
+    score_expr, basis_expr, matched_col, missing_col, status_expr = _score_and_status_columns(
+        resume_embedding, resume_version_id
+    )
 
     query = (
-        select(JobPosting, Company, score_expr, basis_expr, status_expr, *_APPLICATION_DETAIL_COLUMNS)
+        select(
+            JobPosting, Company, score_expr, basis_expr, matched_col, missing_col,
+            status_expr, *_APPLICATION_DETAIL_COLUMNS,
+        )
         .join(Company, JobPosting.company_id == Company.id)
         .outerjoin(JobApplication, JobApplication.job_posting_id == JobPosting.id)
         .where(JobPosting.id == job_id)
@@ -495,8 +518,8 @@ def get_job(job_id: int, db: Session = Depends(get_db)) -> JobDetail:
         date_posted=job.date_posted,
         match_score=row.match_score,
         score_basis=row.score_basis,
-        matched_skills=job.matched_skills,
-        missing_skills=job.missing_skills,
+        matched_skills=row.matched_skills,
+        missing_skills=row.missing_skills,
         locations=[loc.location_name for loc in job.locations],
         application_status=row.application_status,
         application_notes=row.application_notes,

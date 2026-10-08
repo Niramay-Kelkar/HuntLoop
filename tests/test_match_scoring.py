@@ -12,11 +12,19 @@ Composite formula (composite-match-score-v1, 2026-09-08):
   partial     = clamp(sim / 0.60, 0, 1)
 where ratio = matched / (matched + missing) and a posting is "full" only
 when both skills lists are real arrays totalling >= 3 entries.
+
+Skills data lives in resume_skill_matches, keyed by
+(job_posting_id, resume_version_id) - see huntloop.db_models.
+ResumeSkillMatch. Every test that needs a skills signal seeds a real
+ResumeVersion row (for its id) and a ResumeSkillMatch row, and passes
+that id as resume_version_id to match_score_expr/score_basis_expr/
+match_score_order_by, instead of setting matched_skills/missing_skills
+directly on JobPosting (the old, now-unused storage).
 """
 import pytest
 from sqlalchemy import select
 
-from huntloop.db_models import Company, JobPosting
+from huntloop.db_models import Company, JobPosting, ResumeSkillMatch, ResumeVersion
 from huntloop.match_scoring import (
     EMBEDDING_WEIGHT,
     SCORE_CEILING,
@@ -47,6 +55,31 @@ MID[1] = 0.9539392014169456
 LOW = _vec(1, 1.0)                        # orthogonal -> 0.0
 
 
+def _seed_resume_version(db_session, embedding=None):
+    resume = ResumeVersion(
+        version_number=1,
+        file_path="data/resumes/fake.pdf",
+        extracted_text="resume text",
+        is_active=True,
+        embedding=embedding,
+    )
+    db_session.add(resume)
+    db_session.commit()
+    return resume.id
+
+
+def _seed_skill_match(db_session, job_posting_id, resume_version_id, matched, missing):
+    db_session.add(
+        ResumeSkillMatch(
+            job_posting_id=job_posting_id,
+            resume_version_id=resume_version_id,
+            matched_skills=matched,
+            missing_skills=missing,
+        )
+    )
+    db_session.commit()
+
+
 def _seed(db_session):
     company = Company(name="acme")
     db_session.add(company)
@@ -62,11 +95,11 @@ def _seed(db_session):
     return jobs
 
 
-def _score_and_basis(db_session, job_id):
+def _score_and_basis(db_session, job_id, resume_version_id):
     row = db_session.execute(
         select(
-            match_score_expr(RESUME_EMBEDDING),
-            score_basis_expr(RESUME_EMBEDDING),
+            match_score_expr(RESUME_EMBEDDING, resume_version_id),
+            score_basis_expr(RESUME_EMBEDDING, resume_version_id),
         ).where(JobPosting.id == job_id)
     ).one()
     return row[0], row[1]
@@ -81,20 +114,22 @@ def _calibrated_embedding(sim):
 # embedding term, so the pure-embedding fixtures rank exactly as before)
 # ---------------------------------------------------------------------------
 def test_order_by_ranks_descending_by_match_score_nulls_last(db_session):
+    resume_version_id = _seed_resume_version(db_session)
     _seed(db_session)
     ordered = (
         db_session.query(JobPosting)
-        .order_by(*match_score_order_by(RESUME_EMBEDDING))
+        .order_by(*match_score_order_by(RESUME_EMBEDDING, resume_version_id))
         .all()
     )
     assert [j.job_title for j in ordered] == ["High", "Mid", "Low", "NoEmb"]
 
 
 def test_order_by_ascending(db_session):
+    resume_version_id = _seed_resume_version(db_session)
     _seed(db_session)
     ordered = (
         db_session.query(JobPosting)
-        .order_by(*match_score_order_by(RESUME_EMBEDDING, descending=False))
+        .order_by(*match_score_order_by(RESUME_EMBEDDING, resume_version_id, descending=False))
         .all()
     )
     assert [j.job_title for j in ordered] == ["Low", "Mid", "High", "NoEmb"]
@@ -131,6 +166,7 @@ def test_no_resume_embedding_gives_null_score_and_basis(db_session):
     [(HIGH, 1.0), (MID, 0.3), (LOW, 0.0)],
 )
 def test_partial_basis_is_calibrated_embedding_only(db_session, embedding, sim):
+    resume_version_id = _seed_resume_version(db_session)
     company = Company(name="acme")
     db_session.add(company)
     db_session.flush()
@@ -140,7 +176,7 @@ def test_partial_basis_is_calibrated_embedding_only(db_session, embedding, sim):
     db_session.add(job)
     db_session.commit()
 
-    score, basis = _score_and_basis(db_session, job.id)
+    score, basis = _score_and_basis(db_session, job.id, resume_version_id)
     assert basis == "partial"
     assert score == pytest.approx(_calibrated_embedding(sim), abs=1e-6)
 
@@ -148,34 +184,32 @@ def test_partial_basis_is_calibrated_embedding_only(db_session, embedding, sim):
 def test_both_empty_skills_lists_are_treated_as_no_data(db_session):
     """[] / [] -> denominator 0 -> too thin -> partial fallback, NOT a
     zero-ratio full score."""
+    resume_version_id = _seed_resume_version(db_session)
     company = Company(name="acme")
     db_session.add(company)
     db_session.flush()
-    job = JobPosting(
-        job_title="e", job_url="http://x/e", company_id=company.id, embedding=MID,
-        matched_skills=[], missing_skills=[],
-    )
+    job = JobPosting(job_title="e", job_url="http://x/e", company_id=company.id, embedding=MID)
     db_session.add(job)
     db_session.commit()
+    _seed_skill_match(db_session, job.id, resume_version_id, [], [])
 
-    score, basis = _score_and_basis(db_session, job.id)
+    score, basis = _score_and_basis(db_session, job.id, resume_version_id)
     assert basis == "partial"
     assert score == pytest.approx(_calibrated_embedding(0.3), abs=1e-6)
 
 
 def test_denominator_below_minimum_falls_back_to_partial(db_session):
     """matched + missing < 3 total -> ratio not trusted -> partial."""
+    resume_version_id = _seed_resume_version(db_session)
     company = Company(name="acme")
     db_session.add(company)
     db_session.flush()
-    job = JobPosting(
-        job_title="thin", job_url="http://x/thin", company_id=company.id, embedding=MID,
-        matched_skills=["Python"], missing_skills=["Go"],
-    )
+    job = JobPosting(job_title="thin", job_url="http://x/thin", company_id=company.id, embedding=MID)
     db_session.add(job)
     db_session.commit()
+    _seed_skill_match(db_session, job.id, resume_version_id, ["Python"], ["Go"])
 
-    score, basis = _score_and_basis(db_session, job.id)
+    score, basis = _score_and_basis(db_session, job.id, resume_version_id)
     assert basis == "partial"
     assert score == pytest.approx(_calibrated_embedding(0.3), abs=1e-6)
 
@@ -184,19 +218,18 @@ def test_denominator_below_minimum_falls_back_to_partial(db_session):
 # Full basis: usable skills signal -> blended composite
 # ---------------------------------------------------------------------------
 def test_full_basis_blends_embedding_and_skills(db_session):
+    resume_version_id = _seed_resume_version(db_session)
     company = Company(name="acme")
     db_session.add(company)
     db_session.flush()
     # sim 0.3 -> emb_cal = 0.3/0.6 = 0.5 (does not clamp)
     # matched 3, missing 3 -> ratio 0.5 -> skills_cal = 0.5/0.66 = 0.7576
-    job = JobPosting(
-        job_title="f", job_url="http://x/f", company_id=company.id, embedding=MID,
-        matched_skills=["a", "b", "c"], missing_skills=["d", "e", "f"],
-    )
+    job = JobPosting(job_title="f", job_url="http://x/f", company_id=company.id, embedding=MID)
     db_session.add(job)
     db_session.commit()
+    _seed_skill_match(db_session, job.id, resume_version_id, ["a", "b", "c"], ["d", "e", "f"])
 
-    score, basis = _score_and_basis(db_session, job.id)
+    score, basis = _score_and_basis(db_session, job.id, resume_version_id)
     assert basis == "full"
     emb_cal = _calibrated_embedding(0.3)
     skills_cal = min(0.5 / SKILLS_CEILING, 1.0)
@@ -205,19 +238,18 @@ def test_full_basis_blends_embedding_and_skills(db_session):
 
 
 def test_full_basis_skills_ratio_is_capped_at_the_ceiling(db_session):
+    resume_version_id = _seed_resume_version(db_session)
     company = Company(name="acme")
     db_session.add(company)
     db_session.flush()
     # LOW embedding (sim 0.0 -> emb_cal 0.0); matched 9 / missing 1 ->
     # ratio 0.9 -> skills_cal capped at 1.0 -> composite = 0.35
-    job = JobPosting(
-        job_title="cap", job_url="http://x/cap", company_id=company.id, embedding=LOW,
-        matched_skills=[f"m{i}" for i in range(9)], missing_skills=["x"],
-    )
+    job = JobPosting(job_title="cap", job_url="http://x/cap", company_id=company.id, embedding=LOW)
     db_session.add(job)
     db_session.commit()
+    _seed_skill_match(db_session, job.id, resume_version_id, [f"m{i}" for i in range(9)], ["x"])
 
-    score, basis = _score_and_basis(db_session, job.id)
+    score, basis = _score_and_basis(db_session, job.id, resume_version_id)
     assert basis == "full"
     assert score == pytest.approx(SKILLS_WEIGHT * 1.0, abs=1e-6)
 
@@ -226,17 +258,16 @@ def test_empty_matched_with_populated_missing_is_a_real_zero(db_session):
     """matched=[] alongside a populated missing list is a genuine
     'matches nothing here' signal - full basis, skills term 0, so the
     score is 0.65 * emb_cal (a real penalty), not the fallback."""
+    resume_version_id = _seed_resume_version(db_session)
     company = Company(name="acme")
     db_session.add(company)
     db_session.flush()
-    job = JobPosting(
-        job_title="z", job_url="http://x/z", company_id=company.id, embedding=HIGH,
-        matched_skills=[], missing_skills=["d", "e", "f", "g"],
-    )
+    job = JobPosting(job_title="z", job_url="http://x/z", company_id=company.id, embedding=HIGH)
     db_session.add(job)
     db_session.commit()
+    _seed_skill_match(db_session, job.id, resume_version_id, [], ["d", "e", "f", "g"])
 
-    score, basis = _score_and_basis(db_session, job.id)
+    score, basis = _score_and_basis(db_session, job.id, resume_version_id)
     assert basis == "full"
     assert score == pytest.approx(EMBEDDING_WEIGHT * _calibrated_embedding(1.0), abs=1e-6)
 
@@ -244,6 +275,7 @@ def test_empty_matched_with_populated_missing_is_a_real_zero(db_session):
 def test_partial_high_embedding_outranks_full_low_composite(db_session):
     """A partial-basis posting is never bottom-sorted for lacking skills
     data - it interleaves by its real fallback value."""
+    resume_version_id = _seed_resume_version(db_session)
     company = Company(name="acme")
     db_session.add(company)
     db_session.flush()
@@ -252,14 +284,14 @@ def test_partial_high_embedding_outranks_full_low_composite(db_session):
     )
     full_weak = JobPosting(
         job_title="full-weak", job_url="http://x/fw", company_id=company.id, embedding=LOW,
-        matched_skills=[], missing_skills=["d", "e", "f"],
     )
     db_session.add_all([partial, full_weak])
     db_session.commit()
+    _seed_skill_match(db_session, full_weak.id, resume_version_id, [], ["d", "e", "f"])
 
     ordered = (
         db_session.query(JobPosting)
-        .order_by(*match_score_order_by(RESUME_EMBEDDING))
+        .order_by(*match_score_order_by(RESUME_EMBEDDING, resume_version_id))
         .all()
     )
     assert [j.job_title for j in ordered] == ["partial-strong", "full-weak"]

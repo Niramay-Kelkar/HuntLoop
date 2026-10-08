@@ -22,6 +22,7 @@ from huntloop.db_models import (
     JobPosting,
     JobSource,
     LcaDisclosure,
+    ResumeSkillMatch,
     ResumeVersion,
 )
 
@@ -81,8 +82,6 @@ def _seed(db_session):
         company_id=palantir.id,
         source_id=source.id,
         embedding=MID_MATCH_EMBEDDING,
-        matched_skills=["Python", "AWS"],
-        missing_skills=["Go"],
         department="Sales",
         department_category="Sales",
         employment_type="Contract",
@@ -110,6 +109,19 @@ def _seed(db_session):
         employment_type=None,
     )
     db_session.add_all([high, mid, low, no_embedding])
+    db_session.commit()
+
+    # matched/missing_skills for "mid" live in resume_skill_matches, keyed
+    # by (job_posting_id, resume_version_id) - see
+    # huntloop.db_models.ResumeSkillMatch - not on JobPosting directly.
+    db_session.add(
+        ResumeSkillMatch(
+            job_posting_id=mid.id,
+            resume_version_id=resume.id,
+            matched_skills=["Python", "AWS"],
+            missing_skills=["Go"],
+        )
+    )
     db_session.commit()
 
     from huntloop.location_normalization import normalize_location

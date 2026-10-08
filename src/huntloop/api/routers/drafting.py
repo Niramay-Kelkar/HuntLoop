@@ -26,7 +26,7 @@ BYOK contract (see huntloop.drafting for the provider-call layer):
     does NOT send the job description or resume text - both are looked
     up server-side (see _lookup_job_and_active_resume below, which reuses
     the exact "SELECT ... WHERE is_active = true" active-resume pattern
-    huntloop.api.routers.jobs._active_resume_embedding() already uses,
+    huntloop.api.routers.jobs._active_resume() already uses,
     just for extracted_text instead of embedding).
   - Exactly one provider per request, no failover - this module never
     imports huntloop.skills_matching_router or any skills_matching_*
@@ -149,7 +149,7 @@ def _lookup_job_and_active_resume(db: Session, job_id: int) -> tuple[JobPosting,
     job, company = row.JobPosting, row.Company
 
     # Same "resolve the active resume fresh, at request time" pattern as
-    # huntloop.api.routers.jobs._active_resume_embedding() - just reading
+    # huntloop.api.routers.jobs._active_resume() - just reading
     # extracted_text instead of embedding.
     resume = db.query(ResumeVersion).filter_by(is_active=True).first()
     if resume is None:

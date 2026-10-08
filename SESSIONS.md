@@ -13146,3 +13146,153 @@ assuming the feature is live.
 Not touched: `scripts/build_demo_dataset.py` (never invoked), any other
 table on Neon, Render/Vercel environment variables or dashboards, local
 production Postgres (port 5432, never connected to in this session).
+
+---
+
+## 2026-10-08 — Per-resume-version skill-match storage (resume_skill_matches)
+
+**Did:** Moved `job_postings.matched_skills`/`missing_skills` off a single
+global pair of columns onto a new table, `resume_skill_matches`, keyed by
+`(job_posting_id, resume_version_id)` (migration `a7b2c4d8e1f3`, model
+`huntloop.db_models.ResumeSkillMatch`) — so activating a different resume
+version no longer destroys every job's previously-computed skill match.
+This ran directly against **local production Postgres**, intentionally,
+per this session's explicit instruction.
+
+**Why:** A same-day earlier investigation (see the "investigation only"
+work earlier today) found that `matched_skills`/`missing_skills` were
+completely untracked against any resume version — a single global pair of
+columns reflecting "whatever was last computed against whichever resume
+happened to be active" — and that `_reset_skills_matching()` in
+`huntloop.api.routers.resumes` unconditionally NULLed them across the
+*entire* `job_postings` table on every resume activation/upload. Swapping
+to a new resume today would have wiped all 45k+ existing results,
+including the near-100%-covered top 2,000 match-score tier. The owner
+wanted to swap resumes without losing that backfill coverage.
+
+**Safety, Step 0:**
+- Full `pg_dump` custom-format backup taken *before any schema change*:
+  `/Users/niramaykelkar/pg_backups/jobsight_backup_20261008T120346.dump`
+  (647MB, outside the repo). Verified non-empty and structurally valid via
+  `pg_restore --list` (confirmed `job_postings`/`resume_versions`/
+  `companies`/`lca_disclosures` table data present) — no actual restore
+  performed, this was a read-only integrity check on the dump file.
+- Baseline captured before touching anything: 153,020 total
+  `job_postings` rows, 45,881 with `matched_skills` populated (the
+  investigation's earlier 45,595 figure had already moved — the daily
+  backfill process, `scripts/backfill_skills_matching.py`, was actively
+  running in the background throughout the first half of this session,
+  PID 5032, started 10:21am, finished naturally at 12:53:57 partway
+  through this work: "1397 succeeded, 917 failed, 2314 processed in
+  9171.0s"). Active resume confirmed as `resume_versions.id=6`
+  (`version_number=4`), not assumed.
+
+**Step 1 — additive schema change:**
+- `resume_skill_matches` (id, job_posting_id FK, resume_version_id FK,
+  matched_skills, missing_skills, created_at; unique constraint on
+  `(job_posting_id, resume_version_id)`; index on `resume_version_id`).
+  Applied via `alembic upgrade head` against the real local database —
+  this also picked up one prior unrelated pending migration
+  (`resume_ats_reports`, already merged in code but not yet applied
+  locally). `job_postings.matched_skills`/`missing_skills` were left
+  completely untouched, confirmed via `\d job_postings` before and after.
+- Data migration: `INSERT ... SELECT id, 6, matched_skills, missing_skills
+  FROM job_postings WHERE matched_skills IS NOT NULL ON CONFLICT ...
+  DO NOTHING` — idempotent (re-run twice total, since the still-running
+  legacy backfill kept adding rows to the old columns between the schema
+  migration and the first copy; the second run correctly inserted 0 new
+  rows once the legacy process had actually stopped). Final: 46,852 rows
+  in both the old column and the new table — verified with a real
+  JSON-equality check (`::jsonb IS DISTINCT FROM`, not a naive `::text`
+  comparison) across **all 46,852 rows, not a sample: 0 mismatches.**
+
+**Step 2 — read paths:** `huntloop.match_scoring` (`match_score_expr`,
+`score_basis_expr`, `match_score_order_by`) and
+`huntloop.api.routers.jobs` (`GET /jobs`, `GET /jobs/{id}`) now read
+matched/missing skills via a correlated scalar subquery against
+`resume_skill_matches` filtered to the active `resume_version_id`,
+instead of the `JobPosting` columns directly. New helper
+`resume_skill_columns()` added to `match_scoring.py` for the two
+API endpoints; `_active_resume_embedding()` in `jobs.py` was replaced by
+`_active_resume()` (returns the whole row, so callers get both the
+embedding and the id).
+
+**Regression check (the critical one):** wrote a standalone script
+comparing the new subquery-based read path against the old direct-column
+read path for every one of the 46,852 populated rows — **0 mismatches on
+`matched_skills`, `missing_skills`, `match_score`, and `score_basis`**,
+not a sample. Also verified against the real running API (a throwaway
+`uvicorn` instance on port 8711 against the real local production DB,
+shut down afterward): `GET /jobs/815` returned skills lists byte-identical
+to a direct `psql` query of the old column; `GET /jobs?sort=-score`
+returned real scored jobs correctly; `GET /jobs/124485` (a job never
+scored) correctly returned `null`/`null`/`"partial"` rather than erroring.
+
+**Step 3 — stopped the destructive reset:**
+`_reset_skills_matching()` (the function that did the full-table
+`UPDATE ... SET matched_skills = NULL`) was deleted outright from
+`huntloop.api.routers.resumes` — there is nothing left to reset. A new
+`ResumeVersion` row (via upload or activation) now simply starts with
+zero `resume_skill_matches` rows for its own id; every other version's
+rows, including the one just deactivated, are left completely alone.
+The content-hash check (`_content_hash`/`_active_resume_content_hash`)
+is kept, but now purely for the log line (whether this was a
+content-identical no-op) — it no longer gates any destructive action,
+since there is no longer a destructive action to gate.
+`scripts/backfill_skills_matching.py`'s job-selection query
+(`matched_skills IS NULL AND is_relevant IS TRUE`) became "no
+`resume_skill_matches` row exists yet for the active `resume_version_id`,
+AND `is_relevant IS TRUE`" (a `NOT EXISTS` subquery), and its write path
+now does `INSERT ... ON CONFLICT (job_posting_id, resume_version_id) DO
+UPDATE` into `resume_skill_matches` instead of writing
+`JobPosting.matched_skills`/`missing_skills` directly. `_log_backlog()`
+was updated the same way.
+
+**Step 4 — end-to-end verification:**
+- **Coverage-tier comparison (the user's own ask: "confirm it matches the
+  pre-migration numbers exactly"):**
+
+  | Tier | Pre-migration (this morning's investigation) | Post-migration (now) |
+  |---|---|---|
+  | Top 500 | 500/500 (100%) | 500/500 (100%) |
+  | Top 1,000 | 1,000/1,000 (100%) | 1,000/1,000 (100%) |
+  | Top 2,000 | 1,997/2,000 (99.9%) | 1,997/2,000 (99.9%) |
+  | Top 5,000 | 4,944/5,000 (98.9%) | 4,949/5,000 (99.0%) |
+  | Top 10,000 | 9,733/10,000 (97.3%) | 9,846/10,000 (98.5%) |
+
+  The first three tiers match exactly. The 5,000/10,000 tiers are
+  slightly *higher* post-migration, not different due to any migration
+  issue — the still-running legacy backfill process (see Step 0) kept
+  adding real new matches between the original investigation and this
+  verification, and those land correctly in the new table. No tier went
+  down; there is no unexplained discrepancy.
+- Full test suite: **541 passed, 0 failed.** 9 tests initially failed
+  after Step 2/3 (`tests/test_match_scoring.py` ×3,
+  `tests/test_api_jobs.py` ×2, `tests/test_api_resumes.py` ×3,
+  `tests/test_backfill_skills_matching_metrics_wiring.py` ×1) — all were
+  fixtures/assertions written against the old
+  `JobPosting.matched_skills` column or the old destructive-reset
+  behavior; each was rewritten to seed/assert against
+  `ResumeSkillMatch` rows and the new non-destructive activation
+  behavior, not loosened or skipped.
+- Final production-data check: `job_postings` row count unchanged at
+  153,020; old-column-populated count (46,852) and new-table row count
+  (46,852) still match exactly after the full test run.
+- **A new resume version was deliberately NOT activated** — per the
+  explicit instruction, that step is left for the owner to do themselves.
+
+**Known follow-up, not fixed in this session (flagged, not silent):**
+`scripts/seed_sample_job_postings.py` (the fresh-`docker compose up` demo
+dataset seeder) still writes `matched_skills`/`missing_skills` directly
+onto `JobPosting` rows from its sample CSV — those values are no longer
+surfaced by the read paths this session changed, so a freshly-seeded demo
+would show those few sample jobs as score-provisional ("partial" basis)
+instead of carrying their seeded skills data. Cosmetic only (sample/demo
+data, not production), out of scope for what this session was asked to
+touch, not fixed here.
+
+**Not yet done, deliberately:** `job_postings.matched_skills`/
+`missing_skills` columns themselves are still in the schema, unused by
+any read or write path now but not dropped — the owner's own plan
+explicitly treats dropping them as a separate, later step once everything
+has been running on the new table for a while.
