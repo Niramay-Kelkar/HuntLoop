@@ -85,16 +85,19 @@ same order as the actual risk:
 import asyncio
 import hashlib
 import logging
+import threading
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from sqlalchemy import func, null, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.responses import JSONResponse
 
 from huntloop.api.dependencies import get_db
 from huntloop.api.routers.drafting import _RateLimiter
+from huntloop.api.schemas.resume_ats_report import AtsReportResponse
 from huntloop.api.schemas.resumes import ResumeVersionSummary
-from huntloop.db_models import JobPosting, ResumeVersion
+from huntloop.db_models import JobPosting, ResumeAtsReport, ResumeVersion
 from huntloop.modal_resume_processing import embed_resume_text, process_resume
 from huntloop.resume_ingestion import save_uploaded_pdf
 from huntloop.text_cleaning import clean_text
@@ -305,6 +308,109 @@ def list_resumes(db: Session = Depends(get_db)) -> list[ResumeVersionSummary]:
     no other row can ever be added to a demo database."""
     resumes = db.query(ResumeVersion).order_by(ResumeVersion.version_number.desc()).all()
     return [_to_summary(r) for r in resumes]
+
+
+# Guards the "compute + cache" path below so two concurrent requests
+# that both find no cached row never both call the LLM and both try to
+# insert - see get_active_ats_report()'s docstring. A single process-
+# wide lock is fine here (not a per-resume-version lock): there is only
+# ever one active resume at a time, so at most one resume_version_id is
+# ever being computed for concurrently in practice, and this endpoint is
+# low-traffic enough that briefly serializing requests behind a cache
+# miss is not a real cost.
+_ats_report_lock = threading.Lock()
+
+
+@router.get("/active/ats-report", response_model=AtsReportResponse)
+def get_active_ats_report(db: Session = Depends(get_db)) -> AtsReportResponse:
+    """Returns the cached ATS-compatibility report for the currently
+    active resume version, computing and caching it on first request.
+
+    Read-only with respect to resume_versions/job_postings - this never
+    changes is_active, never touches matched_skills/missing_skills, and
+    is mounted on the safe `router` (available in demo mode too, unlike
+    unsafe_router's upload/activate endpoints), since it only reads the
+    resume the demo already ships with.
+
+    Caching: huntloop.db_models.ResumeAtsReport has a unique constraint
+    on resume_version_id, so a report is computed at most once per
+    resume version and served from that cached row on every later call,
+    regardless of how many visitors hit this endpoint. Two layers guard
+    the "first request after a resume becomes active" race, where
+    several requests could all see no cached row at once:
+      1. an in-process lock (_ats_report_lock) serializes the whole
+         check-compute-insert sequence, so only one request per process
+         ever calls the LLM for a given cache miss;
+      2. the unique constraint itself is the real backstop (across
+         multiple processes/workers, which the lock alone can't cover)
+         - a losing concurrent insert hits IntegrityError, which is
+         caught by re-querying and returning the row the winner just
+         wrote, never a 500.
+    No per-visitor rate limiting is added beyond this - unlike
+    /resumes/upload or /jobs/{id}/draft-answer, a cache hit does no LLM
+    work at all, so there is no meaningful unauthenticated-cost surface
+    to bound once the first report exists."""
+    resume = db.query(ResumeVersion).filter_by(is_active=True).first()
+    if resume is None:
+        raise HTTPException(404, "No active resume is on file.")
+
+    cached = db.query(ResumeAtsReport).filter_by(resume_version_id=resume.id).first()
+    if cached is not None:
+        return _ats_report_to_response(cached)
+
+    with _ats_report_lock:
+        # Re-check now that we hold the lock - another request may have
+        # computed and cached it while this one was waiting.
+        cached = db.query(ResumeAtsReport).filter_by(resume_version_id=resume.id).first()
+        if cached is not None:
+            return _ats_report_to_response(cached)
+
+        # Imported lazily, not at module level: huntloop.resume_ats_report
+        # requires GROQ_API_KEY at import time (same fail-fast convention
+        # as huntloop.skills_matching/huntloop.feedback_triage), and
+        # huntloop.api.main imports every router together - a module-level
+        # import here would break importing the whole API in any
+        # environment without that key set, not just this one endpoint.
+        from huntloop.resume_ats_report import generate_ats_report
+
+        report = generate_ats_report(resume.extracted_text)
+        if report is None:
+            raise HTTPException(
+                502, "Could not generate an ATS report right now - every configured LLM provider failed."
+            )
+
+        row = ResumeAtsReport(
+            resume_version_id=resume.id,
+            score=report["score"],
+            keyword_feedback=report["keyword_feedback"],
+            wording_feedback=report["wording_feedback"],
+            formatting_feedback=report["formatting_feedback"],
+        )
+        db.add(row)
+        try:
+            db.commit()
+        except IntegrityError:
+            # Lost a race with another process/worker that inserted the
+            # same resume_version_id first (the lock above only covers
+            # this one process) - discard our own result and serve theirs.
+            db.rollback()
+            cached = db.query(ResumeAtsReport).filter_by(resume_version_id=resume.id).first()
+            if cached is None:
+                raise HTTPException(502, "ATS report generation failed unexpectedly - please retry.")
+            return _ats_report_to_response(cached)
+        db.refresh(row)
+        return _ats_report_to_response(row)
+
+
+def _ats_report_to_response(row: ResumeAtsReport) -> AtsReportResponse:
+    return AtsReportResponse(
+        resume_version_id=row.resume_version_id,
+        score=row.score,
+        keyword_feedback=row.keyword_feedback,
+        wording_feedback=row.wording_feedback,
+        formatting_feedback=row.formatting_feedback,
+        created_at=row.created_at,
+    )
 
 
 @unsafe_router.post("/upload", response_model=ResumeVersionSummary, status_code=201)

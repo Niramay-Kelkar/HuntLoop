@@ -12918,3 +12918,119 @@ Not touched: Phase A's budget/locking/fallback logic itself (only the
 one additive `reason` field), `modal_resume_functions.py` (the deployed
 Modal app), any other metrics module, Render/Vercel env vars, or
 `requirements*.txt` (no new dependency).
+
+## 2026-10-08: Resume ATS compatibility report (`feature/resume-ats-report`)
+
+Branch `feature/resume-ats-report`. This followed an investigation-only
+pass on a per-job "Deep-Dive" idea, which was dropped in favor of this
+smaller, resume-level feature - a single ATS-compatibility report for
+the one active demo resume (score + keyword/wording/formatting
+feedback), computed once per resume version and cached, not per job and
+not per visitor.
+
+**Hard constraint, honored, not just stated:** this must never touch
+local production Postgres (`localhost:5432/jobsight`, confirmed via
+CLAUDE.md to be the exact database `scripts/backfill_skills_matching.py`
+runs against) or anything `resumes.activate()`/the unsafe upload-
+activate router touch. Investigated first and confirmed the real risk:
+`alembic/env.py` always reads `DATABASE_URL` from `huntloop.settings`
+(from `.env`), and this machine's `.env` points straight at that
+production database - so a bare `alembic upgrade head` here would have
+hit it. Never ran that. Instead: migrated and manually verified against
+docker-compose's separate `db` service (port 5433, confirmed via `docker
+compose ps` to be a distinct instance from port 5432) by overriding
+`DATABASE_URL` for that one command only, the same override pattern
+`scripts/deploy_demo_data.py` already established for pointing Alembic
+at Neon without touching production. Automated tests never needed this
+either - `tests/conftest.py` builds tables via `Base.metadata.
+create_all()` in a throwaway Postgres schema, never invoking Alembic.
+Applying this migration to the real deployed demo (Neon) is left to the
+existing `deploy_demo_data.py`/manual-Alembic-with-TARGET_DATABASE_URL
+flow - no Neon credentials were available here and none were used.
+
+**Built**, additive only (verified via `git diff master` - 108 inserted
+lines in `resumes.py`, exactly one line changed, the import list):
+- Migration `c1d2e3f4a5b6` (`b9c1d3e5f7a2` -> `c1d2e3f4a5b6`): new
+  `resume_ats_reports` table, one row per `resume_versions.id` (unique
+  constraint), `score` (int 0-100) + three JSON feedback-list columns
+  (`keyword_feedback`/`wording_feedback`/`formatting_feedback`) +
+  `created_at`. `db_models.ResumeAtsReport` mirrors it.
+- `huntloop/resume_ats_report.py` - a new, small module modeled on
+  `huntloop.feedback_triage` (same Groq-primary/Gemini-fallback shape,
+  same `GROQ_API_KEY` required/`GEMINI_API_KEY` optional convention,
+  never raises), but asking for structured JSON
+  (`response_format={"type": "json_object"}`, same mechanism
+  `skills_matching_groq_120b` already uses) instead of
+  `feedback_triage`'s one-line string, and with its own prompt - it
+  scores the resume on its own, no job description involved, so it does
+  not reuse `match_skills_batch`'s resume-vs-job contract at all.
+  `_validate_shape()` rejects anything that doesn't parse into
+  `{score: int 0-100, keyword_feedback/wording_feedback/
+  formatting_feedback: list[str]}` and falls through to the next
+  provider rather than caching something malformed.
+- `GET /resumes/active/ats-report` on the existing SAFE `router` (not
+  `unsafe_router`) in `huntloop/api/routers/resumes.py` - mounted
+  unconditionally in both demo and non-demo mode, same as `GET
+  /resumes` itself, since it only reads the resume the demo already
+  ships with and writes nothing that affects scoring/matching. Looks up
+  the active resume via the same `filter_by(is_active=True).first()`
+  read every other endpoint already uses (read-only - never sets
+  `is_active`). Cache-or-compute: a cache hit returns immediately; a
+  miss takes a process-wide `threading.Lock` (the "short in-process
+  lock" the task asked for) and double-checks the cache inside it
+  before calling the LLM, then inserts the new row. The table's own
+  unique constraint on `resume_version_id` is the real cross-process
+  backstop beyond that lock: a losing concurrent insert raises
+  `IntegrityError`, caught by rolling back and serving whichever row the
+  winner committed, rather than erroring or double-charging the LLM.
+  `generate_ats_report` is imported lazily inside the handler (not at
+  module level), same reason `huntloop.embeddings` is lazily imported
+  elsewhere in this file - it requires `GROQ_API_KEY` at import time,
+  and `huntloop.api.main` imports every router together.
+- Frontend: a new "ATS compatibility report" card on the existing
+  `/resumes` page (`getActiveAtsReport()` in `lib/api.ts`,
+  `AtsReportResponse` type), showing score + three labeled feedback
+  lists with a loading state for the first (uncached) computation. Both
+  resume-swap mutations (`uploadResume`/`activateResume`) now also
+  invalidate the `["ats-report"]` query, since a different active
+  version means a different (or not-yet-computed) report.
+
+**Verified, all real, not simulated:**
+- Backend suite: **541/541 passing** (536 pre-existing + 5 new in
+  `tests/test_api_resume_ats_report.py`), including one test that
+  simulates a genuine cross-process cache-write race (a second,
+  independent SQLAlchemy engine/session against the same isolated test
+  schema commits a competing row while the request's own "LLM" call is
+  still in flight) and asserts the loser serves the winner's row rather
+  than erroring - not just the in-process lock's happy path.
+  `tests/test_api_demo_mode.py`'s hardcoded route-count assertion was
+  updated 17 -> 18 (one new route, mounted unconditionally) and gained a
+  test confirming the new endpoint is reachable in demo mode.
+- Ran the real migration against docker-compose's `db` (port 5433,
+  confirmed starting from head `b9c1d3e5f7a2`, matching this migration's
+  `down_revision` exactly), then `scripts/ingest_resume.py` against that
+  same database with the real
+  `data/resumes/Niramay_Kelkar_Resume_FullStack_v3.pdf` (5195 chars
+  extracted, same figure CLAUDE.md's Modal-verification entry reports
+  for this file, version 2 since that database already had one resume
+  from earlier testing).
+- Started the real API against that database and hit the real endpoint
+  twice. First call: **3.19s wall time**, a real `POST
+  https://api.groq.com/openai/v1/chat/completions` logged by `httpx`,
+  returned a genuinely resume-specific report (named "backend and
+  microservices keywords", "CID tags" - the literal pdfminer artifact
+  this exact resume is known to extract with, per CLAUDE.md). Second
+  call: **0.083s wall time**, byte-identical response including the
+  same `created_at` timestamp, and the server log shows no second
+  `httpx` request at all. Direct `psql`-equivalent query confirmed
+  exactly one row in `resume_ats_reports` after both calls.
+- Confirmed via `git diff master -- src/huntloop/api/routers/resumes.py`
+  that the only line removed from the existing file is the import
+  statement (updated to add `ResumeAtsReport`/`AtsReportResponse`) -
+  `upload_resume`/`activate_resume`/`unsafe_router`/every existing
+  `is_active` write is untouched, byte for byte.
+
+Not touched: `requirements.txt`/`requirements-demo.txt` (no new
+dependency - `groq`/`python-dotenv`/`requests` were already present),
+Render/Vercel env vars, `modal_resume_processing.py`, local production
+Postgres (port 5432) in any way.

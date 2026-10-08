@@ -3,7 +3,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 
-import { activateResume, getResumes, uploadResume } from "@/lib/api";
+import { activateResume, getActiveAtsReport, getResumes, uploadResume } from "@/lib/api";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorState } from "@/components/ErrorState";
 import { useToast } from "@/components/Toast";
@@ -21,6 +21,17 @@ export default function ResumesPage() {
     queryFn: getResumes,
   });
 
+  // GET /resumes/active/ats-report - cached server-side per resume
+  // version (see huntloop.api.routers.resumes), so this is safe to fetch
+  // unconditionally on page load: the first request for a given active
+  // resume computes it (a live LLM call, can take a few seconds), every
+  // later request (this page reload, another visitor) is a cache read.
+  const atsReport = useQuery({
+    queryKey: ["ats-report"],
+    queryFn: getActiveAtsReport,
+    retry: false,
+  });
+
   // A resume swap changes every job's live match_score (computed at
   // query time against whichever version is_active - see
   // huntloop.api.routers.jobs) and resets matched_skills/missing_skills
@@ -31,6 +42,12 @@ export default function ResumesPage() {
     queryClient.invalidateQueries({ queryKey: ["jobs"] });
     queryClient.invalidateQueries({ queryKey: ["job"] });
     queryClient.invalidateQueries({ queryKey: ["dashboard-stats"] });
+    // The ATS report is cached per resume version server-side - once
+    // the active version changes, the old cached report no longer
+    // applies, so refetch (which will be a cache miss server-side for a
+    // version never reported on before, or an instant cache hit if this
+    // version was active before).
+    queryClient.invalidateQueries({ queryKey: ["ats-report"] });
   }
 
   const uploadMutation = useMutation({
@@ -217,7 +234,58 @@ export default function ResumesPage() {
             </div>
           )}
         </div>
+
+        {/* ATS compatibility report, for the active resume version */}
+        <div className="border border-border bg-surface p-5">
+          <h3 className="mb-3 text-sm font-semibold text-text">ATS compatibility report</h3>
+
+          {atsReport.isPending && (
+            <div className="flex flex-col items-start gap-2">
+              <div className="h-6 w-24 animate-pulse border border-border bg-surface-alt" />
+              <div className="text-xs text-text-faintest">
+                Analyzing the active resume&hellip; this can take a few seconds the first time.
+              </div>
+            </div>
+          )}
+
+          {atsReport.isError && (
+            <ErrorState
+              error={atsReport.error}
+              onRetry={() => atsReport.refetch()}
+              resourceLabel="the ATS report"
+              compact
+            />
+          )}
+
+          {atsReport.isSuccess && (
+            <div className="flex flex-col gap-4">
+              <div className="flex items-baseline gap-2">
+                <span className="font-mono text-2xl font-bold text-text">{atsReport.data.score}</span>
+                <span className="text-xs text-text-faintest">/ 100 overall</span>
+              </div>
+
+              <AtsFeedbackSection title="Keyword coverage" items={atsReport.data.keyword_feedback} />
+              <AtsFeedbackSection title="Wording" items={atsReport.data.wording_feedback} />
+              <AtsFeedbackSection title="Formatting" items={atsReport.data.formatting_feedback} />
+            </div>
+          )}
+        </div>
       </div>
     </main>
+  );
+}
+
+function AtsFeedbackSection({ title, items }: { title: string; items: string[] }) {
+  return (
+    <div>
+      <h4 className="mb-1.5 font-mono text-2xs uppercase tracking-[0.06em] text-text-faintest">{title}</h4>
+      <ul className="flex flex-col gap-1">
+        {items.map((item, i) => (
+          <li key={i} className="text-xs leading-relaxed text-text-faint">
+            {item}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
