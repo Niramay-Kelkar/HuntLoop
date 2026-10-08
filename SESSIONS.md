@@ -13034,3 +13034,115 @@ Not touched: `requirements.txt`/`requirements-demo.txt` (no new
 dependency - `groq`/`python-dotenv`/`requests` were already present),
 Render/Vercel env vars, `modal_resume_processing.py`, local production
 Postgres (port 5432) in any way.
+
+## 2026-10-08: Apply the resume_ats_reports migration to the Neon demo database (ops, no code change)
+
+Pure deploy/ops action - no application code changed. This branch holds
+only this SESSIONS.md entry, following the same convention the
+`chore/docker-desktop-disk-cleanup` entry used for a prior docs-only
+session (branched, not committed straight to `master`).
+
+**Investigated first, per the task's own instructions:**
+1. `scripts/deploy_demo_data.py` applies migrations by running `alembic
+   upgrade head` as a subprocess with `DATABASE_URL` overridden to
+   `TARGET_DATABASE_URL` for that one call (`_run_migrations()`) - same
+   Alembic setup as everywhere else in this project, just pointed at a
+   different database via an env var swap, not a different mechanism.
+   **That script's `main()` always also runs
+   `scripts/build_demo_dataset.py --force` and reports row counts right
+   after** - since this task explicitly required a narrow, additive
+   schema-only change with no reseed, the full script was deliberately
+   NOT invoked. Instead, only the `_run_migrations()` step was
+   replicated by hand (same subprocess-with-`DATABASE_URL`-override
+   mechanism, same production-target refusal check re-implemented
+   before running it) - the established method, not a new one, just
+   without the dataset-rebuild step this task didn't ask for.
+2. Confirmed from `docs/DEPLOY_DEMO.md` (step 4's own notes) that the
+   **direct/unpooled** Neon connection string is what this project's
+   existing flow already uses for `TARGET_DATABASE_URL`/migrations -
+   the pooled string (`-pooler` in the hostname) is reserved for
+   Render's own runtime `DATABASE_URL`. Used
+   `TARGET_DATABASE_URL_DIRECT` from the local gitignored
+   `.env.deploy` (already saved from the original demo deploy session,
+   not a Render/Vercel dashboard) - confirmed via `make_url()` that its
+   host is the real `*.neon.tech` hostname with no `-pooler`, distinct
+   from `TARGET_DATABASE_URL_POOLED`.
+3. Re-read `alembic/versions/c1d2e3f4a5b6_add_resume_ats_reports_table.py`
+   directly (not trusted from the prior session's summary) - confirmed
+   its `upgrade()` is exactly one `op.create_table("resume_ats_reports",
+   ...)` plus one `op.create_unique_constraint(...)`, no `alter_table`
+   on any existing table.
+4. **Real finding, not assumed:** a direct query against the Neon
+   target (host/port/database only ever printed via `make_url()`,
+   never the raw credentialed string) showed its `alembic_version` was
+   `a7c4e9f2d8b3` - **two** revisions behind `master`'s head, not one.
+   It had never been migrated past the `modal_usage` table addition
+   (`b9c1d3e5f7a2`, merged earlier - see that entry above). Re-checked
+   that migration's own file too: also exactly one `create_table` + one
+   unique constraint, no `alter_table`. Since `alembic upgrade head` by
+   definition catches a target up to head (not one chosen revision),
+   and both pending migrations are purely additive, proceeded with both
+   rather than inventing a way to apply only one.
+
+**Applied:** ran `alembic upgrade head` (via `.venv/bin/python -m
+alembic`, `DATABASE_URL` overridden to `TARGET_DATABASE_URL_DIRECT`
+only for that one subprocess) against the real Neon database. Real
+output: `Running upgrade a7c4e9f2d8b3 -> b9c1d3e5f7a2, add modal_usage
+table` then `Running upgrade b9c1d3e5f7a2 -> c1d2e3f4a5b6, add
+resume_ats_reports table`, both successful.
+
+**Verified on Neon with real queries (not "migration succeeded"
+alone):**
+- `alembic_version` is now `c1d2e3f4a5b6`.
+- `resume_ats_reports` exists with exactly the 7 expected columns
+  (`id`, `resume_version_id`, `score`, `keyword_feedback`,
+  `wording_feedback`, `formatting_feedback`, `created_at`), the
+  `resume_version_id` foreign key, the `uq_resume_ats_reports_
+  resume_version_id` unique constraint, and **0 rows** - a fresh,
+  empty table, confirming no reseed/reset happened as a side effect.
+- `modal_usage` now exists too (the catch-up migration).
+- Sanity-checked the existing demo tables were untouched by this run:
+  `companies` 738, `job_postings` 19,294, `resume_versions` 1,
+  `job_applications` 0 - all real row counts, consistent with the
+  existing demo snapshot, not reset or rebuilt.
+
+**End-to-end verification against the actually-deployed services (no
+Render/Vercel dashboard touched - only public HTTPS requests):**
+- `GET https://huntloop-demo-api.onrender.com/health` - woke the
+  free-tier instance from sleep, then returned `{"status": "ok"}`.
+- `GET https://huntloop-demo-api.onrender.com/resumes/active/ats-report`
+  - **404 "Not Found", on two separate calls.** Fetched that same
+  deployment's own `/openapi.json` and confirmed directly: the live
+  Render service's route list has no `/resumes/active/ats-report` at
+  all - **the deployed backend is still running the code from before
+  this feature merged; the migration succeeded but the API has not
+  been redeployed since.** This is a real, unresolved gap, not papered
+  over: Render evidently did not auto-deploy on the `master` merge (or
+  hasn't yet), unlike Vercel below. No attempt was made to trigger a
+  Render deploy - no Render API/dashboard access was used, per the
+  standing rule.
+- `GET https://huntloop-demo.vercel.app/resumes` - **200, and its
+  server-rendered HTML already contains the new "ATS compatibility
+  report" card markup** - confirmed by grepping the real response body
+  for that exact heading text. Vercel auto-deployed the merged frontend
+  code; with the backend still 404ing, this card will show its error
+  state (an "ATS report" fetch failure with a retry button) until
+  Render is redeployed - not a crash, not breaking the rest of the
+  page.
+- Sanity check that nothing else on the live demo broke: `GET
+  https://huntloop-demo-api.onrender.com/jobs?limit=1` - 200. `GET
+  https://huntloop-demo-api.onrender.com/resumes` - 200, returned the
+  real single fictional demo resume (Jordan Alvarez, version 1, active)
+  - confirming this is genuinely the demo dataset, not anything from
+  local testing. `GET https://huntloop-demo.vercel.app/jobs` - 200.
+
+**Net state: the Neon schema change is fully applied and verified; the
+feature is NOT yet live on the public demo because the Render service
+needs a redeploy of current `master`.** That redeploy is a Render
+dashboard/action this session deliberately did not take (standing rule:
+never touch Render/Vercel dashboards) - flagging it plainly rather than
+assuming the feature is live.
+
+Not touched: `scripts/build_demo_dataset.py` (never invoked), any other
+table on Neon, Render/Vercel environment variables or dashboards, local
+production Postgres (port 5432, never connected to in this session).
