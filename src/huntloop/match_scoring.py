@@ -51,9 +51,9 @@ years-of-experience matching (deferred to v1.1, pending measurement of
 v1) and education matching (dropped - job-side coverage is low and the
 signal barely discriminates; display-only if ever surfaced).
 """
-from sqlalchemy import Float, String, and_, case, cast, func, literal, null
+from sqlalchemy import Float, String, and_, case, cast, func, literal, null, select
 
-from huntloop.db_models import JobPosting
+from huntloop.db_models import JobPosting, ResumeSkillMatch
 
 MATCH_SCORE_LABEL = "match_score"
 SCORE_BASIS_LABEL = "score_basis"
@@ -96,28 +96,50 @@ def _calibrated_embedding_expr(resume_embedding):
     return case((JobPosting.embedding.is_(None), literal(None)), else_=clamped)
 
 
-def _skills_lengths():
-    """(matched_len, missing_len) only where the column really holds a
-    JSON array - json_typeof guards against SQL NULL, a JSON `null`
-    scalar, or any non-array value (json_array_length errors on those)."""
+def _skill_match_column(resume_version_id, column):
+    """A correlated scalar subquery pulling one column (matched_skills or
+    missing_skills) off resume_skill_matches for *this* JobPosting row and
+    the given resume_version_id - the per-version replacement for reading
+    JobPosting.matched_skills/missing_skills directly (see
+    huntloop.db_models.ResumeSkillMatch). NULL (no row) when this job
+    hasn't been scored against this resume version yet, same meaning as
+    the old column being NULL."""
+    if resume_version_id is None:
+        return cast(null(), JobPosting.matched_skills.type)
+    return (
+        select(column)
+        .where(
+            ResumeSkillMatch.job_posting_id == JobPosting.id,
+            ResumeSkillMatch.resume_version_id == resume_version_id,
+        )
+        .correlate(JobPosting)
+        .scalar_subquery()
+    )
+
+
+def _skills_lengths(resume_version_id):
+    """(matched_len, missing_len) only where the resume_skill_matches
+    column really holds a JSON array - json_typeof guards against SQL
+    NULL, a JSON `null` scalar, or any non-array value (json_array_length
+    errors on those)."""
+    matched_col = _skill_match_column(resume_version_id, ResumeSkillMatch.matched_skills)
+    missing_col = _skill_match_column(resume_version_id, ResumeSkillMatch.missing_skills)
     matched_len = case(
-        (func.json_typeof(JobPosting.matched_skills) == "array",
-         func.json_array_length(JobPosting.matched_skills)),
+        (func.json_typeof(matched_col) == "array", func.json_array_length(matched_col)),
         else_=None,
     )
     missing_len = case(
-        (func.json_typeof(JobPosting.missing_skills) == "array",
-         func.json_array_length(JobPosting.missing_skills)),
+        (func.json_typeof(missing_col) == "array", func.json_array_length(missing_col)),
         else_=None,
     )
     return matched_len, missing_len
 
 
-def _has_full_skills_signal():
+def _has_full_skills_signal(resume_version_id):
     """Boolean SQL clause: this posting carries a usable skills signal
     (both lists are real arrays and together hold >= MIN_SKILLS_DENOM
     entries)."""
-    matched_len, missing_len = _skills_lengths()
+    matched_len, missing_len = _skills_lengths(resume_version_id)
     return and_(
         matched_len.isnot(None),
         missing_len.isnot(None),
@@ -125,10 +147,13 @@ def _has_full_skills_signal():
     )
 
 
-def match_score_expr(resume_embedding):
+def match_score_expr(resume_embedding, resume_version_id=None):
     """SQLAlchemy column expression for a posting's composite match score
     against ``resume_embedding`` (in [0, 1], higher is a better match),
-    labelled ``match_score``.
+    labelled ``match_score``. ``resume_version_id`` identifies which
+    resume_skill_matches rows count as this resume's skills signal (see
+    huntloop.db_models.ResumeSkillMatch) - pass the same resume's id
+    whose embedding is passed as ``resume_embedding``.
 
     Full basis (usable skills signal): EMBEDDING_WEIGHT * calibrated
     embedding + SKILLS_WEIGHT * calibrated skills ratio. Partial basis
@@ -145,7 +170,7 @@ def match_score_expr(resume_embedding):
         return cast(null(), Float).label(MATCH_SCORE_LABEL)
 
     embedding_cal = _calibrated_embedding_expr(resume_embedding)
-    matched_len, missing_len = _skills_lengths()
+    matched_len, missing_len = _skills_lengths(resume_version_id)
     denom = func.nullif(matched_len + missing_len, 0)
     # cast to float first - matched_len / denom would otherwise be integer
     # division in Postgres (every ratio < 1 collapsing to 0).
@@ -154,12 +179,12 @@ def match_score_expr(resume_embedding):
     composite = EMBEDDING_WEIGHT * embedding_cal + SKILLS_WEIGHT * skills_cal
 
     return case(
-        (_has_full_skills_signal(), composite),
+        (_has_full_skills_signal(resume_version_id), composite),
         else_=embedding_cal,
     ).label(MATCH_SCORE_LABEL)
 
 
-def score_basis_expr(resume_embedding):
+def score_basis_expr(resume_embedding, resume_version_id=None):
     """SQLAlchemy column expression, labelled ``score_basis``: ``'full'``
     when match_score is the full composite, ``'partial'`` when it's the
     embedding-only fallback, ``NULL`` when there's no score at all (no
@@ -169,12 +194,12 @@ def score_basis_expr(resume_embedding):
         return cast(null(), String).label(SCORE_BASIS_LABEL)
     return case(
         (JobPosting.embedding.is_(None), literal(None, type_=String)),
-        (_has_full_skills_signal(), literal("full")),
+        (_has_full_skills_signal(resume_version_id), literal("full")),
         else_=literal("partial"),
     ).label(SCORE_BASIS_LABEL)
 
 
-def match_score_order_by(resume_embedding, *, descending=True):
+def match_score_order_by(resume_embedding, resume_version_id=None, *, descending=True):
     """ORDER BY clause(s) for sorting postings by match score.
 
     With a resume embedding: best matches first (or worst first when
@@ -189,6 +214,20 @@ def match_score_order_by(resume_embedding, *, descending=True):
     """
     if resume_embedding is None:
         return [JobPosting.id.asc()]
-    ordered = match_score_expr(resume_embedding)
+    ordered = match_score_expr(resume_embedding, resume_version_id)
     ordered = ordered.desc() if descending else ordered.asc()
     return [ordered.nulls_last()]
+
+
+def resume_skill_columns(resume_version_id):
+    """(matched_skills, missing_skills) columns, labelled the same as the
+    old JobPosting columns, sourced from resume_skill_matches for the
+    given resume_version_id instead. NULL/NULL when resume_version_id is
+    None (no active resume) or this job hasn't been scored against it
+    yet - same meaning the old columns' NULL always had."""
+    matched_col = _skill_match_column(resume_version_id, ResumeSkillMatch.matched_skills)
+    missing_col = _skill_match_column(resume_version_id, ResumeSkillMatch.missing_skills)
+    return (
+        matched_col.label("matched_skills"),
+        missing_col.label("missing_skills"),
+    )

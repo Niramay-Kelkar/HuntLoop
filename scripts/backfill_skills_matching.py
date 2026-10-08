@@ -21,9 +21,14 @@ runs out mid-run. The run stops only on AllProvidersExhausted (every
 provider hit its daily wall) - same "re-run tomorrow, it's interrupt-safe"
 behaviour Groq's DailyQuotaExhausted had before.
 
-Only rows where **matched_skills IS NULL AND is_relevant IS TRUE** are
-selected, ordered by resume match_score descending (best matches against
-the currently active resume first) so postings that actually rank well
+Only rows where **no resume_skill_matches row exists yet for the active
+resume_version_id, AND is_relevant IS TRUE** are selected (see
+huntloop.db_models.ResumeSkillMatch - this used to be a plain
+`matched_skills IS NULL` check on job_postings, before results moved to
+a per-resume-version table so that switching the active resume no longer
+destroys prior results), ordered by resume match_score descending (best
+matches against the currently active resume first) so postings that
+actually rank well
 get skills-gap analysis before generic backlog. The ordering expression
 is the shared huntloop.match_scoring.match_score_order_by() - the exact
 same definition GET /jobs?sort=-score uses - including its NULLS LAST
@@ -83,10 +88,11 @@ import time
 SRC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
 sys.path.insert(0, SRC_DIR)
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import sessionmaker
 
-from huntloop.db_models import JobPosting, ResumeVersion
+from huntloop.db_models import JobPosting, ResumeSkillMatch, ResumeVersion
 from huntloop.match_scoring import match_score_order_by
 from huntloop.settings import DATABASE_URL
 from huntloop import skills_matching_router as router
@@ -207,27 +213,44 @@ class TokenPacer:
             time.sleep(sleep_for)
 
 
-def _log_backlog(session) -> int:
+def _not_yet_matched_filter(resume_version_id):
+    """Boolean filter: this job_posting has no resume_skill_matches row
+    for resume_version_id yet - the per-version replacement for the old
+    `JobPosting.matched_skills.is_(None)` check (see
+    huntloop.db_models.ResumeSkillMatch)."""
+    return ~(
+        select(ResumeSkillMatch.id)
+        .where(
+            ResumeSkillMatch.job_posting_id == JobPosting.id,
+            ResumeSkillMatch.resume_version_id == resume_version_id,
+        )
+        .exists()
+    )
+
+
+def _log_backlog(session, resume_version_id) -> int:
     """Log the skills-matching backlog: relevant job_postings rows with no
-    result yet. This one INFO line per run (the backfill runs daily via
-    the orchestrator) is the cheap leading indicator for a future
-    capacity regression - Gemini's own free-tier limits already changed
-    once mid-project without warning, and re-deriving the whole volume
-    analysis to notice is expensive. Returns the count."""
+    resume_skill_matches result yet for the active resume version. This
+    one INFO line per run (the backfill runs daily via the orchestrator)
+    is the cheap leading indicator for a future capacity regression -
+    Gemini's own free-tier limits already changed once mid-project
+    without warning, and re-deriving the whole volume analysis to notice
+    is expensive. Returns the count."""
+    not_yet_matched = _not_yet_matched_filter(resume_version_id)
     relevant_backlog = (
         session.query(JobPosting)
-        .filter(JobPosting.matched_skills.is_(None), JobPosting.is_relevant.is_(True))
+        .filter(not_yet_matched, JobPosting.is_relevant.is_(True))
         .count()
     )
     skipped_irrelevant = (
         session.query(JobPosting)
-        .filter(JobPosting.matched_skills.is_(None), JobPosting.is_relevant.isnot(True))
+        .filter(not_yet_matched, JobPosting.is_relevant.isnot(True))
         .count()
     )
     logger.info(
-        "skills-matching backlog: %d relevant rows awaiting a result "
-        "(%d non-relevant NULL rows deliberately skipped)",
-        relevant_backlog, skipped_irrelevant,
+        "skills-matching backlog: %d relevant rows awaiting a result against resume_version_id=%s "
+        "(%d non-relevant rows deliberately skipped)",
+        relevant_backlog, resume_version_id, skipped_irrelevant,
     )
     return relevant_backlog
 
@@ -274,8 +297,9 @@ def _run_backfill(limit: int | None = None):
         resume_text = active_resume.extracted_text
         resume_chars = len(resume_text)
         resume_embedding = active_resume.embedding
+        resume_version_id = active_resume.id
 
-        _log_backlog(session)
+        _log_backlog(session, resume_version_id)
 
         # Best resume match_score first: spend scarce Groq/Gemini quota on
         # the postings that actually rank well against the active resume
@@ -284,10 +308,13 @@ def _run_backfill(limit: int | None = None):
         # a stable deterministic fallback when the active resume has no
         # embedding. is_relevant filter (Step K): don't spend quota on
         # postings the relevance pre-filter already flagged as not-technical.
+        # "No result yet" is now per resume_version_id (resume_skill_matches),
+        # not the old job_postings.matched_skills IS NULL check - see
+        # huntloop.db_models.ResumeSkillMatch.
         jobs = (
             session.query(JobPosting)
-            .filter(JobPosting.matched_skills.is_(None), JobPosting.is_relevant.is_(True))
-            .order_by(*match_score_order_by(resume_embedding))
+            .filter(_not_yet_matched_filter(resume_version_id), JobPosting.is_relevant.is_(True))
+            .order_by(*match_score_order_by(resume_embedding, resume_version_id))
             .all()
         )
         if limit is not None:
@@ -356,13 +383,33 @@ def _run_backfill(limit: int | None = None):
                         processed, total, job.id, job.job_title,
                     )
                     continue
-                job.matched_skills = result["matched_skills"]
-                job.missing_skills = result["missing_skills"]
+                # Insert into resume_skill_matches (job_posting_id, resume_version_id)
+                # instead of writing JobPosting.matched_skills/missing_skills
+                # directly - see huntloop.db_models.ResumeSkillMatch. The
+                # job-selection filter above already excludes rows that have
+                # a result for this resume_version_id, so this is always a
+                # fresh insert in practice; ON CONFLICT DO UPDATE is kept
+                # only as a defensive backstop (e.g. a manually-seeded row),
+                # never expected to actually fire during normal operation.
+                stmt = pg_insert(ResumeSkillMatch).values(
+                    job_posting_id=job.id,
+                    resume_version_id=resume_version_id,
+                    matched_skills=result["matched_skills"],
+                    missing_skills=result["missing_skills"],
+                ).on_conflict_do_update(
+                    constraint="uq_resume_skill_matches_job_resume",
+                    set_={
+                        "matched_skills": result["matched_skills"],
+                        "missing_skills": result["missing_skills"],
+                    },
+                )
+                session.execute(stmt)
                 succeeded += 1
                 skills_matching_jobs_succeeded_total.labels(provider=batch_provider).inc()
                 logger.info(
-                    "[%d/%d] Stored skills match for job_postings.id=%s (%r)",
-                    processed, total, job.id, job.job_title,
+                    "[%d/%d] Stored skills match for job_postings.id=%s (%r) "
+                    "against resume_version_id=%s",
+                    processed, total, job.id, job.job_title, resume_version_id,
                 )
 
             session.commit()
@@ -383,7 +430,7 @@ def _run_backfill(limit: int | None = None):
     # Leading-indicator line again at the end - the backlog after this run.
     session = Session()
     try:
-        remaining_backlog = _log_backlog(session)
+        remaining_backlog = _log_backlog(session, resume_version_id)
     finally:
         session.close()
 

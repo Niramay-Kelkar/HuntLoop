@@ -713,6 +713,45 @@ class ModalUsage(Base):
         return f"<ModalUsage(month={self.month}, invocations_used={self.invocations_used})>"
 
 
+class ResumeSkillMatch(Base):
+    """
+    Per-resume-version skill-match result for a job posting - the
+    matched_skills/missing_skills pair that used to live directly on
+    job_postings, now keyed by (job_posting_id, resume_version_id) so
+    that activating a different resume version no longer requires
+    destroying every existing result (see job_postings.matched_skills/
+    missing_skills' own docstring - those columns are kept for now as a
+    fallback during the migration, but this table is the real storage
+    going forward).
+
+    One row per (job_posting_id, resume_version_id) - a job can have a
+    different matched/missing split recorded for each resume version
+    it's been scored against; there's no uniqueness on job_posting_id
+    alone.
+    """
+    __tablename__ = "resume_skill_matches"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    job_posting_id = Column(Integer, ForeignKey("job_postings.id", ondelete="CASCADE"), nullable=False)
+    resume_version_id = Column(Integer, ForeignKey("resume_versions.id", ondelete="CASCADE"), nullable=False)
+    matched_skills = Column(JSON, nullable=True)
+    missing_skills = Column(JSON, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "job_posting_id", "resume_version_id",
+            name="uq_resume_skill_matches_job_resume",
+        ),
+    )
+
+    def __repr__(self):
+        return (
+            f"<ResumeSkillMatch(job_posting_id={self.job_posting_id}, "
+            f"resume_version_id={self.resume_version_id})>"
+        )
+
+
 class ResumeAtsReport(Base):
     """
     A cache row for huntloop.resume_ats_report / GET
