@@ -21,10 +21,12 @@
 #
 # Left out on purpose because the API process never imports them, even
 # with every route mounted: scrapy, playwright, beautifulsoup4,
-# python-docx, scikit-learn, sendgrid, pytest, pandas, openpyxl,
+# python-docx, scikit-learn, pytest, pandas, openpyxl,
 # rapidfuzz, geonamescache, asyncpg, lxml, soupsieve - all scraper/
 # script/report tooling or transitive-only pins for packages this image
-# doesn't carry.
+# doesn't carry. (sendgrid used to be on this list too - it's gone now,
+# removed from requirements.txt as a confirmed-dead, never-imported
+# leftover, not something kept out of this file on purpose.)
 fastapi>=0.141.0
 starlette>=0.49.1
 uvicorn
@@ -65,3 +67,10 @@ clerk-backend-api==7.0.0
 modal>=1.5.0,<2
 # Same cbor2 pin, same reason, as requirements.txt - see there.
 cbor2==5.9.0
+# huntloop.resend_client is not yet imported by any API router (Phase A
+# is infrastructure only - see CLAUDE.md/SESSIONS.md) - added here
+# ahead of that to avoid repeating the exact prometheus-client/
+# clerk-backend-api "forgot the demo image" mistakes documented above
+# once a later phase does wire it into a router. Same pin as
+# requirements.txt.
+resend==2.49.1
