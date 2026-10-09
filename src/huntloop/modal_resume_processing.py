@@ -75,6 +75,15 @@ check is also recorded to Prometheus via huntloop.modal_metrics - Phase C
 of the Modal integration, the exact same CollectorRegistry/Pushgateway
 pattern huntloop.feedback_metrics already established. See that module's
 docstring for the metric names and the Grafana dashboard that renders them.
+
+Budget-threshold email alerts: every successful reservation also calls
+huntloop.budget_alerts.check_and_alert_budget_threshold() (Resend Phase
+B - see CLAUDE.md/SESSIONS.md), which emails the project owner the first
+time this month's usage crosses 80%/95% of MODAL_MONTHLY_INVOCATION_BUDGET.
+That check can never raise or slow down this function's own real work
+beyond its own synchronous DB/Resend call - see that module's own
+docstring for why it isn't backgrounded the way the feedback-submission
+alert is.
 """
 import logging
 import os
@@ -85,6 +94,7 @@ import modal
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
+from huntloop.budget_alerts import check_and_alert_budget_threshold
 from huntloop.db_models import ModalUsage
 from huntloop.modal_metrics import record_modal_budget, record_modal_invocation
 from huntloop.modal_resume_functions import EMBED_TEXT_FUNCTION, MODAL_APP_NAME, PROCESS_RESUME_FUNCTION
@@ -165,6 +175,15 @@ def _reserve_invocation_slot(db: Session) -> tuple[bool, int, int]:
     row.invocations_used = used_before + 1
     db.commit()
     record_modal_budget(used=used_before + 1, cap=budget)
+    # Belt-and-suspenders on top of check_and_alert_budget_threshold's
+    # own internal try/except: the real increment just above is already
+    # committed, so nothing past this point may ever propagate and take
+    # that real result down with it, even if the alert-check call itself
+    # fails in some way its own internals can't catch.
+    try:
+        check_and_alert_budget_threshold(db, ledger="modal", period=month, used=used_before + 1, cap=budget)
+    except Exception:
+        logger.exception("Budget-threshold alert check raised unexpectedly for ledger=modal - invocation still succeeded")
     return True, used_before, budget
 
 

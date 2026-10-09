@@ -52,6 +52,7 @@ sys.path.insert(0, SRC_DIR)
 from sqlalchemy import create_engine, or_, select
 from sqlalchemy.orm import sessionmaker
 
+from huntloop.budget_alerts import check_and_alert_budget_threshold
 from huntloop.company_research import fetch_company_research
 from huntloop.db_models import Company, CompanyResearch, TavilyUsage
 from huntloop.logging_config import setup_logging
@@ -84,9 +85,22 @@ def _get_or_create_usage_row(session) -> TavilyUsage:
 
 def _record_request_spent(session, usage_row: TavilyUsage) -> None:
     """Commits immediately so the count is durable even if the script is
-    interrupted mid-run - see module docstring."""
+    interrupted mid-run - see module docstring. Also checks the Tavily
+    ledger against the 80%/95% budget-alert thresholds (Resend Phase B -
+    see huntloop.budget_alerts) right after the real increment commits;
+    that check can never raise or affect this function's own result."""
     usage_row.requests_used += 1
     session.commit()
+    # Belt-and-suspenders on top of check_and_alert_budget_threshold's
+    # own internal try/except - see huntloop.modal_resume_processing's
+    # matching call site for why this is wrapped here too.
+    try:
+        check_and_alert_budget_threshold(
+            session, ledger="tavily", period=usage_row.month,
+            used=usage_row.requests_used, cap=_monthly_budget(),
+        )
+    except Exception:
+        logger.exception("Budget-threshold alert check raised unexpectedly for ledger=tavily - request count still recorded")
 
 
 def _neon_company_names() -> set[str]:

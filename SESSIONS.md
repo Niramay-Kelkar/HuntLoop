@@ -13440,3 +13440,167 @@ notification feature is not buildable at all without first adding a new
 optional email-collection field to the feedback form, a separate product
 decision this phase does not make. The `resend_usage` migration exists
 but was not applied to any real database in this session.
+
+## 2026-10-09: Resend Phase B — feedback alerts + budget-threshold alerts (`feature/resend-feedback-and-budget-alerts`)
+
+Phase B of the Resend integration — wires two real triggers into Phase
+A's already-merged infrastructure (`huntloop.resend_client`,
+`resend_usage`, `huntloop.resend_metrics`): an email on every new
+feedback submission, and an email the first time any of three existing
+budget ledgers crosses 80%/95% of its cap in a period. No batching, no
+new scheduled job — both are immediate, inline sends through the exact
+same `send_email()`/`resend_usage` reservation Phase A built, so
+feedback volume and budget-threshold crossings share one real enforced
+send cap rather than each getting its own.
+
+**Built:**
+- **`src/huntloop/feedback_alerts.py`** — `send_new_feedback_alert(feedback_id,
+  category, raw_text)`. Queued from `POST /feedback`
+  (`huntloop.api.routers.feedback.submit_feedback`) via FastAPI's
+  `BackgroundTasks`, which only runs after the 202 response has already
+  been sent — a Resend outage, missing key, or spent budget can never
+  fail or slow the actual submission. Needs its own DB session
+  (`huntloop.api.dependencies.SessionLocal`) rather than the request's
+  own, since `get_db()`'s session is already closed by the time a
+  background task runs — only plain values (id/category/raw_text) are
+  passed in, never the ORM row itself, for the same reason. Email:
+  category, a 280-char truncated/HTML-escaped preview of `raw_text`, and
+  a link to `{APP_BASE_URL}/admin/feedback` (new env var, defaults to
+  `http://localhost:3000`, same default origin `CORS_ALLOWED_ORIGINS`
+  already uses). Recipient: `RESEND_ALERT_TO_ADDRESS` (new env var,
+  defaults to `niramayrkelkar@gmail.com` per the task's own instruction
+  — this is single-operator local/production use, not the public demo,
+  so there's no per-visitor recipient to configure). Never raises — any
+  `ResendUnavailable` or genuinely unexpected exception is logged and
+  swallowed.
+- **`src/huntloop/budget_alerts.py`** — `check_and_alert_budget_threshold(db,
+  ledger=, period=, used=, cap=)`, called right after a real usage
+  increment commits, wired into all three ledgers the task named:
+  - `scripts/backfill_company_research.py`'s `_record_request_spent()`
+    (`tavily_usage`, monthly)
+  - `huntloop.modal_resume_processing._reserve_invocation_slot()`'s
+    success branch (`modal_usage`, monthly)
+  - `scripts/triage_feedback.py`'s per-row triage loop, re-reading
+    `_triaged_today_count()` after each row's commit (the
+    `TRIAGE_DAILY_BUDGET` daily count — see below for why this one's
+    shape differs from the other two)
+  **Design decision, flagged per the task's own "your call" allowance**:
+  rather than a `last_alerted_threshold` column bolted onto
+  `tavily_usage` and `modal_usage` separately, plus a third
+  ledger-shaped table invented just to hold triage's counter (which has
+  no dedicated incrementing row at all — its "usage" is a live `COUNT`
+  query against `feedback`, not a stored counter), this uses ONE new
+  shared table, `budget_alert_state` (migration `a3b5c7d9e1f2`, keyed on
+  `(ledger, period)` — `period` is `"YYYY-MM"` for the two monthly
+  ledgers, `"YYYY-MM-DD"` for triage's daily one). Keeps the already-
+  merged Phase A/company-research schema completely untouched and
+  generalizes to any future ledger with no new migration. `last_threshold`
+  only ever increases within a period and naturally re-arms on a new one
+  (no row yet = nothing alerted yet). A single increment that jumps past
+  both thresholds in one step fires both, once each, in ascending order —
+  each is still a genuine first-time crossing.
+  **Concurrency**: `budget_alert_state` reuses the exact `SELECT ... FOR
+  UPDATE` + `IntegrityError`-on-creation + `.populate_existing()`
+  pattern `resend_usage` uses (see the Phase A entry above for the two
+  real concurrency bugs that pattern exists to avoid) — applied
+  proactively here, not rediscovered the hard way a second time.
+  **Send-pattern decision, also flagged**: budget-threshold alerts do
+  NOT use `BackgroundTasks` the way the feedback alert does — two of the
+  three call sites are plain synchronous scripts with no request/response
+  cycle to defer past, and Modal's budget check runs inline on both a
+  sync and (pre-existing, not introduced here) directly-on-the-event-loop
+  async code path with no deferral mechanism available at that shared,
+  non-request-scoped layer. "Never blocks the real operation" is instead
+  enforced the way every other best-effort side effect in this project
+  already is (see `huntloop.metrics.push_run_metrics`): by catching
+  every exception, both inside `check_and_alert_budget_threshold`'s own
+  body AND, belt-and-suspenders, at each of the three call sites too (so
+  a failure that somehow bypasses the function's own internal catch —
+  exercised directly in tests by mocking the function itself — still
+  can't touch the real increment it's reporting on).
+
+**Tests** (574 passed total, up from 558 before this session — 16 new,
+0 regressions):
+- `tests/test_budget_alerts.py` (10 tests): no-alert-below-threshold,
+  single-threshold-crossing sends one alert and records it, crossing 80
+  then 95 in separate calls sends two distinct alerts, **repeated calls
+  at the same crossed threshold do not re-alert** (the task's own
+  explicit requirement), a single jump past both thresholds fires both
+  once, a new period re-arms both thresholds, different ledgers track
+  independently in the same period, a zero/negative cap is a safe no-op,
+  a `ResendUnavailable` is caught without raising, and a genuinely
+  unexpected exception anywhere in the check is swallowed.
+- `tests/test_api_feedback.py` (5 tests, new file — no test coverage of
+  the public feedback router existed before this phase): **a feedback
+  submission triggers exactly one send attempt** (the task's own
+  explicit requirement) with the right category/truncated-preview/admin-
+  link content, a long description is truncated in the email body, **a
+  reservation failure (mocked `ResendUnavailable`) does not block the
+  feedback submission** (the task's own explicit requirement — asserts
+  both the 202 response AND that the real `Feedback` row persisted), an
+  unexpected exception in the alert path doesn't fail the request
+  either, and one test runs the real (unmocked) `send_email()` with
+  `RESEND_API_KEY` deliberately unset to exercise the genuine
+  not-configured path end to end. Every test repoints
+  `huntloop.feedback_alerts.SessionLocal` at the same isolated-test-
+  schema sessionmaker the `pipeline`/`db_session` fixtures already use
+  (monkeypatched per test) — left unpatched, the background task's own
+  fresh session would otherwise point at this project's real
+  `DATABASE_URL` instead of the test's isolated schema, since it can't
+  use the request-scoped `get_db` dependency override the way every
+  other endpoint's own queries do.
+- `tests/test_modal_resume_processing.py` (+1 test): **the real
+  `modal_usage` increment still lands even when the budget-alert check
+  itself raises** (mocked to blow up directly, bypassing its own
+  internal try/except) — the call-site-level belt-and-suspenders
+  behavior described above, proven under test rather than just claimed.
+
+**Real-evidence verification checklist, as requested:**
+- **A real feedback submission actually triggering a send attempt**:
+  confirmed via mock call assertion against the real FastAPI app + a
+  real Postgres-backed isolated test schema (not SQLite) — the Resend
+  network call is what's mocked (same convention every other phase/test
+  in this project uses; no real email was sent, matching Phase A's own
+  explicit "no real email sent anywhere" stance). `test_submit_feedback_triggers_exactly_one_send_attempt`
+  asserts `mock_send.assert_called_once()` AND independently re-queries
+  the real `Feedback` row by the id the API actually returned, confirming
+  the alert's content came from the real persisted row, not a
+  stale/guessed value. A real `RESEND_API_KEY` is present in this dev
+  machine's `.env` (noted, not used) — a live send was deliberately not
+  triggered in this session without being explicitly asked to, consistent
+  with Phase A's own standing caution around real side effects; happy to
+  fire one on request.
+- **A real/simulated threshold crossing firing exactly once, not
+  re-firing on a second crossing of the same threshold in the same
+  period**: `test_crossing_80_percent_sends_one_alert_and_records_it`
+  and `test_repeated_calls_at_the_same_crossed_threshold_do_not_re_alert`
+  both run against the real isolated Postgres schema — `used=480,
+  cap=600` (exactly 80%) sends one real mocked-send call and commits a
+  real `budget_alert_state` row with `last_threshold=80`; three further
+  calls at `used=85/90/94` against a `cap=100` (all still only crossing
+  80%, never reaching 95%) send exactly one total alert across all three
+  calls, confirmed by re-querying the same real row and asserting
+  `last_threshold` is still exactly `80`, not re-incremented or
+  re-sent.
+- **A reservation failure not blocking the feedback POST or the usage
+  increment**: `test_a_reservation_failure_does_not_block_the_feedback_submission`
+  (feedback POST — asserts 202 + the real row persisted, with
+  `send_email` mocked to raise `ResendUnavailable`) and
+  `test_reserve_still_increments_the_ledger_even_if_the_budget_alert_check_blows_up`
+  (usage increment — asserts the real `ModalUsage.invocations_used`
+  still lands at 1 even when the alert check is mocked to raise a bare
+  `RuntimeError` directly, bypassing its own internal catch) both pass
+  against the real isolated Postgres schema.
+
+**Not done in this phase, deliberately**: no new scheduled job (per the
+task's own "no batching, no new scheduled job" instruction) — both
+triggers are inline/immediate. The `budget_alert_state` migration exists
+but was not applied to any real database in this session (same standing
+caution as Phase A's `resend_usage` migration). `scripts/backfill_company_research.py`
+and `scripts/triage_feedback.py` had no prior test coverage at all before
+this phase and still don't have a full integration test harness of their
+own — this phase's tests exercise the shared `check_and_alert_budget_threshold`
+function directly (the actual new logic) and one call-site-level
+non-blocking guarantee (Modal's), rather than building out test
+infrastructure for two previously-untested standalone scripts, which
+would be a much larger, separate undertaking.

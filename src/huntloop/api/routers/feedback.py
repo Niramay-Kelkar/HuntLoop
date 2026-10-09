@@ -27,12 +27,21 @@ this same table - no new infrastructure (no Redis, no in-memory
 counter), since this is a low-traffic page and the table itself is
 sufficient. `ip_hash` stores a SHA-256 hash of the submitter's IP, never
 the raw address, and is used for nothing but this rate limit.
+
+New-feedback email alert (Phase B of the Resend integration - see
+CLAUDE.md/SESSIONS.md): submit_feedback() queues
+huntloop.feedback_alerts.send_new_feedback_alert() via FastAPI's
+BackgroundTasks, which FastAPI runs only after the 202 response has
+already been sent - so a Resend outage, a not-configured key, or a spent
+send budget can never fail or slow down the actual submission. See that
+module's own docstring for why it needs its own DB session rather than
+reusing this request's.
 """
 import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -45,6 +54,7 @@ from huntloop.api.schemas.feedback import (
     PublicFeedbackItem,
 )
 from huntloop.db_models import Feedback, FeedbackCategory, FeedbackStatus, FeedbackTriageStatus
+from huntloop.feedback_alerts import send_new_feedback_alert
 from huntloop.feedback_metrics import record_feedback_submission
 
 logger = logging.getLogger(__name__)
@@ -100,6 +110,7 @@ def _validate_submission(body: FeedbackSubmitRequest) -> None:
 def submit_feedback(
     body: FeedbackSubmitRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ) -> FeedbackSubmitResponse:
     _validate_submission(body)
@@ -130,6 +141,7 @@ def submit_feedback(
     db.refresh(row)
 
     record_feedback_submission(body.category)
+    background_tasks.add_task(send_new_feedback_alert, row.id, body.category, row.raw_text)
 
     return FeedbackSubmitResponse(
         id=row.id,
