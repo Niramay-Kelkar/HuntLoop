@@ -744,6 +744,53 @@ class ResendUsage(Base):
         return f"<ResendUsage(day={self.day}, emails_sent={self.emails_sent})>"
 
 
+class BudgetAlertState(Base):
+    """
+    Shared last-alerted-threshold tracker for huntloop.budget_alerts
+    (Resend Phase B - budget-threshold email alerts over any usage
+    ledger in this project, see CLAUDE.md/SESSIONS.md). One row per
+    (ledger, period): `ledger` names the usage ledger ("tavily" / "modal"
+    / "triage" today - any future one later, with no schema change
+    needed), `period` is that ledger's current reset window ("YYYY-MM"
+    for the two monthly ledgers, "YYYY-MM-DD" for triage's daily one).
+    `last_threshold` holds the highest of (80, 95) already alerted on
+    for this (ledger, period) - 0 means neither has fired yet. A new
+    period (a new month, or a new day for triage) simply has no row yet,
+    so thresholds naturally re-arm without any explicit reset logic.
+
+    A single shared table, rather than a `last_alerted_threshold` column
+    bolted onto tavily_usage/modal_usage separately (and a new
+    ledger-shaped table invented just to hold triage's counter, which
+    has no dedicated ledger row of its own at all - see
+    scripts/triage_feedback.py, it derives its daily count from a live
+    COUNT query against `feedback`, not an incrementing row). See
+    huntloop.budget_alerts' module docstring for the full reasoning.
+
+    Read/incremented from potentially-concurrent callers (two
+    overlapping `POST /resumes/upload` requests could both cross a
+    threshold for the `modal` ledger at once) - same `SELECT ... FOR
+    UPDATE` + IntegrityError-on-creation treatment as
+    huntloop.resend_client.ResendUsage, for the same reasons (see that
+    module's docstring for the two real concurrency bugs that pattern
+    was built to avoid).
+    """
+    __tablename__ = "budget_alert_state"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    ledger = Column(String(50), nullable=False)
+    period = Column(String(10), nullable=False)
+    last_threshold = Column(Integer, nullable=False, default=0, server_default="0")
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("ledger", "period", name="uq_budget_alert_state_ledger_period"),
+    )
+
+    def __repr__(self):
+        return f"<BudgetAlertState(ledger={self.ledger}, period={self.period}, last_threshold={self.last_threshold})>"
+
+
 class ResumeSkillMatch(Base):
     """
     Per-resume-version skill-match result for a job posting - the

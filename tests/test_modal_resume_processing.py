@@ -119,6 +119,26 @@ def test_reserve_with_zero_budget_refuses_immediately(db_session, monkeypatch):
     assert budget == 0
 
 
+def test_reserve_still_increments_the_ledger_even_if_the_budget_alert_check_blows_up(db_session):
+    """Resend Phase B wired a budget-threshold alert check
+    (huntloop.budget_alerts.check_and_alert_budget_threshold) right
+    after this function's own real increment - the real requirement
+    under test: that check failing must never take the real Modal
+    invocation-budget increment down with it."""
+    with patch(
+        "huntloop.modal_resume_processing.check_and_alert_budget_threshold",
+        side_effect=RuntimeError("boom - alerting infrastructure is down"),
+    ):
+        reserved, used_before, budget = _reserve_invocation_slot(db_session)
+
+    assert reserved is True
+    assert used_before == 0
+    month = _current_month_key()
+    # The real assertion: the ledger increment landed and was committed,
+    # even though the alert check raised.
+    assert db_session.query(ModalUsage).filter_by(month=month).one().invocations_used == 1
+
+
 # ---------------------------------------------------------------------
 # _invoke_modal / _prepare_invocation - lookup happens before the
 # budget is touched; the ledger is only reserved once a real handle to

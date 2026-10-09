@@ -50,6 +50,7 @@ sys.path.insert(0, SRC_DIR)
 from sqlalchemy import create_engine, func
 from sqlalchemy.orm import sessionmaker
 
+from huntloop.budget_alerts import check_and_alert_budget_threshold
 from huntloop.db_models import Feedback, FeedbackTriageStatus
 from huntloop.feedback_triage import summarize_feedback
 from huntloop.logging_config import setup_logging
@@ -115,6 +116,26 @@ def main(limit: int | None = None) -> None:
             session.commit()
             succeeded += 1
             logger.info("Triaged feedback id=%d: %s", row.id, summary)
+
+            # Budget-threshold email alert (Resend Phase B - see
+            # huntloop.budget_alerts) - re-reads today's real count
+            # right after this row's commit, same "check after every
+            # real increment" principle as the other two wired ledgers.
+            # Triage has no dedicated incrementing ledger row of its own
+            # (its "usage" is this derived COUNT query), so `period` is
+            # today's UTC date string directly rather than a stored
+            # row's own period column.
+            # Belt-and-suspenders on top of
+            # check_and_alert_budget_threshold's own internal
+            # try/except - see huntloop.modal_resume_processing's
+            # matching call site for why this is wrapped here too.
+            try:
+                check_and_alert_budget_threshold(
+                    session, ledger="triage", period=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                    used=_triaged_today_count(session), cap=budget,
+                )
+            except Exception:
+                logger.exception("Budget-threshold alert check raised unexpectedly for ledger=triage - this row's triage result still stands")
 
         logger.info("Triage run finished: %d succeeded, %d failed/left pending", succeeded, failed)
     finally:
