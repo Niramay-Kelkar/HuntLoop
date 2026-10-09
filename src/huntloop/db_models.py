@@ -713,6 +713,37 @@ class ModalUsage(Base):
         return f"<ModalUsage(month={self.month}, invocations_used={self.invocations_used})>"
 
 
+class ResendUsage(Base):
+    """
+    A durable send-count ledger for huntloop.resend_client (Resend
+    email-alert infrastructure - see CLAUDE.md/SESSIONS.md). Modeled on
+    TavilyUsage/ModalUsage above, but keyed by calendar DAY (`day`, e.g.
+    "2026-10-09") rather than month - Resend's free tier caps at 100
+    emails/day, a tighter constraint than its 3,000/month cap, so the
+    daily count needs its own durable row, not just something derived in
+    memory. The monthly cap is enforced by summing this same table's
+    rows whose `day` falls in the current calendar month, so there is
+    only ever one ledger to keep consistent, not a separate daily and
+    monthly table that could drift apart.
+
+    Read/incremented from potentially-concurrent callers (a future
+    feedback-router alert and a future cron-based job-match alert could
+    both try to send at once) - same `SELECT ... FOR UPDATE` row-lock
+    treatment ModalUsage uses, locking today's row for the
+    check-then-increment.
+    """
+    __tablename__ = "resend_usage"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    day = Column(String(10), nullable=False, unique=True)
+    emails_sent = Column(Integer, nullable=False, default=0, server_default="0")
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    def __repr__(self):
+        return f"<ResendUsage(day={self.day}, emails_sent={self.emails_sent})>"
+
+
 class ResumeSkillMatch(Base):
     """
     Per-resume-version skill-match result for a job posting - the

@@ -22,9 +22,14 @@ alembic==1.19.1
 asyncpg
 psycopg2-binary
 python-dotenv
+# huntloop.resend_client - email-alert infrastructure (Resend's own
+# Python SDK). Pinned to the latest release at the time this was added
+# (confirmed via `pip index versions resend`) - it has minimal
+# dependencies of its own (requests, typing_extensions), so there's no
+# compile/Rust-wheel concern the way cbor2/modal had.
+resend==2.49.1
 python-docx
 scikit-learn
-sendgrid
 pytest==9.1.1
 pandas
 openpyxl
@@ -37,11 +42,15 @@ pgvector==0.5.0
 groq==1.6.0
 # Explicit floors for transitive deps the security audit flagged as
 # vulnerable at whatever version was previously resolving (urllib3 via
-# requests/scrapy/selenium; cryptography via scrapy/pdfminer.six/sendgrid/
+# requests/scrapy/selenium; cryptography via scrapy/pdfminer.six/
 # pyOpenSSL/service-identity; lxml via scrapy/parsel/python-docx;
 # soupsieve via beautifulsoup4) - nothing else in this file caps any of
 # them, so without a floor pip has no reason to ever move off an old
-# resolution already sitting in an existing environment.
+# resolution already sitting in an existing environment. (This comment
+# used to also cite sendgrid as a cryptography-via dependency -
+# sendgrid itself was removed below as a confirmed-dead, never-imported
+# leftover; cryptography's floor/cap still holds for the other reasons
+# listed.)
 urllib3>=2.7.0
 # Capped below 47 - scrapy's own pyOpenSSL dependency pins
 # cryptography<47,>=45.0.7 (confirmed via `pip check` after bumping to a

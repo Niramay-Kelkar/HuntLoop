@@ -13296,3 +13296,147 @@ touch, not fixed here.
 any read or write path now but not dropped — the owner's own plan
 explicitly treats dropping them as a separate, later step once everything
 has been running on the new table for a while.
+
+## 2026-10-09: Resend Phase A — email-alert infrastructure + budget ledger + metrics (`feature/resend-alert-infrastructure`)
+
+Phase A of a Resend integration (email alerts for new above-threshold job
+matches and feedback-pipeline events) — infrastructure only, modeled
+directly on `huntloop.modal_resume_processing`'s budget-ledger/locking
+pattern and `huntloop.modal_metrics`'s metrics pattern, the two
+established templates for "a third-party API this project calls under a
+hard free-tier quota, from potentially-concurrent callers." **Nothing
+calls this yet** — no feature is wired to it in this phase, confirmed by
+grepping for every call site after writing it (none exist outside this
+module's own tests).
+
+**Investigated first, before any code** (read-only — no code/scope
+decisions made without it): confirmed Resend was completely absent from
+the codebase (no imports, no env var, no git history mentioning it,
+`pip show resend` returned nothing); read `huntloop.modal_resume_processing`
++ `ModalUsage`/`TavilyUsage` in `db_models.py` + `huntloop.modal_metrics`
+as the exact templates to clone; confirmed `huntloop.pipelines`/`main.py`
+have zero existing "is this posting new since the last check" state
+(`job_postings.scraped_at` is insert-time-only, no `notified`/`alerted`
+flag anywhere) and that `match_score` is query-time-only, never stored —
+so a future job-match-alert phase genuinely needs new state, not just a
+wiring step; confirmed `scripts/triage_feedback.py` and
+`huntloop.api.routers.feedback` have clean, low-risk hook points for a
+future feedback-alert phase; confirmed `Feedback` (`db_models.py`) has no
+submitter email/contact field anywhere and no users table exists, so a
+"notify the submitter" feature is genuinely not buildable without new
+input collection — not just a ranking call; confirmed Resend's real
+Python SDK shape (`resend.Emails.send({...})`, needs a verified sending
+domain for anything beyond its `onboarding@resend.dev` sandbox address)
+and its real free-tier caps (100/day, 3,000/month, received mail counts
+too, hitting the cap pauses sending rather than billing) via current
+third-party pricing summaries, since Resend's own pricing page isn't
+directly scrapable.
+
+**Drive-by finding during that investigation, confirmed and fixed in
+this same session**: `requirements.txt` already listed `sendgrid`, with
+zero imports anywhere in the codebase, no `.env.example` entry, and no
+mention in git history — a dead leftover from some earlier abandoned
+attempt, unrelated to this task. Removed, along with the stale
+`sendgrid`-as-a-reason-for-the-cryptography-floor comment that referenced
+it, and the matching "left out on purpose" mention in
+`requirements-demo.txt` (confirmed it was never imported by the demo
+image either way — `pip check` clean before and after removal).
+
+**Built:**
+- **`src/huntloop/db_models.py` — `ResendUsage`** (`resend_usage` table,
+  migration `f1a2b3c4d5e6`, chained off the real current head
+  `a7b2c4d8e1f3`). One row per calendar **day**, not month like
+  `TavilyUsage`/`ModalUsage` — Resend's daily cap (100) is the tighter
+  constraint, so it needs its own durable counter; the monthly cap is
+  enforced by summing this same table's rows for the current month
+  (`day LIKE 'YYYY-MM%'`), so there's only one ledger to keep consistent,
+  not two that could drift apart. Migration applied its own `--sql`
+  dry-run check (`alembic upgrade a7b2c4d8e1f3:f1a2b3c4d5e6 --sql`) to
+  confirm the generated DDL before relying on it — **not applied to any
+  real database in this session** (local or demo), since nothing calls
+  this table yet; that's a deliberate follow-up for whichever phase
+  first needs it live.
+- **`src/huntloop/resend_client.py`** — `send_email(db, to=, subject=,
+  html=)`, raising a typed `ResendUnavailable(reason=...)` (`not_configured`
+  / `daily_budget_exhausted` / `monthly_budget_exhausted` / `send_error`)
+  on any failure. **Deliberately does NOT swallow that exception the way
+  `ModalUnavailable` is swallowed inside `process_resume()`/
+  `embed_resume_text()`** — there is no local fallback for "send an
+  email" the way there's a local in-process fallback for Modal, so every
+  future caller must decide for itself whether a failed send is
+  logged-and-ignored or retried; that decision isn't made in this phase.
+  `RESEND_API_KEY` configures it; `RESEND_FROM_ADDRESS` defaults to
+  Resend's own sandbox sender so the module is importable/testable with
+  zero setup, with a real deployment needing to override it once a
+  sending domain is verified (not something code can detect or automate
+  around — a one-time manual DNS step in Resend's own dashboard).
+  `RESEND_DAILY_EMAIL_BUDGET` (default 100) / `RESEND_MONTHLY_EMAIL_BUDGET`
+  (default 3000) are both checked before every send, same "check before
+  every call, not just once at startup" principle
+  `huntloop.company_research`'s Tavily budget check already uses.
+- **`src/huntloop/resend_metrics.py`** — cloned from `modal_metrics.py`:
+  own `CollectorRegistry`, own Pushgateway job name (`huntloop_resend`,
+  can't collide with any other job's grouping key), a per-outcome send
+  counter and four budget gauges (daily used/cap, monthly used/cap).
+  Never raises on push failure, same contract as every other
+  `push_*_metrics()` / `record_*` function in this project.
+
+**Two real concurrency bugs found and fixed, caught by a real 20-thread
+test, not reasoned about in the abstract** — both are shaped the exact
+same way in `huntloop.modal_resume_processing._reserve_invocation_slot()`
+too (confirmed by re-reading it side by side with this module after
+finding the bugs here), just never exercised hard enough there to
+surface, since Modal invocations are far lower-volume/concurrency than
+this test deliberately forced:
+1. **Row-creation race**: two concurrent callers can both see "no row
+   for today yet" and both try to `INSERT` it — the loser hits a real
+   `IntegrityError` on the unique `day` constraint. Fixed by catching it
+   and falling through to the locked re-select, which finds whichever
+   caller's row won.
+2. **Stale identity-map read surviving the row lock** — a more subtle,
+   more dangerous bug: even after fix #1, a 20-thread test against a
+   daily budget of exactly 20 found only **2 of 20** reservations
+   actually landed in the final `emails_sent` count. Root cause:
+   SQLAlchemy's session-level identity map was handing back the
+   already-loaded Python object from the earlier *unlocked* existence
+   check instead of refreshing its attributes from the later `SELECT ...
+   FOR UPDATE` query — so the DB-level lock was correctly serializing
+   access, but every caller was still computing `daily_used_before` from
+   its own stale first read. Fixed with `.populate_existing()` on the
+   locked query. Re-ran the 20-thread test 4 times after the fix (once
+   right after fixing, three more back-to-back) — `emails_sent == 20`
+   exactly, every time, no flakiness.
+- `tests/test_resend_client.py` (17 tests): not-configured /
+  daily-budget-exhausted / monthly-budget-exhausted / zero-budget /
+  cross-day monthly-sum / send-success / send-error-still-counts-the-slot
+  / from-address precedence (explicit arg > env var > sandbox default),
+  plus the real multi-threaded, multi-engine concurrency test described
+  above (mirrors `tests/test_backfill_lock.py`'s real-overlap approach,
+  but racing a row lock with threads instead of holding a
+  session-level advisory lock across a whole script run). No real
+  Resend API key needed — `resend.Emails.send` is mocked throughout, no
+  real network call anywhere in this phase.
+
+**Verification:**
+- Full suite: **558 passed, 0 failed** (541 before this session, +17 new
+  from `tests/test_resend_client.py`, 0 regressions).
+- `pip check`: clean, both before and after removing `sendgrid`.
+- **No real email was sent anywhere in this phase** — every test mocks
+  `resend.Emails.send`; nothing in the codebase outside
+  `tests/test_resend_client.py` imports or calls
+  `huntloop.resend_client` yet, confirmed by grep.
+- `resend==2.49.1` added to both `requirements.txt` and
+  `requirements-demo.txt` (per the task's own standing rule — every new
+  dependency goes in both) — its own dependency footprint is minimal
+  (`requests`, `typing_extensions`), no Rust/compiled-wheel concern the
+  way `cbor2`/`modal` had.
+
+**Not done in this phase, deliberately** (see the investigation's own
+phasing recommendation): no feature actually sends an email yet. Phase B
+(feedback-pipeline alerts) and Phase C (job-match alerts, which first
+needs new "already notified" state — see the investigation findings
+above) are separate, later PRs; a submitter-facing status-page
+notification feature is not buildable at all without first adding a new
+optional email-collection field to the feedback form, a separate product
+decision this phase does not make. The `resend_usage` migration exists
+but was not applied to any real database in this session.
