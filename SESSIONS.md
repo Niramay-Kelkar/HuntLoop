@@ -13604,3 +13604,122 @@ function directly (the actual new logic) and one call-site-level
 non-blocking guarantee (Modal's), rather than building out test
 infrastructure for two previously-untested standalone scripts, which
 would be a much larger, separate undertaking.
+
+## 2026-10-09: Resend test-isolation incident — 16 real emails sent by local pytest runs, and the structural fix (`fix/resend-test-isolation`)
+
+**A real incident, not a hypothetical — recorded precisely per the task's
+own instruction.** Running the test suite locally during Resend Phase B
+development sent **16 real emails** through the project's own live
+Resend API key. Investigated first (previous session, no code changed
+during investigation), then fixed in this session.
+
+**Root cause.** Two pre-existing tests in `tests/test_modal_resume_processing.py`
+— `test_reserve_refuses_once_budget_is_reached_and_does_not_increment`
+(fake `MODAL_MONTHLY_INVOCATION_BUDGET=2`) and
+`test_invoke_modal_raises_once_budget_is_reached` (fake `...BUDGET=1`) —
+legitimately drive a tiny fake Modal budget to exactly 100% in one call,
+on purpose, to exercise the refusal path. That was harmless before Phase
+B. Once Phase B wired `huntloop.budget_alerts.check_and_alert_budget_threshold()`
+into `_reserve_invocation_slot()`'s success branch, landing at 100% in a
+single jump crosses **both** the 80% and 95% alert thresholds at once
+(`newly_crossed = [80, 95]`), so each test's one triggering call sends
+**2** real alert emails — neither test mocked
+`check_and_alert_budget_threshold` or `send_email`. Compounding that:
+**nothing suite-wide prevented `RESEND_API_KEY` from being live** —
+`huntloop.resend_client` calls `load_dotenv()` at import time, so the
+real key from this machine's real `.env` sat in `os.environ` for the
+whole test session. The only existing protection
+(`tests/test_resend_client.py`'s own `_clear_resend_env` autouse
+fixture) was scoped to that one file, not the suite — a close parallel
+to a near-identical, already-fixed incident class: `tests/test_api_resumes.py`
+has its own autouse fixture (`_force_modal_not_configured`) clearing
+`MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` for exactly the same reason,
+added after a real prior leak toward the live Modal deployment (see
+CLAUDE.md) — that lesson was never generalized to Resend.
+
+**Real-DB evidence gathered during investigation** (previous session,
+read-only): the real local `resend_usage` table showed only 1 row
+(`emails_sent=1`, from a deliberate manual test send, separately
+authorized) and the real `budget_alert_state` table was completely
+empty — because the 16 sends happened against pytest's own ephemeral,
+per-process Postgres schema (dropped at process exit), not the real
+database. The sends themselves were still 100% real — the DB-side
+bookkeeping for them just evaporated with the schema, leaving no local
+row-level trace. Reconstructed the count by retracing every `pytest`
+invocation during Phase B that included this test file: 4 separate
+invocations (one full-suite run right after wiring the Modal hook, one
+standalone run of just this test file, and two more full-suite runs
+before committing) × 2 tests × 2 thresholds each = **16**, matching the
+real count exactly. The dedup/locking logic inside
+`check_and_alert_budget_threshold()` itself was never the problem — it
+was independently verified correct in isolation by Phase B's own 10
+`test_budget_alerts.py` tests (including the explicit
+no-re-fire-on-duplicate-crossing case) and remains unchanged here.
+
+**The structural fix:**
+1. **`tests/conftest.py` gained a project-wide `autouse=True` fixture,
+   `_no_real_resend_api_key`** — deletes `RESEND_API_KEY` from the
+   environment before every single test in the suite, regardless of
+   file, regardless of whether that test remembers to mock anything
+   itself. `huntloop.resend_client.send_email()` always checks
+   `_configured()` (key present) before any network code runs, so with
+   this fixture in place a real send is structurally impossible unless a
+   test explicitly re-sets its own key (which `tests/test_resend_client.py`'s
+   own `configured` fixture does — with a deliberately fake
+   `"re_test_key"` value, never a real one). This supersedes the
+   file-scoped `test_resend_client.py` fixture as the real project-wide
+   guarantee; that file's own fixture is left in place (now redundant,
+   harmless, and still accurate documentation of that file's own intent)
+   rather than removed, to minimize unrelated churn.
+2. **Defense in depth, on top of (not instead of) the fixture above**:
+   both culprit tests now also explicitly mock
+   `huntloop.modal_resume_processing.check_and_alert_budget_threshold`
+   for the duration of their budget-exhaustion assertions, with a
+   docstring note pointing at this incident — so they stay correct and
+   side-effect-free even in a future where the global fixture is ever
+   accidentally weakened, removed, or bypassed for one test via
+   `request.node.get_closest_marker(...)`-style opt-out (none exists
+   today, deliberately — see the fixture's own docstring: "do not make
+   it opt-in/per-file").
+3. **Audited the rest of the suite** for any other test reaching
+   `send_email()`/`check_and_alert_budget_threshold()` unmocked:
+   `tests/test_budget_alerts.py` (10 tests) and `tests/test_api_feedback.py`
+   (5 tests) already mock `send_email` directly in every test except one
+   (`test_submit_feedback_without_resend_configured_still_succeeds`),
+   which already explicitly deleted `RESEND_API_KEY` itself before this
+   fix (now redundant with the global fixture, left as-is). No other
+   test file in the suite references `RESEND_API_KEY`, `resend_client`,
+   `budget_alerts`, or `feedback_alerts` at all. Confirmed no test
+   anywhere relies on a *real* key being present for its own
+   correctness — every reference either mocks the send or deliberately
+   exercises the not-configured path.
+
+**Verification, not just written — run for real:**
+- Full suite with the real fix in place: **574 passed, 0 failed** (same
+  574 as before this fix — no new tests added, only the fixture +
+  targeted mocks).
+- **A stronger, affirmative trace, not just the fixture's own logic
+  trusted on faith**: temporarily patched the actual Resend SDK call
+  itself (`resend.Emails.send`, the literal function at the bottom of
+  every call path, not just `huntloop.resend_client`'s wrapper) to raise
+  `AssertionError` on any invocation, for the entire test session, via a
+  throwaway session-scoped autouse fixture appended to `conftest.py` —
+  ran the full suite once with that net active: **574 passed, 0
+  failed**, meaning zero tests anywhere in the whole suite ever reach an
+  unmocked real send call, not just the two tests originally
+  identified. That diagnostic fixture was then removed before
+  committing — it is not part of the real fix, only a one-time
+  verification of it.
+- `grep -rn "RESEND_API_KEY" tests/*.py` confirms exactly 4 files
+  reference it at all (`conftest.py` — the new fixture;
+  `test_resend_client.py` — its own pre-existing, now-redundant
+  fixture; `test_api_feedback.py` — the one test's own explicit
+  `delenv`), and none of the four ever sets it to anything resembling a
+  real value.
+
+**Not done here, deliberately**: no real email was sent as part of this
+fix or its verification (the diagnostic fixture's whole point was
+asserting the *opposite*). The real local Postgres `resend_usage`/
+`budget_alert_state` tables (migrated in a prior session, holding the 1
+real manual-test-send row) were not touched — this incident and its fix
+are entirely about test-time behavior, not production data.

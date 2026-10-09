@@ -94,15 +94,25 @@ def test_reserve_increments_an_existing_row_across_calls(db_session):
 
 
 def test_reserve_refuses_once_budget_is_reached_and_does_not_increment(db_session, monkeypatch):
+    """This test drives usage to exactly 100% of a tiny fake budget on
+    purpose (to exercise the refusal path below) - which also crosses
+    both of Resend Phase B's 80%/95% alert thresholds in that same real
+    call. check_and_alert_budget_threshold is mocked here as explicit
+    defense in depth, on top of (not instead of) the project-wide
+    RESEND_API_KEY-deletion fixture in conftest.py - see that fixture's
+    docstring and SESSIONS.md for the real 16-real-email incident this
+    is fixing. This test is about reservation/refusal behavior, not
+    alerting, so it shouldn't depend on alert internals either way."""
     monkeypatch.setenv("MODAL_MONTHLY_INVOCATION_BUDGET", "2")
 
-    first = _reserve_invocation_slot(db_session)
-    second = _reserve_invocation_slot(db_session)
-    assert first[0] is True
-    assert second[0] is True
+    with patch("huntloop.modal_resume_processing.check_and_alert_budget_threshold"):
+        first = _reserve_invocation_slot(db_session)
+        second = _reserve_invocation_slot(db_session)
+        assert first[0] is True
+        assert second[0] is True
 
-    third = _reserve_invocation_slot(db_session)
-    assert third == (False, 2, 2)
+        third = _reserve_invocation_slot(db_session)
+        assert third == (False, 2, 2)
 
     month = _current_month_key()
     row = db_session.query(ModalUsage).filter_by(month=month).one()
@@ -192,11 +202,18 @@ def test_invoke_modal_still_counts_the_slot_when_the_dispatch_itself_fails(db_se
 
 
 def test_invoke_modal_raises_once_budget_is_reached(db_session, configured, monkeypatch):
+    """Same reasoning as test_reserve_refuses_once_budget_is_reached_and_does_not_increment
+    above - this test's own first call lands at exactly 100% of a tiny
+    fake budget (1), which crosses both alert thresholds for real unless
+    mocked. Explicit defense-in-depth mock, on top of the project-wide
+    RESEND_API_KEY-deletion fixture - see SESSIONS.md for the real
+    incident."""
     monkeypatch.setenv("MODAL_MONTHLY_INVOCATION_BUDGET", "1")
     fake_fn = MagicMock()
     fake_fn.remote.return_value = [0.1]
 
-    with patch("huntloop.modal_resume_processing.modal.Function.from_name", return_value=fake_fn):
+    with patch("huntloop.modal_resume_processing.modal.Function.from_name", return_value=fake_fn), \
+         patch("huntloop.modal_resume_processing.check_and_alert_budget_threshold"):
         first = _invoke_modal(db_session, "embed_text_remote", ("a",), "test")
         assert first == [0.1]
 

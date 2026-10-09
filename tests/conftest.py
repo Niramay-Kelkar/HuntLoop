@@ -115,6 +115,51 @@ def db_session(pipeline):
     session.close()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_resend_api_key(monkeypatch):
+    """Project-wide safety net, added 2026-10-09 after a real incident -
+    see SESSIONS.md's "Resend test-isolation incident" entry for the
+    full writeup. Running the test suite locally during Resend Phase B
+    development sent 16 REAL emails through a live Resend API key: two
+    pre-existing Modal tests (test_reserve_refuses_once_budget_is_reached_and_does_not_increment,
+    test_invoke_modal_raises_once_budget_is_reached in
+    tests/test_modal_resume_processing.py) legitimately drive a fake
+    budget to exactly 100% of a tiny cap in one call - which, once Phase
+    B wired a real alert-email side effect into that same code path,
+    means they also cross both the 80% and 95% alert thresholds for
+    real. Neither test mocked huntloop.resend_client.send_email or
+    huntloop.budget_alerts.check_and_alert_budget_threshold, and nothing
+    suite-wide prevented the real RESEND_API_KEY already sitting in this
+    project's real .env from being live in os.environ during that test -
+    huntloop.resend_client calls load_dotenv() at import time, so the
+    real key was present for every test in the suite except the one file
+    (tests/test_resend_client.py) that happened to have its own
+    autouse fixture deleting it, which is also the file Phase A's own
+    author incorrectly assumed would set precedent project-wide.
+
+    This fixture is the structural fix: it deletes RESEND_API_KEY from
+    the environment before EVERY test in the entire suite runs,
+    regardless of file, regardless of whether that test remembers to
+    mock anything itself. huntloop.resend_client.send_email() always
+    checks `_configured()` (RESEND_API_KEY present) FIRST, before any
+    network code runs - so with this fixture in place, a test can only
+    ever reach a real `resend.Emails.send()` call if it explicitly sets
+    its own key back (e.g. tests/test_resend_client.py's `configured`
+    fixture, which sets a deliberately fake "re_test_key" value, never
+    a real one) AND fails to mock the send call itself - both of those
+    remain an individual test's own explicit choice, not something that
+    can happen by omission or by a future test author not knowing this
+    history.
+
+    This is a deliberate safety net making a real send *structurally
+    impossible by default*, not just a style preference - do not remove
+    it or make it opt-in/per-file. It was verified, not just written:
+    see SESSIONS.md for the full-suite run with resend.Emails.send
+    itself temporarily patched to raise on any unmocked call, confirming
+    zero tests reach it for real."""
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+
+
 @pytest.fixture()
 def api_client(db_session):
     """A FastAPI TestClient for huntloop.api.main.app, with its DB session
