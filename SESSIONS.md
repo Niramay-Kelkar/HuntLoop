@@ -12532,6 +12532,87 @@ for the stale-admin-link-after-sign-out bug).
 
 ---
 
+## 2026-10-04: Show real company names instead of lowercase slugs (retroactive entry, logged 2026-10-10)
+
+**This entry is being added six days after the fact.** The work below
+was done and shipped on 2026-10-04 (commits `d4b141f` and `6af95f0`,
+both real, already on `master`) but was never logged in SESSIONS.md at
+the time - it was tracked only as an open bug report ("all the company
+names are lowercase instead of Camel case"). It's being logged now
+after a later, separate investigation (2026-10-10) re-verified the fix
+against both the local database and the Neon demo database and
+confirmed it is real, already deployed, and still working - this is a
+documentation catch-up, not new work.
+
+**The bug:** `companies.name` is the lowercase ATS slug every spider
+uses as its dedup/sync/filter key (e.g. `"openai"`, `"thenewyorktimes"`)
+- never meant to be shown to a user, but the frontend rendered it
+directly, so every company in the UI appeared in all-lowercase instead
+of its real name.
+
+**The fix (`d4b141f`, `6af95f0`):** a new, purely additive
+`companies.display_name` column (migration `a7c4e9f2d8b3`) holds a
+real, human-readable name fetched from each ATS's own source data -
+`src/huntloop/company_display_name.py` has one fetcher per platform
+(Greenhouse's board-metadata endpoint, SmartRecruiters' inline posting
+fields, Lever/Ashby/iCIMS's public board-page `<title>` tag, with a
+Workday fallback over the existing DOL-matched legal-entity name since
+Workday has no public name field at all) and
+`scripts/backfill_company_display_names.py` populated it for existing
+companies; new companies on these sources pick one up automatically
+going forward. `companies.name` itself is left completely untouched
+everywhere - matching, filtering, and the Neon sync key all still use
+the lowercase slug, exactly per this project's existing
+architectural-decisions rule that the slug is the canonical identifier.
+
+**The frontend side:** `companyLabel()` in `frontend/src/lib/theme.ts`
+is a plain null-coalesce - `job.company_display_name ?? job.company_name`
+- not a CSS `text-transform` or a JS `.toTitleCase()`-style trick. This
+matters for correctness: several real companies have intentional
+internal-caps names a generic title-case pass would get wrong, and
+since the display name is sourced from each platform's own real data
+rather than computed, these come out right - confirmed live in both
+databases: `mongodb` -> `MongoDB`, `openai` -> `OpenAI`, `snaplogic` ->
+`SnapLogic`, `abbvie` -> `AbbVie`, `highradius` -> `HighRadius`.
+
+**Known, already-documented limitation, not a regression:** Workday
+has no public source for a real display name at all, so
+`casefold_legal_entity_name()` falls back to title-casing the DOL
+legal-entity name word by word (keeping a short list of legal/
+jurisdictional tokens like LLC/INC/AG/GMBH upper-cased). This
+mechanical fallback cannot distinguish a real acronym brand from an
+ordinary word, so it gets those wrong: `cdw` -> `Cdw` (should stay
+`CDW`), `cibc` -> `Cibc` (should stay `CIBC`). This is called out
+explicitly in the function's own docstring as an accepted gap in the
+original work, not something that broke later.
+
+**Real coverage, re-verified 2026-10-10 against both databases, not
+estimated:**
+- Local Postgres: **719 / 743 companies (96.8%)** have a real
+  `display_name`.
+- Neon demo database: **715 / 738 companies (96.9%)** have a real
+  `display_name`.
+- The unfixed remainder is **the same ~23-24 companies on both sides**
+  (e.g. `postman`, `amplitude`, `instabase`, `veeva`, `metlife`,
+  `kimberlyclark`, `ironmountain`, `wisetechglobal`) - Neon is missing
+  only `kraken` relative to local, which has 0 scraped postings and
+  isn't part of the demo dataset at all, confirming the Neon sync
+  (`scripts/sync_company_display_names_to_demo.py`) is carrying the
+  real data over correctly rather than drifting. These remaining
+  companies have `display_name = NULL` because their source fetch
+  (a board-page title scrape, or a field heuristic) returned nothing
+  usable for that specific company, not because the mechanism is
+  broken - `companyLabel()`'s fallback to the raw slug for these rows
+  is working exactly as designed, not a bug.
+
+**Not done here, and not part of this entry:** no code changed as part
+of writing this entry - this is a documentation-only catch-up. Whether
+to pursue fuller coverage for the remaining ~3% (more source fetchers,
+retrying failed lookups) is a separate, later decision, not something
+this entry resolves.
+
+---
+
 ## 2026-10-05: Sync company display names to the Neon demo database (`sync/display-name-to-neon-demo`)
 
 **Did:** New `scripts/sync_company_display_names_to_demo.py` reads
