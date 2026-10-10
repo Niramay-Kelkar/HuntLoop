@@ -13865,3 +13865,53 @@ this session built) — expected behavior at this spend level, not a bug.
 Nothing synced to Neon in this step, per the task's own instruction —
 that stays a separate, later deliberate decision, same as every prior
 Tavily step.
+
+## 2026-10-10: Sync the 200-company partial backfill to the Neon demo database (ops, no code change)
+
+Follow-up to the entry above - syncing `company_research` for the 200
+newly-backfilled companies to Neon, via the existing, unmodified
+`scripts/sync_company_research_to_demo.py`. Pure ops action; no
+application code changed.
+
+**Overlap check, done before touching Neon at all (per the task's own
+instruction):** isolated the exact 200 companies from the prior local
+backfill by `company_research.fetched_at::date = '2026-10-10'` (clean
+split: 200 rows on that date, 392 on `2026-10-02` - the two backfills
+never overlap in fetch date), then checked each of those 200 names
+against a fresh read-only query of Neon's live `companies` table.
+**Result: 200/200 overlapped - 0 missing.** This is notably different
+from what CLAUDE.md's existing "~389-company sample" framing would have
+predicted; Neon's `companies` table in fact holds 738 rows now (vs. 743
+locally) - close to full parity with the local company set - even
+though `job_postings` on Neon is still a genuinely sampled 19,294 rows
+(vs. ~97k+ locally). The company-set documentation in CLAUDE.md is
+stale on this point (it most likely reflects an earlier, smaller demo
+build); not corrected in this ops-only session, but worth a documentation
+follow-up.
+
+**Sync run**: since every one of the 200 overlapped, no company-name
+filtering was needed - ran the existing
+`scripts/sync_company_research_to_demo.py` exactly as-is (`SOURCE_DATABASE_URL`
+= local, `NEON_DEMO_DATABASE_URL` = Neon's direct/unpooled connection
+string from `.env.deploy`'s `TARGET_DATABASE_URL_DIRECT`). A `--dry-run`
+first confirmed "592 local companies have a company_research snapshot,
+738 companies exist in the Neon demo database, 592 companies exist in
+both and will be synced, 0 missing" (592 = the 392 already-synced from
+the original pass + this session's 200 - the script re-upserts the
+already-synced 392 too, idempotently, exactly as documented). Real run:
+**592 companies synced, 0 errors.**
+
+**Verified for real:**
+- Neon `company_research` row count: 392 -> 592 (exactly +200).
+- Neon `companies` (738) and `job_postings` (19,294) row counts
+  unchanged before and after - confirmed by direct count query, not
+  assumed from "the script only touches company_research."
+- Spot-checked 3 of the newly-synced rows (`eurofins`, `singlestore`,
+  `lucidsoftware`) against their local source: `summary`,
+  `funding_signal`, and `fetched_at` are byte-for-byte identical between
+  local and Neon for all three.
+
+**Not done here**: no change to `build_demo_dataset.py`'s company
+sampling, and no investigation into why Neon's company count has grown
+past the documented 389 - both out of scope for this step, flagged
+honestly rather than silently absorbed into the "sync" task.
