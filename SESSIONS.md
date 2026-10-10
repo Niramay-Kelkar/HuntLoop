@@ -13804,3 +13804,64 @@ asserting the *opposite*). The real local Postgres `resend_usage`/
 `budget_alert_state` tables (migrated in a prior session, holding the 1
 real manual-test-send row) were not touched — this incident and its fix
 are entirely about test-time behavior, not production data.
+
+## 2026-10-10: Partial Tavily company-research backfill — 200 of the ~354 never-researched companies (`feature/tavily-partial-backfill-200`)
+
+Ran a deliberately partial `scripts/backfill_company_research.py` pass
+(200 companies, not the full backlog) against the real local Postgres —
+local-only, nothing touched on Neon.
+
+**Budget check before running (real `tavily_usage` query, not assumed):**
+2026-10 had 392/600 credits already used (208 remaining against the
+default `TAVILY_MONTHLY_REQUEST_BUDGET`, no env override set) — above
+the 200 needed, so the run proceeded rather than stopping.
+
+**Candidate selection**: 351 companies currently have no `company_research`
+row or one older than the script's existing 30-day staleness window.
+Ordering by number of associated `job_postings` descending (not the
+script's own default never-researched-then-stalest order) and taking the
+top 200: top of the selected set was `eurofins` (4,888 postings),
+`carvana` (3,660), `nationalvision1` (2,197), `collabera2` (1,683),
+`nagarro1` (1,120); bottom of the selected 200 was `quinstreet` (44),
+`flatironhealth` (43), `squad` (43), `yext` (42), `lucidsoftware` (42) —
+a clean cutoff, not an arbitrary tie-break.
+
+**Script change**: `scripts/backfill_company_research.py` gained a new
+`--order-by-job-count` flag (off by default, so every other invocation —
+the eventual daily/cron wiring, any future manual run — keeps the
+existing never-researched-then-stalest priority unchanged). When passed,
+`_companies_needing_research()` left-joins `job_postings`, groups by
+company, and orders by `COUNT(job_postings.id) DESC, Company.id ASC`
+instead. `--limit` already existed on the script before this session —
+no new flag was needed for the capping itself, only for the ordering.
+Verified the new ordering resolves to exactly the same 200 company ids as
+a manual raw-SQL query before running for real (`--dry-run` output
+diffed against the psql result).
+
+**Real run**: `python scripts/backfill_company_research.py --limit 200
+--order-by-job-count` — **200 fetched, 0 failed, 0 skipped**. A real
+Resend budget-threshold alert email fired mid-run at the 95% mark
+(`huntloop.budget_alerts`, pre-existing Phase B wiring, not something
+this session built) — expected behavior at this spend level, not a bug.
+
+**Verified for real, not just "0 failed" trusted on faith**:
+- `tavily_usage` for 2026-10: `requests_used` 392 → 592, exactly +200 —
+  matches one basic-depth Tavily call per company with no partial-data
+  shortcuts taken.
+- `company_research` rows with `fetched_at` in the last hour: exactly
+  200.
+- Spot-checked 5 real rows' actual content (`eurofins`, `carvana`,
+  `singlestore`, `gemini`, `lucidsoftware`) — all have a real summary, 5
+  news items, and funding/hiring signal text, not empty placeholders.
+  `singlestore`/`lucidsoftware` content is clean and specific (real
+  funding rounds, real headcount/hiring figures). `carvana` and
+  `gemini`'s signal text shows the same pre-existing generic-name/
+  collision noise `huntloop.company_research`'s single-search heuristic
+  is already known to produce (e.g. `gemini` pulling in unrelated
+  "Gemini Health"/"Gemini Bio-Products" results) — a known limitation of
+  the existing extraction approach, not something this partial run
+  introduced or should fix unprompted.
+
+Nothing synced to Neon in this step, per the task's own instruction —
+that stays a separate, later deliberate decision, same as every prior
+Tavily step.

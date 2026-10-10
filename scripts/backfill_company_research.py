@@ -49,12 +49,12 @@ from datetime import datetime, timedelta, timezone
 SRC_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
 sys.path.insert(0, SRC_DIR)
 
-from sqlalchemy import create_engine, or_, select
+from sqlalchemy import create_engine, func, or_, select
 from sqlalchemy.orm import sessionmaker
 
 from huntloop.budget_alerts import check_and_alert_budget_threshold
 from huntloop.company_research import fetch_company_research
-from huntloop.db_models import Company, CompanyResearch, TavilyUsage
+from huntloop.db_models import Company, CompanyResearch, JobPosting, TavilyUsage
 from huntloop.logging_config import setup_logging
 from huntloop.settings import DATABASE_URL
 
@@ -119,17 +119,32 @@ def _neon_company_names() -> set[str]:
         neon_engine.dispose()
 
 
-def _companies_needing_research(session, limit: int | None, only_neon_companies: bool):
+def _companies_needing_research(session, limit: int | None, only_neon_companies: bool, order_by_job_count: bool = False):
     staleness_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=RESEARCH_STALENESS_DAYS)
-    query = (
-        select(Company, CompanyResearch)
-        .outerjoin(CompanyResearch, CompanyResearch.company_id == Company.id)
-        .where(or_(CompanyResearch.id.is_(None), CompanyResearch.fetched_at < staleness_cutoff))
-        # Never-researched companies first, then the stalest existing
-        # snapshots - so a budget-limited run makes the most useful
-        # progress first.
-        .order_by(CompanyResearch.fetched_at.is_(None).desc(), CompanyResearch.fetched_at.asc())
-    )
+    if order_by_job_count:
+        # One-off prioritization for a partial/budget-capped run: spend
+        # the limited credits on the companies with the most postings
+        # (and therefore the most job-detail-page views) first, rather
+        # than the script's normal never-researched-then-stalest order.
+        job_count = func.count(JobPosting.id)
+        query = (
+            select(Company, CompanyResearch)
+            .outerjoin(CompanyResearch, CompanyResearch.company_id == Company.id)
+            .outerjoin(JobPosting, JobPosting.company_id == Company.id)
+            .where(or_(CompanyResearch.id.is_(None), CompanyResearch.fetched_at < staleness_cutoff))
+            .group_by(Company.id, CompanyResearch.id)
+            .order_by(job_count.desc(), Company.id.asc())
+        )
+    else:
+        query = (
+            select(Company, CompanyResearch)
+            .outerjoin(CompanyResearch, CompanyResearch.company_id == Company.id)
+            .where(or_(CompanyResearch.id.is_(None), CompanyResearch.fetched_at < staleness_cutoff))
+            # Never-researched companies first, then the stalest existing
+            # snapshots - so a budget-limited run makes the most useful
+            # progress first.
+            .order_by(CompanyResearch.fetched_at.is_(None).desc(), CompanyResearch.fetched_at.asc())
+        )
     if only_neon_companies:
         neon_names = _neon_company_names()
         logger.info("--only-neon-companies: restricting to %d company names present in Neon", len(neon_names))
@@ -165,7 +180,7 @@ def _upsert_research(session, company: Company, existing: CompanyResearch | None
     session.commit()
 
 
-def main(limit: int | None = None, dry_run: bool = False, only_neon_companies: bool = False) -> None:
+def main(limit: int | None = None, dry_run: bool = False, only_neon_companies: bool = False, order_by_job_count: bool = False) -> None:
     engine = create_engine(DATABASE_URL, echo=False)
     Session = sessionmaker(bind=engine)
     session = Session()
@@ -185,7 +200,7 @@ def main(limit: int | None = None, dry_run: bool = False, only_neon_companies: b
             )
             return
 
-        candidates = _companies_needing_research(session, limit, only_neon_companies)
+        candidates = _companies_needing_research(session, limit, only_neon_companies, order_by_job_count)
         logger.info("%d companies need a research snapshot (no snapshot, or older than %d days)",
                     len(candidates), RESEARCH_STALENESS_DAYS)
 
@@ -245,5 +260,11 @@ if __name__ == "__main__":
         help="Restrict this run to companies whose name exists in the Neon demo DB "
              "(NEON_DEMO_DATABASE_URL, read-only), in the same priority order.",
     )
+    parser.add_argument(
+        "--order-by-job-count", action="store_true",
+        help="Prioritize candidates by number of associated job_postings, descending, "
+             "instead of the default never-researched-then-stalest order. Useful for a "
+             "one-off partial/budget-capped run.",
+    )
     args = parser.parse_args()
-    main(limit=args.limit, dry_run=args.dry_run, only_neon_companies=args.only_neon_companies)
+    main(limit=args.limit, dry_run=args.dry_run, only_neon_companies=args.only_neon_companies, order_by_job_count=args.order_by_job_count)
