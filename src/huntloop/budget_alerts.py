@@ -1,7 +1,11 @@
 """
-Shared budget-threshold email alerting for every usage ledger in this
-project - Phase B of the Resend integration (see CLAUDE.md/SESSIONS.md),
-built on top of Phase A's huntloop.resend_client/huntloop.resend_metrics.
+Shared budget-threshold notification alerting for every usage ledger in
+this project - Phase B of the Resend integration (see
+CLAUDE.md/SESSIONS.md), now routed through Knock
+(huntloop.knock_client/huntloop.knock_metrics) rather than calling
+huntloop.resend_client directly. Resend remains the actual delivery
+provider underneath - it's just configured as a channel inside Knock's
+own dashboard now, not called from this module.
 
 Public surface:
 
@@ -83,7 +87,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from huntloop.db_models import BudgetAlertState
-from huntloop.resend_client import ResendUnavailable, send_email
+from huntloop.knock_client import KnockUnavailable, trigger_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -129,11 +133,17 @@ def _send_threshold_alert(db: Session, *, ledger: str, period: str, used: int, c
         f"<p>Current usage: <strong>{used} / {cap}</strong> ({pct_actual:.1f}%).</p>"
     )
     try:
-        send_email(db, to=_alert_to_address(), subject=subject, html=html)
-        logger.info(f"Sent budget-threshold alert: ledger={ledger} period={period} threshold={threshold}%")
-    except ResendUnavailable as e:
+        trigger_workflow(
+            db,
+            workflow_key=os.getenv("KNOCK_BUDGET_ALERT_WORKFLOW_KEY", "budget-threshold-alert"),
+            to=_alert_to_address(),
+            subject=subject,
+            html=html,
+        )
+        logger.info(f"Sent budget-threshold alert via Knock: ledger={ledger} period={period} threshold={threshold}%")
+    except KnockUnavailable as e:
         logger.warning(
-            f"Budget-threshold alert email not sent (ledger={ledger}, period={period}, "
+            f"Budget-threshold alert not sent (ledger={ledger}, period={period}, "
             f"threshold={threshold}%, reason={e.reason}): {e}"
         )
 

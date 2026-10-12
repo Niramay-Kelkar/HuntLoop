@@ -744,6 +744,34 @@ class ResendUsage(Base):
         return f"<ResendUsage(day={self.day}, emails_sent={self.emails_sent})>"
 
 
+class KnockUsage(Base):
+    """
+    A durable trigger-count ledger for huntloop.knock_client (Knock
+    notification-orchestration layer in front of Resend - see
+    CLAUDE.md/SESSIONS.md). Mirrors ResendUsage exactly - keyed by
+    calendar DAY (`day`, e.g. "2026-10-12") rather than month, since
+    Knock's own free-tier workflow-trigger budget is a daily figure, a
+    tighter constraint than its monthly one. The monthly cap is enforced
+    by summing this same table's rows whose `day` falls in the current
+    calendar month, same single-ledger shape as ResendUsage.
+
+    Read/incremented from potentially-concurrent callers (a feedback-
+    router alert and a budget-threshold alert could both try to trigger
+    at once) - same `SELECT ... FOR UPDATE` row-lock treatment
+    ResendUsage uses, locking today's row for the check-then-increment.
+    """
+    __tablename__ = "knock_usage"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    day = Column(String(10), nullable=False, unique=True)
+    triggers_sent = Column(Integer, nullable=False, default=0, server_default="0")
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    def __repr__(self):
+        return f"<KnockUsage(day={self.day}, triggers_sent={self.triggers_sent})>"
+
+
 class BudgetAlertState(Base):
     """
     Shared last-alerted-threshold tracker for huntloop.budget_alerts
