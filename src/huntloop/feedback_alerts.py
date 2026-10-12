@@ -1,7 +1,10 @@
 """
-New-feedback email alert - Phase B of the Resend integration (see
-CLAUDE.md/SESSIONS.md), built on top of Phase A's
-huntloop.resend_client/huntloop.resend_metrics.
+New-feedback notification alert - Phase B of the Resend integration
+(see CLAUDE.md/SESSIONS.md), now routed through Knock
+(huntloop.knock_client/huntloop.knock_metrics) rather than calling
+huntloop.resend_client directly. Resend remains the actual delivery
+provider underneath - it's just configured as a channel inside Knock's
+own dashboard now, not called from this module.
 
 Public surface:
 
@@ -30,18 +33,18 @@ raw_text), never the ORM row itself, are passed in from the router for
 the same reason - a detached SQLAlchemy instance bound to a closed
 session is not safe to touch here.
 
-Never raises - any ResendUnavailable (not configured, today's/this
-month's Resend budget exhausted, a real send error) is logged and
-swallowed, never retried. This endpoint has no request to fail at this
-point anyway (the response is already gone), but the contract is kept
-explicit and absolute: a failure here must never surface anywhere the
-submitter or a caller could see it.
+Never raises - any KnockUnavailable (not configured, today's/this
+month's Knock trigger budget exhausted, a real trigger error) is logged
+and swallowed, never retried. This endpoint has no request to fail at
+this point anyway (the response is already gone), but the contract is
+kept explicit and absolute: a failure here must never surface anywhere
+the submitter or a caller could see it.
 """
 import logging
 import os
 
 from huntloop.api.dependencies import SessionLocal
-from huntloop.resend_client import ResendUnavailable, send_email
+from huntloop.knock_client import KnockUnavailable, trigger_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -96,11 +99,17 @@ def send_new_feedback_alert(feedback_id: int, category: str, raw_text: str) -> N
             f"<p><a href=\"{admin_url}\">Review it in the admin dashboard</a></p>"
         )
         try:
-            send_email(db, to=_alert_to_address(), subject=subject, html=html)
-            logger.info(f"Sent new-feedback alert email for feedback id={feedback_id}")
-        except ResendUnavailable as e:
+            trigger_workflow(
+                db,
+                workflow_key=os.getenv("KNOCK_FEEDBACK_ALERT_WORKFLOW_KEY", "feedback-alert"),
+                to=_alert_to_address(),
+                subject=subject,
+                html=html,
+            )
+            logger.info(f"Sent new-feedback alert via Knock for feedback id={feedback_id}")
+        except KnockUnavailable as e:
             logger.warning(
-                f"New-feedback alert email not sent for feedback id={feedback_id} "
+                f"New-feedback alert not sent for feedback id={feedback_id} "
                 f"(reason={e.reason}): {e}"
             )
     except Exception:

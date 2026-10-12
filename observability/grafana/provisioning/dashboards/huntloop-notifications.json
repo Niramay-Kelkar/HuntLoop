@@ -1,0 +1,138 @@
+{
+  "title": "HuntLoop Notifications (Knock)",
+  "uid": "huntloop-notifications",
+  "editable": true,
+  "schemaVersion": 39,
+  "timezone": "browser",
+  "time": { "from": "now-7d", "to": "now" },
+  "refresh": "30s",
+  "tags": ["huntloop"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Knock workflow triggers by outcome, over time",
+      "description": "huntloop_knock_triggers_total - every notification trigger routed through huntloop.knock_client (huntloop.feedback_alerts, huntloop.budget_alerts), split by outcome (success / not_configured / daily_budget_exhausted / monthly_budget_exhausted / trigger_error). No separate per-provider Resend panel exists in this project to mirror directly (nothing calls huntloop.resend_client itself anymore - Resend is now reached only via Knock, see CLAUDE.md) - this dashboard follows the layout/style of the existing huntloop-modal-resume dashboard instead.",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "huntloop_knock_triggers_total",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "title": "Successful triggers vs. failures (current)",
+      "description": "huntloop_knock_triggers_total summed across the whole history, grouped by outcome - a snapshot of how often notifications actually go through vs. being blocked/erroring, not a rate.",
+      "type": "barchart",
+      "gridPos": { "h": 9, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (outcome) (huntloop_knock_triggers_total)",
+          "legendFormat": "{{outcome}}",
+          "refId": "A",
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short" },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "title": "Budget-cap rejections, over time",
+      "description": "huntloop_knock_triggers_total{outcome=~\"daily_budget_exhausted|monthly_budget_exhausted\"} - triggers that were blocked specifically because KNOCK_DAILY_TRIGGER_BUDGET or KNOCK_MONTHLY_TRIGGER_BUDGET was already spent, as opposed to Knock not being configured or erroring.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "huntloop_knock_triggers_total{outcome=~\"daily_budget_exhausted|monthly_budget_exhausted\"}",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10, "spanNulls": true } },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "Daily trigger budget used vs. cap",
+      "description": "huntloop_knock_daily_budget_used / huntloop_knock_daily_budget_cap - the knock_usage ledger's today's triggers_sent against KNOCK_DAILY_TRIGGER_BUDGET (default 100), updated on every budget check. Resets to 0 at the start of each UTC day.",
+      "type": "gauge",
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "huntloop_knock_daily_budget_used",
+          "legendFormat": "used",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "percentage",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "Monthly trigger budget used vs. cap",
+      "description": "huntloop_knock_monthly_budget_used / huntloop_knock_monthly_budget_cap - the knock_usage ledger's current-month triggers_sent against KNOCK_MONTHLY_TRIGGER_BUDGET (default 3000), updated on every budget check. Resets to 0 at the start of each calendar month.",
+      "type": "gauge",
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 9 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "huntloop_knock_monthly_budget_used",
+          "legendFormat": "used",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 3000,
+          "thresholds": {
+            "mode": "percentage",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 70 },
+              { "color": "red", "value": 90 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}
