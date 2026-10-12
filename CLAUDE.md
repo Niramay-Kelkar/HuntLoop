@@ -1934,6 +1934,24 @@ conventions" and SESSIONS.md for the real current state).
   those are separate, later steps, including a real open question Phase
   B will need to resolve (no submitter-facing poll-by-id endpoint exists
   anywhere in this codebase yet to copy from).
+- **`DEMO_MODE` + a public Neon deployment exist (`huntloop.demo_mode`,
+  `scripts/build_demo_dataset.py`/`scripts/deploy_demo_data.py`) — the
+  public demo database's `companies` table is near-complete, NOT a small
+  curated company sample; `job_postings` is the real curated/sampled
+  part.** `build_demo_dataset.py` copies essentially every company with
+  at least one relevant, embedded posting (not a fixed company-count
+  target) — the demo is selling company-count coverage, not posting
+  volume — while capping each company's own postings at
+  `PER_COMPANY_CAP = 40` (preferring US-located postings) so a handful of
+  very large boards (Workday, iCIMS) don't crowd out the many smaller
+  ones. As of the most recent sync (2026-10-10, see SESSIONS.md), Neon
+  holds **738 `companies` rows vs. 743 locally** (near-full parity) but
+  only **19,294 `job_postings` rows vs. ~97k+ locally** — confirm current
+  real counts directly against Neon before quoting a number, rather than
+  assuming either side of this split. (The database started much
+  smaller — 389 companies — before the 2026-10-05 "expand the public demo
+  dataset" step grew company coverage to near-parity; don't describe
+  today's company count as 389 or as curated.)
 
 ## Key architectural decisions (already made — don't re-litigate)
 
