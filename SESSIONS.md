@@ -13915,3 +13915,65 @@ already-synced 392 too, idempotently, exactly as documented). Real run:
 sampling, and no investigation into why Neon's company count has grown
 past the documented 389 - both out of scope for this step, flagged
 honestly rather than silently absorbed into the "sync" task.
+
+## 2026-10-28: Verify real Tavily research coverage on local vs. Neon (investigation only, no code change)
+
+Follow-up to the two entries above - a real, direct-query check of the
+"local has 589/743 researched, Neon got a ~200-company push" belief
+mentioned going into this task, before any further research run or
+budget change. Branch `investigate/tavily-research-coverage`. No
+application code touched; this entry (plus the branch/push) is the only
+change.
+
+**Real counts, direct `psycopg2` queries against both databases
+(local via `.env`'s `DATABASE_URL`, Neon via `.env.deploy`'s
+`TARGET_DATABASE_URL_DIRECT`), not read from code or prior docs:**
+
+- **Local**: `companies` = 743, `company_research` = 592 rows (592
+  distinct `company_id`s, 0 duplicates), **151 companies with no
+  `company_research` row** - not 154 (743-589) as the going-in belief
+  implied; the real local count was already 592, not 589.
+- **Neon demo DB**: `companies` = 738, `company_research` = 592 rows
+  (592 distinct, 0 duplicates), **146 companies with no
+  `company_research` row**.
+
+**Name-by-name comparison, companies table first:** every one of
+Neon's 738 companies exists locally too (0 companies only-in-Neon); 5
+local companies do **not** exist in Neon's `companies` table at all
+(`cibcbankusa`, `constantcontact`, `dropbox`, `kraken`,
+`samsungresearchamerica` - coincidentally all 5 also happen to be
+locally unresearched, i.e. not a research-sync problem, just rows this
+particular demo-company build never carried over). 738 + 5 = 743,
+accounting for the full `companies`-count gap.
+
+**Name-by-name comparison, `company_research` coverage:** of the 151
+locally-unresearched companies, 146 exist in Neon's `companies` table
+and all 146 are *also* unresearched there - full agreement, not a
+partial/incomplete push. The remaining 5 are the companies missing from
+Neon's `companies` table entirely (previous paragraph). **Zero cases**
+of a company researched on one side but not the other among companies
+present in both databases - the two `company_research` tables are, for
+every shared company, identical: same 592 row count, same `fetched_at`
+range on both (`2026-10-02 16:20:51.929560` to `2026-10-10
+17:26:39.245054`, to the microsecond), 0 NULL `summary` values on
+either side. This matches - and reconfirms - the "592 synced, 0
+missing" result already recorded in the 2026-10-10 sync entry above;
+nothing has drifted since.
+
+**Conclusion: no discrepancy, no incomplete push.** The going-in belief
+("local 589/743, Neon pushed ~200") was stale by a small margin on the
+local number (**592**, not 589) and the real gap driving "need more
+research" is **151 companies** in local Postgres with no
+`company_research` row (not 154) - that's the true remaining backlog,
+not 743-589.
+
+**Tavily budget, read directly from code, not changed**:
+`DEFAULT_MONTHLY_BUDGET = 600` at `scripts/backfill_company_research.py:64`,
+overridable via the `TAVILY_MONTHLY_REQUEST_BUDGET` env var
+(`_monthly_budget()`, same file, lines 68-69) - not set in this
+machine's real `.env`, so the effective cap in force is the default,
+**600/month**.
+
+**Not done here, per the task's explicit instructions**: no backfill
+run, no budget change, nothing pushed to Neon. Pure read-only
+investigation against both real databases.
