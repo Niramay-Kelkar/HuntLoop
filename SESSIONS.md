@@ -13977,3 +13977,66 @@ machine's real `.env`, so the effective cap in force is the default,
 **Not done here, per the task's explicit instructions**: no backfill
 run, no budget change, nothing pushed to Neon. Pure read-only
 investigation against both real databases.
+
+## 2026-10-28: Raise the Tavily budget to 800 and clear the 151-company local research backlog
+
+Follow-up to the investigation entry above. Branch
+`feature/tavily-backfill-800-budget`.
+
+**Budget raised 600 -> 800**: `DEFAULT_MONTHLY_BUDGET` at
+`scripts/backfill_company_research.py:64` (plus the matching docstring
+line and `.env.example`'s commented default) - changed in code, the
+established configuration point, rather than setting
+`TAVILY_MONTHLY_REQUEST_BUDGET` in this machine's own untracked `.env`,
+since this value is meant to be a shared, reviewable default and this
+machine's `.env` doesn't currently override it. Still well under the
+account's real 1000/month hard cap.
+
+**Re-confirmed the backlog fresh (not reused from the investigation
+branch)**: a direct query against local Postgres, immediately before
+running anything, found the exact same **151** companies with no
+`company_research` row - no drift since the investigation. A
+`--dry-run` candidate list matched 151/151.
+
+**Backlog check before running**: the real `tavily_usage` ledger showed
+592/800 already used for 2026-10 (from the two prior backfill passes
+documented above) - 208 remaining, comfortably enough for all 151 in
+one run.
+
+**Backfill run** (`TAVILY_MONTHLY_REQUEST_BUDGET=800 python
+scripts/backfill_company_research.py --limit 160`, limit set above 151
+only as a safety margin, not because 151 was in doubt): **151 fetched,
+0 failed, 0 skipped**. Every one of the 151 got a real summary, 5 news
+items, and a funding/hiring signal (verified from the run's own log
+output, not assumed from the fetched count). Local `company_research`:
+**592 -> 743** (direct post-run query: `companies_total=743,
+company_research_total=743, missing_count=0`). `tavily_usage` for
+2026-10: **592 -> 743** (matches the 151 real calls spent, confirming
+the durable ledger tracked them 1:1).
+
+**Sync to Neon**, via the existing, unmodified
+`scripts/sync_company_research_to_demo.py` (`SOURCE_DATABASE_URL` =
+local, `NEON_DEMO_DATABASE_URL` = `.env.deploy`'s
+`TARGET_DATABASE_URL_DIRECT`), same mechanism as the 2026-10-10 sync
+entry above. A `--dry-run` first confirmed: 743 local companies have a
+snapshot, 738 exist in Neon, 738 will sync, and the same 5 companies
+not in Neon's `companies` table (`cibcbankusa`, `constantcontact`,
+`dropbox`, `kraken`, `samsungresearchamerica`) are skipped - expected,
+not a bug, per the investigation entry's own finding. Real run: **738
+companies synced, 0 errors**. Neon `company_research`: **592 -> 738**
+(direct post-sync query: `companies_total=738, company_research_total=738,
+missing_count=0` - every company that exists in Neon's `companies`
+table now has research).
+
+**No new dependency was needed** for this work - no changes to
+`requirements.txt`, `requirements-demo.txt`, or `frontend/package.json`.
+
+**Test suites, run in full after all of the above**: backend `pytest`
+**596 passed**, 0 failed; frontend `npm test` **122 passed** (19 test
+files), 0 failed.
+
+**Net result**: local Postgres and the Neon demo database are now both
+fully researched, each for exactly the set of companies it has in its
+own `companies` table (743 local, 738 Neon) - the only remaining gap is
+the pre-existing, separately-flagged 5-company companies-table
+replication gap, left untouched per the task's instructions.
