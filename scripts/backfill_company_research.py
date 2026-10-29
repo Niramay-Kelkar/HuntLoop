@@ -12,7 +12,7 @@ frequent polling), makes ONE Tavily search call and upserts the result
 into company_research.
 
 Credit budget: this Tavily account has a hard 1000 credits/month, and
-TAVILY_MONTHLY_REQUEST_BUDGET (env var, default 600) caps how many real
+TAVILY_MONTHLY_REQUEST_BUDGET (env var, default 800) caps how many real
 Tavily calls this script may make in a given CALENDAR MONTH - well under
 the hard cap, to leave headroom for company growth and manual testing
 outside this script. This is tracked durably in the `tavily_usage` table
@@ -61,7 +61,7 @@ from huntloop.settings import DATABASE_URL
 setup_logging()
 logger = logging.getLogger(__name__)
 
-DEFAULT_MONTHLY_BUDGET = 600
+DEFAULT_MONTHLY_BUDGET = 800
 RESEARCH_STALENESS_DAYS = 30
 
 
