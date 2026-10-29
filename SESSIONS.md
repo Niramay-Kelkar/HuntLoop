@@ -14040,3 +14040,107 @@ fully researched, each for exactly the set of companies it has in its
 own `companies` table (743 local, 738 Neon) - the only remaining gap is
 the pre-existing, separately-flagged 5-company companies-table
 replication gap, left untouched per the task's instructions.
+
+## 2026-10-28: Resolve 7 frontend Dependabot alerts (vite/vitest/launch-editor)
+
+GitHub's Security tab had 7 open Dependabot alerts in
+`frontend/package-lock.json`, all transitive devDependencies tagged
+"Development" (dev-server/test-runner tooling, never shipped in the
+production build): 3 in `launch-editor` (a Windows `fs.existsSync()`
+bypass, an editor-CLI-flag arbitrary-command-execution issue, a missing
+`%`-escaping issue in `escapeCmdArgs()`), 3 in `vite` (files outside
+`server.fs.allow` served on non-Windows, the first 4 bytes of files
+outside `server.fs` exposed via `?vite-wasm-instance`, cross-origin
+script execution through a custom middleware), and 1 in
+`@vitest/mocker` (a Windows backslash-traversal bypass of its redirect
+allowlist).
+
+**Confirmed genuinely transitive, not direct**: `frontend/package.json`
+has no `vite`/`vitest`/`launch-editor` devDependency literal other than
+`"vitest": "^4.1.11"` — `vite` comes in via `vitest` and
+`@vitejs/plugin-react`; `@vitest/mocker` comes in via `vitest`. **A real
+surprise found while investigating**: `launch-editor` isn't actually
+present in `node_modules` or `package-lock.json` at all (`npm ls
+launch-editor` → empty) — Vite 8's rolldown-based rewrite no longer
+depends on the external `launch-editor` npm package for its
+open-in-editor middleware, it's inlined/forked into Vite's own source.
+GitHub's advisory database still files those 3 `launch-editor` GHSA IDs
+against the `vite` *package* itself (the exact version range matches —
+`npm audit`'s "vite 8.2.0 - 8.2.2" entry lists all 3 launch-editor
+advisories plus Vite's own 3), since Vite's bundled copy carries the
+same vulnerable code — so fixing Vite's version fixes all 6
+vite+launch-editor alerts together, not 2 separate upgrades.
+
+**Fix**: bumped the one direct devDependency, `vitest`, from `^4.1.11`
+to `^4.1.12` (`frontend/package.json`) — a patch release, not a major
+bump, so the Vitest/RTL test setup needed no changes. `rm -rf
+node_modules package-lock.json && npm install` regenerated the lockfile
+cleanly (not hand-edited). Resulting resolved versions (`npm ls`):
+`vitest@4.1.12` → `@vitest/mocker@4.1.12` → `vite@8.3.5` (deduped across
+both `vitest` and `@vitejs/plugin-react@6.1.2`); `launch-editor` still
+absent, confirming it was never actually installed.
+
+**`npm audit` before** (7 relevant findings, plus pre-existing unrelated
+ones in `dompurify`/`next`/`undici`/`zod` not part of this task):
+```
+@vitest/mocker  <=4.1.11
+  Vitest: Code injection via unauthenticated manual mock registration - GHSA-qxg6-89mg-rqv8
+  Vitest: Windows backslash traversal bypasses the @vitest/mocker redirect allowlist fix - GHSA-xp26-3454-mjgp
+...
+vite  8.2.0 - 8.2.2
+  launch-editor: escapeCmdArgs() omits % escaping on Windows - GHSA-698v-4r3x-3vcv
+  launch-editor: Editor CLI flag misinterpretation causing arbitrary command execution for some editors - GHSA-r825-w8mm-5pxw
+  launch-editor: fs.existsSync() existence check can be bypassed on Windows - GHSA-587h-7wmj-h5pm
+  Vite: Cross origin script execution through Vite custom middleware - GHSA-9jrq-w75r-8gcw
+  Vite: Files outside server.fs.allow could be served when project paths match system paths on non-Windows machine - GHSA-rq7h-c2jc-7f22
+  Vite: First 4 bytes of files outside of server.fs setting is exposed by ?vite-wasm-instance - GHSA-vfpm-58rq-9qcg
+...
+7 vulnerabilities (2 moderate, 3 high, 2 critical)
+```
+
+**`npm audit` after**:
+```
+next  16.0.0 - 16.4.0
+Severity: critical
+Next.js: Unauthenticated Remote Code Execution in Image Optimization API when SVG files are used - GHSA-2464-fhr4-w9xw
+Next.js: Denial of Service in App Router using Server Actions - GHSA-p3m5-59mp-jv5r
+Next.js: Unauthenticated Remote Code Execution in `use cache` functions returning typed arrays - GHSA-673q-mjm6-r5xr
+fix available via `npm audit fix --force`
+Will install next@16.4.3, which is outside the stated dependency range
+node_modules/next
+
+1 critical severity vulnerability
+```
+All 7 target alerts (`vite`'s 6 + `@vitest/mocker`'s 1) are gone. The
+`dompurify`/`undici`/`zod` findings present before also disappeared on
+their own (transitive deps that updated within their existing semver
+ranges as a side effect of the lockfile regen) — not something this
+task asked for, noted as a bonus. The remaining `next` critical finding
+is pre-existing, unrelated to this task's 7 alerts (it needs a Next.js
+major-version bump outside the current `16.3.8` pin — not touched here,
+per the task's own scope), and was already present before this change.
+
+**Verified real, not just `npm audit`**: `next build` (Turbopack)
+compiled successfully, typechecked, and generated all 10 routes with no
+errors. `next dev` started cleanly (`Ready in ~1s`, no vite/vitest/
+rolldown/launch-editor errors) and served a real `GET /` → 307 (the
+app's normal `/` → `/dashboard` redirect) once given real Clerk keys in
+a throwaway, not-committed `.env.local` (the dev server's only error
+without them is the unrelated, pre-existing "Clerk keys are missing"
+message — a documented setup requirement per
+`frontend/.env.local.example`, not something this change caused); that
+throwaway `.env.local` was deleted immediately after the check, nothing
+left behind.
+
+**No new dependency was needed** — no changes to `requirements.txt`,
+`requirements-demo.txt`, or any other `frontend/package.json` entry
+besides the `vitest` version bump itself.
+
+**Test suites, run in full after the bump**: backend `pytest` **596
+passed**, 0 failed (same 1 pre-existing unrelated `StarletteDeprecationWarning`
+as every prior run); frontend `npm test` (now running on `vitest@4.1.12`)
+**122 passed** (19 test files), 0 failed.
+
+**Nothing required a breaking upgrade** — all 7 alerts resolved via one
+non-major `vitest` patch-version bump; no major-version jump to Vite 9,
+Vitest 5, or anything else was needed.
