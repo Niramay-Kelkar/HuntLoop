@@ -14144,3 +14144,56 @@ as every prior run); frontend `npm test` (now running on `vitest@4.1.12`)
 **Nothing required a breaking upgrade** — all 7 alerts resolved via one
 non-major `vitest` patch-version bump; no major-version jump to Vite 9,
 Vitest 5, or anything else was needed.
+
+### 2026-10-29: Resolve 3 Next.js Dependabot CVEs (16.3.8 → 16.4.3)
+
+Investigated 3 open Dependabot alerts on `next` (a direct, production
+dependency, unlike the dev-tooling `vitest` fix above — treated as
+investigation-first rather than a blind upgrade): #22 critical RCE in
+`use cache` functions returning typed arrays (GHSA-673q-mjm6-r5xr), #21
+critical unauthenticated RCE in the Image Optimization API with SVG
+files (GHSA-2464-fhr4-w9xw), #20 high DoS in App Router Server Actions
+(GHSA-p3m5-59mp-jv5r). **All 3 share the same vulnerable range
+(`>=16.0.0 <=16.4.0`) and the same fix version, `16.4.3`** — confirmed
+via `npm audit --json`, which also reports
+`fixAvailable.isSemVerMajor: false`. This was a same-major patch-line
+bump (16.3.8 → 16.4.3, the real `latest` dist-tag at the time), not the
+major jump the task worried about — `npm view next versions` showed
+only `16.4.0`/`16.4.1`/`16.4.2`/`16.4.3` exist between the two.
+**Checked this codebase against every breaking/default change listed in
+the official `v16.4.0` GitHub release notes before upgrading**: no
+`'use server'`/`'use cache'` directive anywhere in `frontend/` (so the
+Server Actions and Cache Components changes are moot), no interception
+routes, no catch-all routes, no custom `pageExtensions`/webpack config.
+**`next/image` / the SVG CVE specifically**: confirmed via
+`next.config.ts`'s own existing comment + `images.unoptimized: true`
+(set in an earlier session, `b47bc5f`, specifically because nothing in
+this app uses `next/image` or the Image Optimization API at all) that
+the vulnerable route was already dead code before this patch — the
+version bump closes the library-level finding Dependabot/`npm audit`
+still correctly flag regardless of that runtime mitigation.
+`eslint-config-next` bumped in lockstep (`16.3.8` → `16.4.3`, Next's own
+convention) — no other `package.json` entries changed.
+**Verified real, not just `npm audit`**: `next build` (Turbopack)
+compiled successfully, typechecked, and generated all 10 routes + the
+`proxy.ts` middleware bundle with no errors, on `Next.js 16.4.3`. A
+first `next dev` smoke check 500'd on `/jobs`/`/dashboard` — but that's
+the same pre-existing, unrelated "Clerk keys are missing from your
+environment" error as the vitest-fix session above (this dev machine
+has no `frontend/.env.local`, only the gitignored example); re-run with
+a throwaway `.env.local` populated from the real Clerk keys already in
+the root `.env` (deleted immediately after) got real 200s: `GET /` →
+307 to `/dashboard` (the app's normal redirect), `GET /jobs` → 200,
+`GET /dashboard` → 200, `GET /admin/feedback` (unauthenticated) → 307
+to Clerk sign-in, exactly as expected from `src/proxy.ts`'s own logic —
+nothing in that flow changed behavior under the new version.
+**Before/after `npm audit`**: before, 1 critical (`next`, the 3 CVEs
+above, range `16.0.0 - 16.4.0`); after, **0 vulnerabilities**.
+**Test suites, run in full after the bump**: backend `pytest` **596
+passed**, 0 failed, unaffected (frontend-only dependency change); frontend
+`npm test` **122 passed** (19 test files), 0 failed.
+No `requirements.txt`/`requirements-demo.txt` changes (backend
+untouched). Not investigated or touched: Next's own unrelated
+`createRouteMatcher` deprecation warning surfaced by `@clerk/nextjs`
+during the dev smoke check — a Clerk SDK notice about its own future
+major release, not a Next.js 16.4 concern, out of this task's scope.
