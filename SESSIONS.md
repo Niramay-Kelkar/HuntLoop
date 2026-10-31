@@ -14197,3 +14197,87 @@ untouched). Not investigated or touched: Next's own unrelated
 `createRouteMatcher` deprecation warning surfaced by `@clerk/nextjs`
 during the dev smoke check — a Clerk SDK notice about its own future
 major release, not a Next.js 16.4 concern, out of this task's scope.
+
+## 2026-10-30 — Refresh the Neon demo database
+
+**Did:** Refreshed the public demo database (`huntloop-demo-api.onrender.com`,
+Neon) with current local data. The snapshot was stale — `demo_meta.
+snapshot_date` was 2026-10-05 before this run. Confirmed migration state
+first: Neon was already at the repo's Alembic head (`c4d6e8f0a2b4`), not
+behind it — local itself is one migration behind the repo head
+(`a3b5c7d9e1f2`, missing the `knock_usage` table migration), a pre-existing,
+unrelated schema gap left untouched per "never touch local." Ran
+`scripts/deploy_demo_data.py` against the real Neon direct connection from
+inside the `app` Docker image (needed for the torch/sentence-transformers
+dependency `build_demo_dataset.py` requires).
+
+**Found and fixed a real bug in `build_demo_dataset.py`** along the way:
+`_force_clear_target()`'s hardcoded delete-order tuple never included
+`resume_ats_reports` (added later by migration `b9c1d3e5f7a2`, after this
+list was last updated), which has a non-cascading FK to `resume_versions.id`
+— the run failed with a `ForeignKeyViolation` deleting `resume_versions`
+while a leftover Neon-side `resume_ats_reports` row still referenced it.
+Fixed by inserting `resume_ats_reports` into the delete order immediately
+before `resume_versions`. Branch `fix/demo-dataset-force-clear-resume-ats-reports`,
+commit `b4c0a5d`, pushed (no PR, per the task's instructions).
+
+**Hit real Docker/host infrastructure friction, unrelated to the fix
+above**: the `app` image rebuild (needed to pick up the fix, no live
+volume mount for `scripts/`) first failed with a transient-looking
+`[Errno 5] Input/output error` during `pip install`. Investigating found
+the Docker daemon itself had gone unresponsive (`docker ps` hung
+indefinitely) with two duplicate `com.docker.backend services` processes
+running — traced after a hard-kill/relaunch of Docker Desktop and a
+second build attempt (which got further, into package installation, then
+hit the same I/O error) to the real root cause: host disk at 98% full
+(6.2GB free on a 233GB volume). Docker's own reclaimable space
+(~2.2GB via `docker builder prune`/`docker image prune`) didn't move host
+free space at all (Docker Desktop's VM disk file doesn't shrink back on
+prune). Cleared `~/Library/Caches` (8.7GB of regenerable app caches —
+Codex, Playwright's Chromium, VS Code updater, Chrome, Homebrew, pip,
+etc.) plus a stale `~/Library/Application Support/com.docker.install`
+leftover (2.1GB), freeing host space 5.6GB → 16GB. The rebuild then
+succeeded cleanly.
+
+**Before → after Neon counts** (direct SQLAlchemy queries, not psql —
+not available on this machine):
+
+| table | before | after |
+|---|---|---|
+| companies | 738 | 738 |
+| job_postings | 19,294 | 19,690 |
+| job_locations | 36,016 | 36,775 |
+| job_metadata | 19,293 | 19,689 |
+| company_research | 738 | 738 (1:1 with companies, both before/after) |
+| feedback | 12 | 12 (unchanged; ids 1-12 confirmed intact/readable) |
+| knock_usage | 1 | 1 (unchanged — not touched by the rebuild at all) |
+| tavily_usage | 0 | 0 (unchanged) |
+| demo_meta.snapshot_date | 2026-10-05 (stale) | 2026-10-30 |
+
+Local's real current counts for comparison: 743 companies, 168,374
+job_postings, 248,040 job_locations, 168,330 job_metadata — Neon stays at
+near-full company parity (738/743) with a capped/sampled subset of
+postings per company by design (`PER_COMPANY_CAP = 40`), unchanged from
+how the demo dataset has always worked.
+
+**Live-checked the real running demo**: `GET /jobs?limit=3` and
+`GET /dashboard/stats` against `https://huntloop-demo-api.onrender.com`
+both returned 200 with counts matching the refreshed Neon data exactly
+(`total: 19690`, `total_companies: 738`); `GET /jobs/{id}` for a real
+OpenAI posting returned a populated `company_research` block with real
+Tavily-sourced summary/news. **Could not visually confirm the Vercel
+frontend itself renders this correctly** — no browser-automation tool was
+available in this session, and a plain content fetch of
+`huntloop-demo.vercel.app/dashboard` doesn't execute the client-side JS
+that fetches dashboard stats via TanStack Query, so it came back with nav
+chrome but no stats widgets (inconclusive, not a confirmed failure). This
+is a real gap in this session's verification, not a claimed pass.
+
+**Decided:** No Render/Vercel env vars or dashboards were touched, per
+the task's constraint — only the Neon database itself and the one
+Docker-image-rebuild-triggering code fix.
+
+**Next:** A follow-up session with real browser access should visually
+confirm the dashboard and a job-detail page (incl. the company research
+card) render correctly against the refreshed data — this session only
+confirmed the underlying API responses, not the rendered frontend.

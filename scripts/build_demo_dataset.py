@@ -483,6 +483,7 @@ def _force_clear_target(target_session) -> None:
         "job_postings",
         "sponsor_fiscal_year_aggregates",
         "sponsor_overall_aggregates",
+        "resume_ats_reports",
         "resume_versions",
         "job_applications",
         "demo_meta",
