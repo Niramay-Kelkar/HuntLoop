@@ -14281,3 +14281,66 @@ Docker-image-rebuild-triggering code fix.
 confirm the dashboard and a job-detail page (incl. the company research
 card) render correctly against the refreshed data — this session only
 confirmed the underlying API responses, not the rendered frontend.
+
+## 2026-11-01 — Investigate the local/Neon knock_usage migration gap
+
+The 2026-10-30 Neon demo refresh entry above claimed local has an
+unrelated, deliberately-untouched one-migration gap (missing
+`knock_usage`). This was flagged as contradicting the project's own
+history: the Knock-notification-orchestration feature (which adds
+`knock_usage` via migration `c4d6e8f0a2b4`) was merged to `master` on
+2026-10-12 (commit `1a7630e`, PR #74), and Neon has been at that same
+head revision since at least the 2026-10-30 refresh. This session
+investigated with real queries on both sides — no `alembic upgrade`/
+`downgrade`/`stamp` run against either database, no table modified.
+
+**Alembic current:**
+- Local (`DATABASE_URL` in `.env`): `a3b5c7d9e1f2`.
+- Neon (`TARGET_DATABASE_URL_DIRECT` in `.env.deploy`): `c4d6e8f0a2b4 (head)`.
+
+**Alembic history:** `c4d6e8f0a2b4` ("add knock_usage table"), parent
+`a3b5c7d9e1f2`, is exactly the migration that creates `knock_usage` — the
+one revision separating the two stamps above. Per alembic's own
+bookkeeping, local is stamped one migration behind head (missing exactly
+this one); Neon is stamped at head (has it).
+
+**Direct SQL, independent of alembic's bookkeeping** (`to_regclass`/
+`count(*)`/`information_schema.columns` run directly against each
+database via SQLAlchemy, not through alembic):
+- Local: `to_regclass('public.knock_usage')` → `NULL` — the table
+  genuinely does not exist. `alembic_version` raw contents:
+  `[('a3b5c7d9e1f2',)]`.
+- Neon: `to_regclass('public.knock_usage')` → `knock_usage` — the table
+  exists, `SELECT count(*)` → `1` row, columns
+  `id/day/triggers_sent/created_at/updated_at` match the migration.
+  `alembic_version` raw contents: `[('c4d6e8f0a2b4',)]`.
+
+**Conclusion: this is a REAL schema gap, not an alembic stamp
+mismatch — and it runs in the direction already reported, local
+missing it, not Neon.** Alembic's version-table bookkeeping is accurate
+on both sides; it isn't lying or drifted from reality on either database
+— the physical schema state and the stamped revision agree everywhere
+checked.
+
+**Why the "applied to local 2026-10-12, pushed to Neon 2026-10-13"
+history doesn't hold up**: `git log` confirms the migration *file* was
+merged to `master` on 2026-10-12 (PR #74) — but merging a migration file
+into the repo is not the same action as running it against a real
+database, and nothing in `git log` or SESSIONS.md between 2026-10-12 and
+2026-10-30 shows an `alembic upgrade head` ever being run against local,
+or any Neon-specific migration/deploy activity on 2026-10-13 specifically
+— no commits, no SESSIONS.md entries in that window at all. The real
+mechanism that got Neon onto this revision is `scripts/
+deploy_demo_data.py`, which unconditionally runs `alembic upgrade head`
+against `TARGET_DATABASE_URL` as its first step on every single refresh
+run (`scripts/deploy_demo_data.py:113-122`) — so Neon reaching head is an
+automatic side effect of any demo-refresh run against it, not evidence of
+a deliberate one-off migration push on a specific date. Local has no
+equivalent auto-upgrade step and was most likely simply never
+`alembic upgrade head`'d after this migration was merged.
+
+**Not fixed in this session, by design** — this was diagnosis only, per
+the task's explicit instruction not to apply any alembic upgrade/
+downgrade/stamp or modify any table. The actual fix (presumably
+`alembic upgrade head` against local, direct connection, when convenient)
+is left for a deliberate follow-up decision.
