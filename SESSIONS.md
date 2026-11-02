@@ -14344,3 +14344,252 @@ the task's explicit instruction not to apply any alembic upgrade/
 downgrade/stamp or modify any table. The actual fix (presumably
 `alembic upgrade head` against local, direct connection, when convenient)
 is left for a deliberate follow-up decision.
+
+## 2026-11-02 — Docker disk cleanup investigation on the Intel Mac (read-only, nothing deleted)
+
+The dev machine's Data volume was 99% full (233 GiB total, 209 GiB used,
+3.3 GiB free), making the machine slow. An unrelated ClickHouse test
+image/container had already been removed before this session, taking
+free space from 1.0 GiB to 3.3 GiB. This session is a read-only
+investigation into what else is consuming space and what would be safe
+to remove later — **nothing was deleted, stopped, or modified**; no
+`docker system/image/volume prune` of any kind was run.
+
+**Running containers, confirmed untouched**: `huntloop-db-1`
+(pgvector/pgvector:pg18, 5433), `huntloop-grafana-1`, `huntloop-prometheus-1`,
+`huntloop-pushgateway-1` — all `Up 3 days (healthy)`.
+
+### 1. Full image inventory + real unique sizes (via `docker system df -v`, not guessed)
+
+`docker system df` hung for the user before this session but ran fine
+here (~15s) once invoked directly, giving authoritative per-image
+SHARED/UNIQUE sizes — no need to diff layer digests manually, though that
+was also done as a cross-check (see below).
+
+| Image | ID | Created | Size | Unique | Used by |
+|---|---|---|---|---|---|
+| `huntloop-app:latest` | `53b180c7aa8f` | 8h ago (2026-11-02) | 9.2GB | **0B** (fully shared with `seed` + 2 dangling below) | none running |
+| `huntloop-seed:latest` | `e3277340342b` | 8h ago | 9.2GB | **0B** | `huntloop-seed-1` (exited 0) |
+| `<none>` | `99e3dd0326db` | 2 days ago | 9.2GB | **0B** | none |
+| `<none>` | `b1f687bf7488` | 2 days ago | 9.2GB | **0B** | none |
+| `<none>` | `84bc72f1922e` | 2 days ago | 9.2GB | **2.431GB** | none |
+| `<none>` | `991e69067f3c` | 2 weeks ago | 8.58GB | **0B\*** (see below) | none |
+| `<none>` | `c2f34e2c975d` | 2 weeks ago | 8.58GB | **0B\*** (see below) | none |
+| `huntloop-api:latest` | `bdda4189dda5` | 6 weeks ago (2026-09-16) | 8.33GB | **8.327GB** (shares nothing with current `app`/`seed`) | `huntloop-api-1` (exited 255, 4 days ago) |
+| `huntloop-frontend:latest` | `5dc9830cec9b` | 6 weeks ago | 902MB | 901.9MB | `huntloop-frontend-1` (exited 255, 4 days ago) |
+| `pgvector/pgvector:pg18` | `b551e63a5606` | 2 months ago | 445MB | 445.3MB | `huntloop-db-1` (running) |
+| `prom/prometheus:v2.55.1` | `899b369f202e` | — | 290MB | 287.3MB | running |
+| `grafana/grafana:11.3.0` | `761b48cb57a0` | — | 485MB | 485MB | running |
+| `prom/pushgateway:v1.10.0` | `1afb89f66bd4` | — | 23MB | 20.27MB | running |
+
+`docker system df` top-line summary: **Images 14 total / 33.11GB / only
+2.436GB flagged "reclaimable"** by Docker's own conservative heuristic —
+confirmed by manual `docker inspect ... RootFS.Layers` layer-digest
+diffing to be exactly `84bc72f1922e`'s 2.431GB unique chunk. Docker's
+heuristic does **not** flag `991e69067f3c`/`c2f34e2c975d` as reclaimable
+even though neither is tagged or used by any container, because of a
+real wrinkle found by the manual layer diff:
+
+**`991e69067f3c` and `c2f34e2c975d` are byte-identical to each other —
+all 9 layers match.** Each shows "0B unique" only because the *other
+one* still exists and references the same layers; this is a mutual-
+reference pair, not evidence they're each worthless to remove. Removing
+either one alone frees ~0B (the other still holds every layer); removing
+**both together** frees the full ~8.58GB. Likewise `99e3dd0326db` and
+`b1f687bf7488` are each fully layer-identical to the *current*
+`huntloop-app`/`huntloop-seed` (all 9 layers shared, confirmed via
+digest diff) — their own top 2 layers (the per-build `COPY . .` +
+`chown -R`) happen to be byte-identical across these particular builds
+too, not just the base/pip layers. `84bc72f1922e` shares the same
+6.768GB base+pip-install layers with current `app`/`seed` but has a
+*different* top-2-layer content (a different day's `COPY . .` snapshot,
+2.431GB instead of ~0B-different) — that 2.431GB is real, immediately
+reclaimable space regardless of what else is removed.
+
+**`huntloop-api` shares zero layers with current `app`/`seed`, or with
+either dangling pair** — confirmed via `docker inspect`
+`.RootFS.Layers` diff, not assumed from the size numbers alone. It's a
+fully independent, fully stale build (6 weeks old) whose full 8.33GB is
+real, unique, on-disk space. `git log --since=2026-09-16 -- Dockerfile
+requirements.txt` shows 4 commits touching those files since this image
+was built (Resend email alerts, Modal resume processing, Clerk admin
+auth, a SQLAlchemy version pin) — so this isn't just stale by date, the
+image is genuinely missing dependencies (`resend`, `modal`, `clerk-
+backend-api`) that current `requirements.txt` installs. If
+`huntloop-api-1` (currently exited, not running) were ever restarted
+from this exact image rather than rebuilt, it would be running
+materially outdated code.
+
+### 2. A build-cache pool outside the image accounting — the single biggest number found
+
+Not mentioned in the original brief, and not visible in the image table
+above: `docker buildx du` (buildx's own cache inspector, separate from
+`docker system df`'s "Images" line) shows **15.16GB of build cache, 16
+entries, 0 active, Docker's own tool reports all 15.16GB as
+"Reclaimable."** (`docker system df`'s one-line summary under-reports
+this as "1.216GB (reclaimable%)" for Build Cache — a known
+under-counting quirk of that summary row vs. `buildx du`'s fuller
+accounting; the per-entry `buildx du` table is the trustworthy number
+here.) Breakdown: one 6.65GB entry (the pip-install layer, cached from
+8 hours ago — matches today's `app`/`seed` rebuild), six 1.216GB entries
+(repeated `COPY . .`/`chown` layer snapshots from builds on different
+days), the rest sub-4KB bookkeeping entries. **This cache holds build
+*inputs*, not the images themselves or anything a running container
+reads — clearing it cannot affect `huntloop-db-1` or any other running
+service, only makes the next `docker compose build` slower (no layer
+reuse) rather than instant.** This was not touched (`docker builder
+prune` is a prune command and this pass ran none), but it's the largest
+single reclaimable pool found, larger than any one image.
+
+### 3. The three orphan volumes are all leftover ClickHouse test data, not HuntLoop data
+
+Each mounted read-only via `docker run --rm -v <vol>:/v:ro busybox ls/du/cat`,
+nothing written:
+
+- `a1560fb3...` (59.22MB per `docker system df -v`, 133MB per in-container
+  `du` of `/v/store` — the discrepancy is sparse/dedup accounting, not a
+  contradiction)
+- `f71d6876...` (368.9MB / 590MB `du of /v/store`)
+- `fc11b66e...` (130.8MB / 221MB `du of /v/store`)
+
+All three have the exact same top-level directory layout —
+`access/ data/ dynamic_user_defined_executable_functions/ flags/
+format_schemas/ metadata/ metadata_dropped/ preprocessed_configs/
+store/ tmp/ user_files/ uuid/` — which is ClickHouse server's own data
+directory structure, not anything HuntLoop ever writes. `data/` inside
+each contains ClickHouse's own test/system databases: `agg_test`,
+`encoding_test`, `param_test`, `tz_test`, one with an extra `repro406`,
+plus `system/` holding ClickHouse's internal log tables
+(`query_log`, `trace_log`, `part_log`, `crash_log`, etc.). The `status`
+file inside each reads `PID: 1 / Started at: 2026-10-29 .../ Revision:
+54517` — a ClickHouse server startup marker. All three were created
+2026-10-29, matching the already-removed ClickHouse test image/container
+from just before this session. **Confirmed: none of this is HuntLoop
+database content** — `huntloop_pgdata` (the real Postgres data) is a
+separate, correctly-named volume, untouched and unexamined here beyond
+confirming it still exists.
+
+### 4. What's driving `app`/`seed`/`api` to 8–9GB each
+
+All three build from the same root `Dockerfile` (`python:3.13-slim` ->
+`COPY requirements.txt .` -> `pip install -r requirements.txt` ->
+`COPY . .` -> `groupadd/useradd/chown -R`). Ran inside the actual
+`huntloop-app:latest` container (read-only `du`, no image modified):
+
+- `site-packages/nvidia/` — **3.0GB**
+- `site-packages/torch/` — **1.2GB**
+- `site-packages/triton/` — **999MB**
+- `site-packages/cuda/` — 27MB
+
+**~5.2GB of the 6.65GB `pip install` layer is CUDA/GPU support that this
+project never uses.** `requirements.txt` pins `sentence-transformers==6.0.0`
+(no explicit `torch` pin), and a bare `pip install` on Linux resolves
+`sentence-transformers`'s `torch` dependency to the default PyPI wheel,
+which bundles full CUDA — even though CLAUDE.md is explicit everywhere
+that this project's embedding/skills-matching stack is CPU-only by
+design (this Intel Mac's own local `.venv` can't even run torch at all,
+per CLAUDE.md, so GPU support here is pure dead weight in every
+environment this project actually runs in).
+
+The remaining non-pip contributor is the `COPY . .` layer (1.22GB on the
+3 most recent app/seed-generation builds, 775–885MB on the 2 older
+generations) plus an **equally-sized `chown -R` layer on top of it** —
+confirmed via `docker history --no-trunc`, each `COPY . .` layer is
+immediately followed by a same-size `RUN chown -R` layer, because
+`chown -R` on every file forces a full copy-up of the whole tree in
+overlayfs, not just a metadata patch. Traced the `COPY . .` size to its
+real source: root `.dockerignore` excludes `.venv/` (833MB) and
+`data/raw/` (1.0GB, the big one) correctly, but **does not exclude
+`frontend/` (1.1GB, almost entirely `frontend/node_modules/` at 564MB)
+or `.cache/` (87MB, `.cache/huggingface/`)** — neither `app`, `seed`,
+nor `api` ever needs the Next.js frontend source (it builds from its own
+separate `frontend/Dockerfile` + `frontend/.dockerignore`, which does
+correctly exclude its own `node_modules`/`.next` — that `.dockerignore`
+only applies to the `frontend/` build context, not the root one). This
+fully accounts for the ~1.1–1.2GB `COPY . .` size.
+
+### 5. Proposed Dockerfile slimming (not applied — report only)
+
+1. **Install CPU-only torch before `sentence-transformers` pulls its
+   own.** E.g. `pip install --no-cache-dir torch --index-url
+   https://download.pytorch.org/whl/cpu` as its own `RUN` line before
+   `pip install -r requirements.txt`, or an equivalent pip constraint.
+   **Expected impact: ~4GB smaller per image** (removes the 3.0GB
+   `nvidia/` + 999MB `triton/` + 27MB `cuda/` entirely; the CPU-only
+   torch wheel itself is also smaller than the CUDA build). Zero
+   functional risk — nothing in this codebase uses or can use a GPU.
+2. **Add `frontend/` and `.cache/` to the root `.dockerignore`.**
+   **Expected impact: ~2.2–2.4GB smaller per image** (the `COPY . .`
+   layer shrinks by ~1.1–1.2GB, and the following `chown -R` layer
+   shrinks by the same amount again, since it currently duplicates
+   whatever `COPY` brought in). Zero functional risk — `app`/`seed`/
+   `api` never read frontend source or the local HF cache dir.
+3. **Replace the separate `COPY . .` + `RUN chown -R ...` with a single
+   `COPY --chown=huntloop:huntloop . .`.** Docker's `COPY --chown` sets
+   ownership during the copy itself instead of as a second full-tree
+   pass, collapsing two layers into one. **Expected impact: removes
+   whatever the `chown -R` layer still costs after fix #2** (roughly
+   another ~70–100MB at that point, more before #2 is applied) — small
+   in isolation but free and correct regardless of the other two fixes.
+4. **(Secondary, more invasive — not proposed as a first change)**
+   `api` only serves HTTP; it never scrapes. A leaner `requirements-
+   api.txt` dropping `scrapy`/`playwright`/`pandas`/`openpyxl`/
+   `geonamescache`/`scikit-learn` (mirroring the existing
+   `requirements-demo.txt` precedent for the public demo image) could
+   shave further hundreds of MB to low-GB, but needs a real audit of
+   which modules `huntloop.api.*` transitively imports first — proposed
+   as a follow-up investigation, not bundled into this pass.
+   Combined expected impact of fixes 1–3 alone: roughly **9.2GB →
+   ~2.7–3GB per image generation**, a ~68–70% reduction, with no
+   behavior change.
+
+### 6. Clean-rebuild confirmation
+
+Did **not** run a live `docker compose build` in this session — with
+only 3.3GB free on the host and the `pip install` layer alone needing
+room for ~6.65GB of torch/CUDA wheels mid-build (on top of whatever
+`pip`'s own download cache needs), an actual fresh rebuild attempt right
+now risks running the host out of disk mid-build, which is a worse
+outcome than not confirming this live. Confirmed instead by evidence
+already in hand, without executing anything new:
+- `huntloop-app`/`huntloop-seed` were built **8 hours before this
+  session**, from the current `Dockerfile` + `requirements.txt`, under
+  this same low-disk host — i.e., a clean `docker compose build` already
+  demonstrably succeeded today, live, not hypothetically.
+- The `Dockerfile` itself has no missing build context, no `COPY
+  --from=` referencing another image/stage, and no secrets — nothing
+  about its structure is a plausible rebuild blocker.
+- `api` uses the identical `Dockerfile` (`build: .`) as `app`/`seed`,
+  so the same evidence applies to it; its only staleness is "not
+  rebuilt since 2026-09-16," not "cannot be rebuilt."
+- **Untagged/dangling images already exist today, independent of
+  anything this session did**: the 5 `<none>` images in the table
+  above were already dangling before this investigation started (ages
+  2 days / 2 weeks) — this is pre-existing, ordinary rebuild churn
+  (each `docker compose build` that changes `COPY . .`'s content
+  leaves the previous build's top layers dangling once the tag moves),
+  not something this session created.
+
+### 7. Removal candidate list (for a future, separate "go" pass — nothing removed here)
+
+| Target | Size | Verdict |
+|---|---|---|
+| `<none>` `84bc72f1922e` | 2.431GB unique | **Safe to remove** — confirmed-unique layers, not shared with any tagged image or running container. |
+| `<none>` `991e69067f3c` **and** `<none>` `c2f34e2c975d` (remove **both together**) | 8.58GB (only if both go — removing just one frees ~0B) | **Safe to remove, as a pair** — byte-identical to each other, shared with nothing else; a 2-weeks-old untagged build generation. |
+| `<none>` `99e3dd0326db`, `<none>` `b1f687bf7488` | 0B unique each | **Needs more info / low value** — fully layer-identical to current tagged `huntloop-app`/`huntloop-seed`; removing them frees ~0B *as long as* `app`/`seed` stay. Safe to remove for tidiness, but there is no space payoff unless `app`/`seed` are also eventually rebuilt/retagged, at which point re-check whether these still share layers with whatever replaces them. |
+| `huntloop-api:latest` `bdda4189dda5` | 8.327GB unique | **Needs more info** — this is the *only* `api` image and its container, though exited, is this project's real API image; removing it without first rebuilding a replacement would leave `api` with no image to restart from. Safe to remove only *after* a fresh `docker compose build api` succeeds and is confirmed working (not done in this session — see §6 on why a live rebuild wasn't attempted now, given free space). |
+| Docker buildx build cache (16 entries) | 15.16GB reclaimable per `docker buildx du` | **Safe to reclaim via `docker builder prune`** (not run here) — holds build inputs only, not images or anything a running container reads; the only cost of clearing it is a slower next build (no cache hits), never data loss. Largest single number found in this investigation. |
+| Orphan volume `a1560fb3...` | 59.22MB | **Safe to remove** — confirmed ClickHouse test data (database `agg_test`/`encoding_test`/`param_test`/`tz_test`, `system/` log tables), unrelated to HuntLoop, used by no container. |
+| Orphan volume `f71d6876...` | 368.9MB | **Safe to remove** — same ClickHouse test-data signature, plus a `repro406` test database. |
+| Orphan volume `fc11b66e...` | 130.8MB | **Safe to remove** — same ClickHouse test-data signature. |
+| `huntloop-frontend:latest`, `pgvector/pgvector:pg18`, `prom/*`, `grafana/*` | — | **Not a candidate** — each is either actively running/healthy or the sole image behind an exited-but-intact container with no newer build to replace it; out of scope for this pass. |
+| `huntloop_pgdata`, `huntloop_grafana_data`, `huntloop_prometheus_data`, `huntloop_caddy_data` | — | **Never touch** — real data behind running/healthy services, per the task's explicit rule. |
+
+Total identified-safe-right-now (no rebuild needed first): ~2.43GB
+(image) + ~8.58GB (image pair) + ~15.16GB (build cache) + ~0.56GB
+(3 orphan volumes) ≈ **~26.7GB**, before even considering the stale
+`huntloop-api` (8.33GB, needs a rebuild first) or the Dockerfile
+slimming in §5 (which would shrink every *future* image generation by
+an estimated ~6.2–6.4GB each). Nothing in this list was removed —
+this is the candidate list for the user's own review and explicit
+go-ahead before any deletion.
