@@ -14833,3 +14833,102 @@ no `GROQ_API_KEY`, frontend on 3010), by driving the page in a browser:**
 **Tests:** 7 new cases for `atsReportUnavailableMessage` in
 `frontend/src/lib/api.test.ts`. Frontend suite: **19 files, 129 tests, all
 passing** (was 122). `npx tsc --noEmit` clean.
+
+---
+
+## 2026-11-07 — Modal integration groundwork: investigation before Phase B
+
+Investigation and design input only. No feature code, no dependency
+changes, no writes to Neon or any live data. The only repo change is this
+entry.
+
+**Headline finding: the task's premise ("nothing for Modal exists yet")
+is wrong.** Four of the five planned scope items are already built and
+on `master`, across three commits (`136eafb` "Move resume parsing and
+embedding to Modal with a local fallback", `04c9592` "Add a Grafana
+dashboard tracking Modal resume-processing usage", `24e7ce6` "Send email
+alerts … when usage budgets get close to their limit"):
+- (a) resume parsing + embedding on Modal — `src/huntloop/modal_resume_processing.py`
+  (329 lines) and `src/huntloop/modal_resume_functions.py`, called from
+  `huntloop.api.routers.resumes.upload_resume` / `activate_resume`.
+- (c) the invocation ledger — `modal_usage` table
+  (`huntloop.db_models.ModalUsage`, migration `b9c1d3e5f7a2`),
+  `_reserve_invocation_slot()` with `SELECT … FOR UPDATE`.
+- (d) the Grafana panel — a whole dashboard,
+  `observability/grafana/provisioning/dashboards/huntloop-modal-resume.json`
+  (uid `huntloop-modal-resume`, 4 panels), fed by
+  `src/huntloop/modal_metrics.py`.
+- (e) credentials as env vars — `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` in
+  `.env.example` (lines 145-146), `modal>=1.5.0,<2` in both
+  `requirements.txt` and `requirements-demo.txt`, `modal` 1.6.1 installed
+  in `.venv`.
+
+**Only (b), the async Resume Deep-Dive, is genuinely unbuilt** — and the
+pattern it was supposed to copy does not fully exist either.
+
+**Key findings per question:**
+1. *Resume path.* `POST /resumes/upload` → `save_uploaded_pdf()` →
+   `process_resume()` (Modal, falling back to `extract_text()` +
+   `embed_text()` in-process) → one `resume_versions` insert.
+   `PATCH /{id}/activate` → `embed_resume_text()` only when
+   `embedding IS NULL`. Heavy: the sentence-transformers model load and
+   encode. Cheap: pdfplumber extraction, the DB writes, the hashing.
+   On the demo, `requirements-demo.txt` deliberately ships pdfplumber but
+   **no sentence-transformers/torch**, and `render.yaml` sets no Modal
+   token — but neither matters, because `huntloop.api.main` only mounts
+   `resumes.unsafe_router` when `DEMO_MODE` is off, so upload/activate
+   are simply **404 on the demo**. The Modal path has never actually run
+   there.
+2. *Async pattern.* It is a **202 + out-of-process batch + no polling**,
+   not 202/background/poll. `POST /feedback` returns 202 with the row id;
+   the real LLM work is `scripts/triage_feedback.py` on a 300s launchd
+   interval; `BackgroundTasks` is used only for the Resend alert. There
+   is **no poll-by-id endpoint anywhere in the codebase** (only
+   `GET /feedback/public`, human-gated via `scripts/review_feedback.py`),
+   and **zero `refetchInterval` in the entire frontend**. Deep-Dive would
+   be inventing the poll half, not copying it. The closest real analogue
+   is `GET /resumes/active/ats-report` — synchronous, cached per resume
+   version in `resume_ats_reports`, with the 503 path fixed earlier today.
+3. *Tavily ledger.* `tavily_usage` + inline checks in
+   `scripts/backfill_company_research.py` (`_get_or_create_usage_row`,
+   `_record_request_spent`, re-read before every call, stops cleanly at
+   the cap). It has **no metrics module and no dedicated tests**. The
+   Modal ledger already improved on it (row lock, metrics, 17 tests in
+   `tests/test_modal_resume_processing.py`), so Modal is the better
+   reference now, not Tavily.
+4. *Observability.* There is **no `/metrics` endpoint** anywhere — every
+   metrics module pushes to the Pushgateway, and `PUSHGATEWAY_URL`
+   defaults to `localhost:9091` and is **not set in `render.yaml`**. So
+   every push from the Render demo API fails and logs one warning; the
+   Modal dashboard can only ever show locally-generated traffic. This is
+   the real gap behind (d), not the dashboard itself.
+5. *Config.* Keys are read with `os.getenv` at module import with a
+   fail-fast `raise RuntimeError` (`skills_matching.py:40`,
+   `resume_ats_report.py:50`, `company_research.py:47`); CI supplies
+   `dummy-key-for-ci` placeholders. Modal's two vars are already in
+   `.env.example` and in the real `.env`; the gap is `render.yaml`
+   (0 Modal references) and the CI env block. No `~/.modal.toml` exists,
+   so the local CLI has no stored profile — token env vars only.
+6. *Deep-Dive inputs.* `resume_versions.extracted_text`,
+   `job_postings.job_description`, and matched/missing skills from
+   `resume_skill_matches`, plus three existing prompt styles
+   (`skills_matching_router` Groq→Gemini, `resume_ats_report` Groq→Gemini,
+   `drafting` BYOK one-provider-no-failover). `render.yaml` defines **no
+   Groq or Gemini key**, so a server-side LLM call cannot run on the demo
+   at all — the Deep-Dive LLM call has to live in a Modal Secret, or be
+   BYOK, or the feature is local-only.
+7. *Baseline.* Backend **599 passed, 0 failed** (21.9s). Frontend
+   **19 files, 129 tests, 0 failed**.
+
+**Data safety:** every query resolved
+`postgresql+psycopg2://job_scraper:***@localhost:5432/jobsight` from
+`/Users/niramaykelkar/Desktop/HuntLoop/.env`, printed at runtime;
+`TARGET_DATABASE_URL` unset; pytest ran in its usual throwaway schema.
+Nothing was written to Neon, no live Render/Vercel URL was called at all,
+and no `modal` CLI command was run.
+
+Open design decisions are in the investigation report, not duplicated
+here; the short version is that Phase B's real forks are where the
+Deep-Dive LLM call runs (Modal Secret vs BYOK), whether to build the
+first poll endpoint in the codebase or reuse the cached-report shape, and
+whether to fix the Render→Pushgateway gap before adding more panels.
