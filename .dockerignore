@@ -15,3 +15,18 @@ dist/
 data/raw/
 data/resumes/
 logs/
+
+# Frontend build/dependency output. The root Dockerfile builds the backend
+# `app`/`seed`/`api` images only - none of them import anything from
+# frontend/, which is built by its own frontend/Dockerfile with its own
+# context. Excluding these is not cosmetic: together they were ~1.15GB of
+# the 1.22GB `COPY . .` layer, and because the context hash changed on
+# every `next build`, each nightly `docker compose run --build` wrote a
+# fresh ~1.2GB BuildKit cache entry. That filled this machine's disk and
+# crash-exited Docker Desktop three times in one week (2026-10-29,
+# 2026-11-02, 2026-11-07). frontend/src and the frontend config files are
+# deliberately still included - they're a few hundred KB and keeping the
+# directory partially present avoids surprising a future COPY.
+frontend/node_modules
+frontend/.next
+.cache/

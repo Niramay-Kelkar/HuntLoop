@@ -14593,3 +14593,77 @@ slimming in §5 (which would shrink every *future* image generation by
 an estimated ~6.2–6.4GB each). Nothing in this list was removed —
 this is the candidate list for the user's own review and explicit
 go-ahead before any deletion.
+
+---
+
+## 2026-11-07 — Exclude `frontend/` build output from the backend Docker build context
+
+**Why:** Docker Desktop crash-exited on this dev machine three times in one
+week (2026-10-29, 2026-11-02, 2026-11-07) after the host disk hit 100%. The
+third crash was root-caused for real rather than inferred: the nightly 3am
+`scripts/run_orchestrator_cron.sh` stage 1 (`docker compose run --build ...
+app python main.py`) was mid-`pip install` when the disk reached zero, taking
+the engine down (`no space left on device` -> `recovering from engine crash`
+-> `ExitBadState`, exit status 150) and, with it, the bundled `db`
+container's Postgres (`PANIC: could not fsync file
+"pg_logical/replorigin_checkpoint.tmp"`). `docker buildx du` then showed the
+accumulation mechanism precisely: **seven near-identical 1.216GB BuildKit
+cache entries, one per nightly build** (7d/6d/5d/5d/4d/2d/28h old), i.e.
+~1.2GB of pure waste per night regardless of whether anything meaningful
+changed. 15.16GB of build cache in total, all reclaimable.
+
+**Root cause:** the root `.dockerignore` excluded `.venv/`, `data/raw/`,
+`data/resumes/`, `logs/`, `.git/` — but **not `frontend/`** (1.1GB:
+`frontend/.next` 579MB + `frontend/node_modules` 564MB) or `.cache/` (87MB).
+The root `Dockerfile` builds the backend `app`/`seed`/`api` images (all three
+compose services use `build: .`), none of which import anything from
+`frontend/` — that has its own `frontend/Dockerfile` and its own context. So
+every nightly build copied ~1.15GB of Next.js dependency/build output into
+the backend image for no reason, and because `next build` changes the context
+hash, BuildKit wrote a fresh ~1.2GB cache entry each time.
+
+**Did:** Added `frontend/node_modules`, `frontend/.next`, and `.cache/` to
+the root `.dockerignore`, with a comment recording why. Purely additive —
+the existing 17 lines are byte-for-byte unchanged, nothing removed or
+reordered. Did NOT touch the torch/CUDA dependency itself (a separate,
+larger CPU-only-torch change, tracked separately).
+
+**Measured, for real, not estimated** — isolated via a throwaway
+`FROM scratch` + `COPY . .` probe Dockerfile built against the same context,
+so the context/layer size could be measured without paying for a 6.65GB
+`pip install`, plus a real `docker compose build api` afterwards:
+
+| | Build context transferred | `COPY . .` layer | `groupadd`/`chown -R` layer | Whole image |
+|---|---|---|---|---|
+| Before | **1.22GB** (40.2s) | **1.22GB** | **1.22GB** | 9.2GB |
+| After | **6.47MB** (0.3s) | **6.43MB** | **6.43MB** | **6.8GB** |
+
+The win is ~2.4GB per image, not ~1.2GB, because the copied tree is
+materialised **twice**: once by `COPY . .` and again by the following
+`RUN groupadd ... && chown -R huntloop:huntloop /app`, which rewrites every
+file it touches into a second layer. Context transfer time dropped from
+40.2s to 0.3s, so each nightly build is also meaningfully faster.
+
+**Verified the image genuinely works, not just that it built:** real
+`docker compose build api` succeeded, `huntloop-api-1` came up
+`Up (healthy)`, and live requests returned real data — `GET /health` ->
+`200 {"status":"ok"}`; `GET /jobs?limit=2` -> real iCIMS postings;
+`GET /dashboard/stats` -> `{"total_jobs":8277,"total_companies":389,...}`,
+matching the bundled `db`'s own row counts confirmed by direct `psql`.
+
+**Also done this session (machine housekeeping, no repo impact):** cleared
+the 15.16GB build cache, 4 dangling images from 3 old build generations
+(~4.9GB real unique data — the nominal 9.2GB each is misleading, they share
+8 of 10 layers including the 6.65GB pip layer), a stray `busybox:latest`,
+and the stale `huntloop-api`/`huntloop-frontend` images plus their exited
+containers. Free space 1.9GB -> 26.9GB. `huntloop-db-1` was restarted and
+**recovered cleanly on its own** (WAL replay, `database system is ready to
+accept connections`, all 8,277 postings / 389 companies intact) — no
+destructive recovery step was needed or taken. All four named volumes
+(`huntloop_pgdata`, `huntloop_grafana_data`, `huntloop_prometheus_data`,
+`huntloop_caddy_data`) untouched throughout.
+
+**Expected effect:** the ~1.2GB/night build-cache accrual that caused all
+three crashes this week should stop. Worth re-checking `docker buildx du`
+after a week of real nightly runs to confirm the cadence is actually broken
+rather than merely slowed.
