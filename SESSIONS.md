@@ -14667,3 +14667,114 @@ destructive recovery step was needed or taken. All four named volumes
 three crashes this week should stop. Worth re-checking `docker buildx du`
 after a week of real nightly runs to confirm the cadence is actually broken
 rather than merely slowed.
+
+## 2026-11-07 — Fix `GET /resumes/active/ats-report` returning a bare 500 on the demo API
+
+**Symptom:** the demo frontend's "ATS compatibility report" panel showed
+"the server is unreachable or returning an error" and never recovered on
+retry, while the rest of the `/resumes` page rendered fine. A direct hit
+confirmed it:
+
+```
+$ curl -s -w "\nHTTP %{http_code}\n" https://huntloop-demo-api.onrender.com/resumes/active/ats-report
+Internal Server Error
+HTTP 500
+```
+
+A bare `text/plain` body, not this API's structured `{"detail": ...}` — the
+signature of an unhandled exception reaching Starlette, not a deliberate
+error response.
+
+**Root cause (two facts that only break in combination):**
+
+1. `resume_ats_reports` on Neon was **empty** (confirmed by direct query:
+   `count = 0`), so every request took the cache-miss "compute now" path.
+   The active resume (id 4, v1, `uploaded_at` 2026-10-30 — the fictional
+   Jordan Alvarez resume) had never had a report generated for it. This is
+   downstream of `_force_clear_target()` in `build_demo_dataset.py`
+   deleting `resume_ats_reports` on every `--force` rebuild (added
+   2026-10-31 for the FK-safe-delete fix) with nothing ever repopulating
+   it — the clear is correct, the repopulate never existed.
+2. That compute path lazily imports `huntloop.resume_ats_report`, which
+   **raises `RuntimeError` at import time when `GROQ_API_KEY` is unset**
+   (the project-wide fail-fast convention). The demo API service has no
+   LLM provider keys at all — `render.yaml` defines neither
+   `GROQ_API_KEY` nor `GEMINI_API_KEY`, by design. The import was
+   unguarded, so that `RuntimeError` escaped the handler as an unhandled
+   exception.
+
+So the endpoint could never succeed on the demo deployment: no cached row
+to serve, and no way to generate one. Retrying was futile by construction,
+which matches the observed "does not recover on a manual retry click".
+
+Reproduced for real, not inferred — the exact exception, from the handler's
+own import, with `GROQ_API_KEY` blanked and the module dropped from
+`sys.modules`:
+
+```
+>       raise RuntimeError(
+E       RuntimeError: GROQ_API_KEY is not set. Copy .env.example to .env and fill in your Groq API key.
+src/huntloop/resume_ats_report.py:52: RuntimeError
+```
+
+**Fix, in two parts:**
+
+- `huntloop.api.routers.resumes.get_active_ats_report()` now guards the
+  lazy import (`RuntimeError`/`ImportError`) and returns a clean, structured
+  **503** — "An ATS report has not been generated for this resume yet, and
+  this deployment is not configured to generate one on demand." — instead
+  of leaking a 500. It also catches an unexpected raise out of
+  `generate_ats_report()` (whose own contract is to return `None`, never
+  raise) and folds it into the existing 502 path rather than a 500. No
+  resume version without a report can produce a 500 any more, regardless
+  of data state.
+- `scripts/build_demo_dataset.py` now generates and stores the ATS report
+  for the fictional resume **at dataset-build time**, inside
+  `_write_fictional_resume()` (so it re-runs on every `--force` rebuild,
+  which is exactly when `_force_clear_target()` wipes the table). This is
+  the only place it can happen for the demo: the builder runs on a dev
+  machine with a real `.env`, the demo API never has a key. Deliberately
+  non-fatal — a missing key or provider outage logs a warning and leaves
+  the row absent rather than failing the whole build, since the endpoint's
+  503 now covers that cleanly.
+
+**Scope of the bug:** this is NOT demo-only. Any deployment without
+`GROQ_API_KEY` 500s on this endpoint for any resume with no cached report.
+On a normally-configured instance (local dev, the self-hosted stack) the
+key is present, the import succeeds, and the endpoint has always worked —
+which is why local testing never caught it. The data half (`--force` wiping
+reports with nothing regenerating them) would equally hit a real resume
+after any rebuild.
+
+**Verification (real, before and after):**
+
+- Before: live endpoint `HTTP 500`, body `Internal Server Error`; the same
+  new test run against the pre-fix router fails with the `RuntimeError`
+  above.
+- After: that test returns `503` with a structured JSON `detail`.
+- The demo resume's report was backfilled against Neon (score 92, real
+  resume-specific feedback), and the live endpoint now returns
+  `HTTP 200` with the full report body. Note this backfill happened as a
+  side effect of the first local repro run, which was pointed at the live
+  Neon URL and committed the row it generated — benign and the intended
+  end state, but it was an unplanned write to the live demo database.
+- Backend suite: **599 passed, 0 failed** (3 new tests in
+  `tests/test_api_resume_ats_report.py`, 8/8 in that file). The 3
+  pre-existing `test_backfill_lock.py` failures from earlier sessions are
+  gone — that stray advisory-lock-holding connection is no longer around.
+- Render's own logs were **not** accessible from this session (no Render
+  CLI installed, no API token in the environment) — the local repro gives
+  the same exception the service would have logged, so nothing hinges on
+  them.
+
+**Known gap, deliberately not fixed here (frontend, out of scope):**
+`ErrorState` renders the same "the server is unreachable or returning an
+error" copy for any 5xx and intentionally never shows the response body, so
+a future resume version with no report will show that generic message
+rather than a tailored "not generated yet". Surfacing it properly needs a
+frontend contract change (a 200-with-`status` envelope, or special-casing
+503), which this branch leaves alone.
+
+**Separately, a direct Neon sanity recount** (not from an earlier report):
+`SELECT count(*) FROM job_postings` against Neon returns **19,690** —
+unchanged from the figure recorded after the 2026-10-30 refresh.

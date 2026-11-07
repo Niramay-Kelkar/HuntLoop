@@ -118,6 +118,7 @@ from huntloop.db_models import (  # noqa: E402
     JobPosting,
     JobSource,
     LcaDisclosure,
+    ResumeAtsReport,
     ResumeVersion,
     SponsorFiscalYearAggregate,
     SponsorOverallAggregate,
@@ -468,6 +469,59 @@ def _write_fictional_resume(target_session) -> None:
     target_session.add(resume)
     target_session.commit()
     logger.info(f"build_demo_dataset: fictional resume written ({len(clean_text(FICTIONAL_RESUME_TEXT))} cleaned chars).")
+    _write_fictional_resume_ats_report(target_session, resume)
+
+
+def _write_fictional_resume_ats_report(target_session, resume: ResumeVersion) -> None:
+    """Generate and store the ATS-compatibility report for the fictional
+    resume, here at build time rather than leaving the demo API to compute
+    it on first request.
+
+    This is not an optimization, it is the only place it CAN happen for
+    the demo: GET /resumes/active/ats-report computes on a cache miss by
+    calling huntloop.resume_ats_report, which needs GROQ_API_KEY - and
+    the demo API service deliberately has no LLM provider keys at all
+    (see render.yaml, which defines none). So an un-backfilled demo
+    database means that panel can never render, no matter how many times
+    a visitor retries. This script, by contrast, runs on a developer
+    machine with a real .env, so it can generate the report once and ship
+    it as data. `resume_ats_reports` is cleared by _force_clear_target(),
+    so this must re-run on every --force rebuild, which it does by
+    sitting in _write_fictional_resume().
+
+    Deliberately non-fatal: a provider outage or a missing key here
+    leaves the row absent and logs a warning rather than failing the
+    whole dataset build. The endpoint's own 503 path covers that case
+    cleanly, so a demo DB without this row is degraded, not broken."""
+    try:
+        from huntloop.resume_ats_report import generate_ats_report
+    except (RuntimeError, ImportError) as exc:
+        logger.warning(
+            f"build_demo_dataset: skipping the ATS report - no report generator available "
+            f"({type(exc).__name__}: {exc}). The demo's ATS panel will show "
+            f"'not generated yet' until this is re-run with GROQ_API_KEY set."
+        )
+        return
+
+    report = generate_ats_report(FICTIONAL_RESUME_TEXT)
+    if report is None:
+        logger.warning(
+            "build_demo_dataset: skipping the ATS report - every configured LLM provider "
+            "failed. Re-run this script (or just this step) to populate it."
+        )
+        return
+
+    target_session.add(
+        ResumeAtsReport(
+            resume_version_id=resume.id,
+            score=report["score"],
+            keyword_feedback=report["keyword_feedback"],
+            wording_feedback=report["wording_feedback"],
+            formatting_feedback=report["formatting_feedback"],
+        )
+    )
+    target_session.commit()
+    logger.info(f"build_demo_dataset: ATS report written for resume_version_id={resume.id} (score {report['score']}).")
 
 
 def _write_demo_meta(target_session, snapshot_date: date) -> None:
