@@ -14778,3 +14778,58 @@ frontend contract change (a 200-with-`status` envelope, or special-casing
 **Separately, a direct Neon sanity recount** (not from an earlier report):
 `SELECT count(*) FROM job_postings` against Neon returns **19,690** —
 unchanged from the figure recorded after the 2026-10-30 refresh.
+
+---
+
+## 2026-11-07 — Distinguish the ATS report's expected 503 from a real error (frontend)
+
+**Why:** earlier today the backend's `GET /resumes/active/ats-report`
+started returning a structured `503` with a clear `detail` when no report
+exists and the deployment can't generate one, instead of a bare `500`.
+The frontend never read the response body, so every 5xx rendered the same
+alarming "Couldn't load the ATS report / the server is unreachable or
+returning an error" + **Try again** — the exact gap the previous entry
+flagged as deliberately out of scope.
+
+**Did (frontend only, no backend/API change):**
+- `frontend/src/lib/api.ts` — new exported `atsReportUnavailableMessage(error)`.
+  Returns the backend's own `detail` string only when the error is an
+  `ApiError` with status `503` **and** its body parses as JSON with a
+  non-empty string `detail`; returns `null` for everything else (500, 502,
+  status-`null` network/timeout failures, a 503 whose body is a proxy's
+  HTML error page or any other shape, a non-`ApiError` throw).
+  `apiFetch` already captured the raw body in `ApiError.detail`, so no
+  change to the fetch layer was needed.
+- `frontend/src/app/resumes/page.tsx` — the ATS panel's single
+  `atsReport.isError` branch split in two. When
+  `atsReportUnavailableMessage` is non-null it renders a plain bordered
+  card: **"No ATS report yet for this resume"** plus the backend's own
+  sentence, with no ⚠ icon and no "Try again" (retrying a true
+  no-report-yet 503 cannot succeed). Otherwise the existing `ErrorState`
+  (generic copy + Try again) renders unchanged. Nothing else on the page
+  or in `ErrorState` was touched.
+
+**Verified for real, against a running API + `next dev` (API on 8010 with
+no `GROQ_API_KEY`, frontend on 3010), by driving the page in a browser:**
+- *503 case* — temporarily flipped `is_active` to resume version id 3 (no
+  `resume_ats_reports` row) via direct SQL, so nothing touched
+  `job_postings`. Live response: `HTTP 503`,
+  `{"detail":"An ATS report has not been generated for this resume yet, and this deployment is not configured to generate one on demand."}`.
+  Before: ⚠ "Couldn't load the ATS report / The server is unreachable or
+  returning an error. This is usually temporary." + Try again. After:
+  "No ATS report yet for this resume" + the backend's sentence, no icon,
+  no button.
+- *Success case* — restored id 6 active (cached report, score 85). Live
+  response `HTTP 200`; the panel renders `85 / 100 overall` with the
+  keyword/wording/formatting sections, unchanged.
+- *Real-error cases* — (a) API process killed → fetch rejects with status
+  `null`; (b) a stub serving `HTTP 500` `{"detail":"Internal Server Error"}`;
+  (c) a stub serving `HTTP 503` with an HTML body
+  (`<html><body>503 Service Unavailable</body></html>`). All three still
+  render the generic ⚠ error with **Try again**.
+- DB state confirmed restored afterwards: active version is id 6 again,
+  both `resume_ats_reports` rows untouched.
+
+**Tests:** 7 new cases for `atsReportUnavailableMessage` in
+`frontend/src/lib/api.test.ts`. Frontend suite: **19 files, 129 tests, all
+passing** (was 122). `npx tsc --noEmit` clean.

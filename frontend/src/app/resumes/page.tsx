@@ -3,7 +3,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 
-import { activateResume, getActiveAtsReport, getResumes, uploadResume } from "@/lib/api";
+import {
+  activateResume,
+  atsReportUnavailableMessage,
+  getActiveAtsReport,
+  getResumes,
+  uploadResume,
+} from "@/lib/api";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorState } from "@/components/ErrorState";
 import { useToast } from "@/components/Toast";
@@ -31,6 +37,10 @@ export default function ResumesPage() {
     queryFn: getActiveAtsReport,
     retry: false,
   });
+
+  // Non-null only for the backend's own structured "no report yet /
+  // can't generate one here" 503 - see atsReportUnavailableMessage.
+  const atsReportUnavailable = atsReportUnavailableMessage(atsReport.error);
 
   // A resume swap changes every job's live match_score (computed at
   // query time against whichever version is_active - see
@@ -248,7 +258,22 @@ export default function ResumesPage() {
             </div>
           )}
 
-          {atsReport.isError && (
+          {/* An expected, non-alarming state: the backend answered with
+              its structured 503 meaning no report exists for this
+              resume yet and this deployment can't generate one on
+              demand. Deliberately NOT ErrorState - no warning icon, no
+              "Try again", since retrying this cannot succeed. Any other
+              failure (500, 502, network, timeout, or an unrecognized
+              503 body) falls through to the generic retriable state
+              below. */}
+          {atsReport.isError && atsReportUnavailable !== null && (
+            <div className="flex flex-col gap-1.5 border border-border bg-surface-alt px-5 py-6">
+              <p className="text-sm font-semibold text-text">No ATS report yet for this resume</p>
+              <p className="text-sm leading-relaxed text-text-subtle">{atsReportUnavailable}</p>
+            </div>
+          )}
+
+          {atsReport.isError && atsReportUnavailable === null && (
             <ErrorState
               error={atsReport.error}
               onRetry={() => atsReport.refetch()}

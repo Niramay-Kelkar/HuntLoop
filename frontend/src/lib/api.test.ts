@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, getJob, getJobs, getLocations, uploadResume, updateApplicationStatus } from "./api";
+import {
+  ApiError,
+  atsReportUnavailableMessage,
+  getJob,
+  getJobs,
+  getLocations,
+  uploadResume,
+  updateApplicationStatus,
+} from "./api";
 
 /**
  * Covers the fetch-client functions actually worth testing: URL/query-param
@@ -155,5 +163,54 @@ describe("api client", () => {
     // apiFetch's default JSON header must NOT be present here - a manual
     // Content-Type would strip the multipart boundary the browser sets.
     expect(init.headers).toBeUndefined();
+  });
+});
+
+// atsReportUnavailableMessage draws the line between the ONE expected
+// failure of GET /resumes/active/ats-report (a structured 503 meaning
+// "no report yet, and this deployment can't generate one") and every
+// genuinely unexpected/retriable failure. The Resume page's ATS panel
+// renders a clean non-alarming state for the former and keeps the
+// generic "server unreachable" + Try again state for the latter.
+describe("atsReportUnavailableMessage", () => {
+  const NO_REPORT_DETAIL =
+    "An ATS report has not been generated for this resume yet, and this deployment " +
+    "is not configured to generate one on demand.";
+
+  it("returns the backend's own detail message for the structured 503", () => {
+    const err = new ApiError("GET /resumes/active/ats-report failed with 503", 503, JSON.stringify({ detail: NO_REPORT_DETAIL }));
+    expect(atsReportUnavailableMessage(err)).toBe(NO_REPORT_DETAIL);
+  });
+
+  it("returns null for a 500", () => {
+    const err = new ApiError("failed with 500", 500, JSON.stringify({ detail: "Internal Server Error" }));
+    expect(atsReportUnavailableMessage(err)).toBeNull();
+  });
+
+  it("returns null for a 502", () => {
+    const err = new ApiError("failed with 502", 502, JSON.stringify({ detail: "every provider failed" }));
+    expect(atsReportUnavailableMessage(err)).toBeNull();
+  });
+
+  it("returns null for an unreachable server (status null, no body)", () => {
+    expect(atsReportUnavailableMessage(new ApiError("Could not reach the server.", null))).toBeNull();
+  });
+
+  it("returns null for a 503 whose body is not JSON (a proxy error page)", () => {
+    const err = new ApiError("failed with 503", 503, "<html><body>503 Service Unavailable</body></html>");
+    expect(atsReportUnavailableMessage(err)).toBeNull();
+  });
+
+  it("returns null for a 503 whose JSON body has no string detail", () => {
+    expect(atsReportUnavailableMessage(new ApiError("x", 503, JSON.stringify({ error: "nope" })))).toBeNull();
+    expect(atsReportUnavailableMessage(new ApiError("x", 503, JSON.stringify({ detail: { msg: "nope" } })))).toBeNull();
+    expect(atsReportUnavailableMessage(new ApiError("x", 503, JSON.stringify({ detail: "   " })))).toBeNull();
+    expect(atsReportUnavailableMessage(new ApiError("x", 503, JSON.stringify("just a string")))).toBeNull();
+  });
+
+  it("returns null for a non-ApiError thrown value", () => {
+    expect(atsReportUnavailableMessage(new Error("boom"))).toBeNull();
+    expect(atsReportUnavailableMessage(null)).toBeNull();
+    expect(atsReportUnavailableMessage(undefined)).toBeNull();
   });
 });
