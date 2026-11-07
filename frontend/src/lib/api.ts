@@ -241,6 +241,36 @@ export function getActiveAtsReport(): Promise<AtsReportResponse> {
   return apiFetch<AtsReportResponse>("/resumes/active/ats-report");
 }
 
+/**
+ * Distinguishes the ONE expected failure of GET /resumes/active/ats-report
+ * - a structured 503 meaning "no report exists for this resume yet and
+ * this deployment cannot generate one on demand" (see
+ * huntloop.api.routers.resumes, which returns exactly that when
+ * huntloop.resume_ats_report can't be imported because no LLM provider
+ * key is configured, e.g. the public demo API) - from every genuinely
+ * unexpected one (500, 502, a network failure, a timeout).
+ *
+ * Returns the backend's own `detail` message when the error really is
+ * that 503, so the UI can show what the server actually said rather
+ * than a generic alarm; returns null otherwise, including for a 503
+ * whose body isn't the expected `{"detail": "..."}` JSON shape - that's
+ * an unknown 503 (a proxy's own error page, a load balancer, a wedged
+ * gateway) and really is retriable/unexpected.
+ */
+export function atsReportUnavailableMessage(error: unknown): string | null {
+  if (!(error instanceof ApiError) || error.status !== 503) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(error.detail);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const detail = (parsed as { detail?: unknown }).detail;
+  if (typeof detail !== "string" || detail.trim() === "") return null;
+  return detail.trim();
+}
+
 // POST /feedback (huntloop.api.routers.feedback) - public, no auth.
 // Returns 202 with the stored row's id/triage_status/status/is_public;
 // a 429 (rate-limited) or 400 (bad category/empty description) both
