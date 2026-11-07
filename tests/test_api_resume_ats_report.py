@@ -10,6 +10,8 @@ touches resume_versions.is_active, matched_skills, or missing_skills -
 there is nothing here for the skill-gap backfill or resumes.activate()
 to be disturbed by.
 """
+import sys
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -137,3 +139,60 @@ def test_losing_a_cache_write_race_serves_the_winners_row(api_client, db_session
     assert response.status_code == 200
     assert response.json()["score"] == 55
     assert db_session.query(ResumeAtsReport).count() == 1
+
+
+def test_returns_clean_503_when_the_report_generator_cannot_be_imported(
+    api_client, db_session, monkeypatch
+):
+    """The real 2026-11-07 demo bug: huntloop.resume_ats_report raises
+    RuntimeError at IMPORT time when GROQ_API_KEY is unset, and the demo
+    API deployment deliberately has no LLM provider keys (render.yaml
+    defines none). Unguarded, that escaped as a bare 500 "Internal
+    Server Error" with no JSON body on every request.
+
+    Reproduced faithfully rather than with a stub: the module is dropped
+    from sys.modules and GROQ_API_KEY blanked, so the handler's lazy
+    import genuinely re-executes the module and genuinely raises the same
+    RuntimeError the live service hit."""
+    _make_active_resume(db_session)
+    monkeypatch.setenv("GROQ_API_KEY", "")
+    monkeypatch.delitem(sys.modules, "huntloop.resume_ats_report", raising=False)
+
+    response = api_client.get("/resumes/active/ats-report")
+
+    assert response.status_code == 503
+    # Structured JSON the frontend can render - not Starlette's bare
+    # text/plain "Internal Server Error" body.
+    assert "not been generated" in response.json()["detail"]
+    # Nothing half-written on the way out.
+    assert db_session.query(ResumeAtsReport).count() == 0
+
+
+def test_returns_clean_503_when_the_generator_module_is_unavailable(api_client, db_session, monkeypatch):
+    """Same contract for an ImportError rather than a RuntimeError - e.g.
+    an image whose requirements genuinely lack the provider SDK."""
+    _make_active_resume(db_session)
+    monkeypatch.setitem(sys.modules, "huntloop.resume_ats_report", None)
+
+    response = api_client.get("/resumes/active/ats-report")
+
+    assert response.status_code == 503
+    assert db_session.query(ResumeAtsReport).count() == 0
+
+
+def test_an_unexpected_generator_exception_is_a_502_not_a_500(api_client, db_session, monkeypatch):
+    """generate_ats_report's contract is to return None rather than raise,
+    so a raise means something genuinely unexpected broke inside it. The
+    visitor should still get this endpoint's structured "no report" error
+    rather than a bare 500."""
+    _make_active_resume(db_session)
+
+    def boom(resume_text):
+        raise ValueError("provider SDK blew up in a way its own wrapper didn't catch")
+
+    monkeypatch.setattr(resume_ats_report, "generate_ats_report", boom)
+
+    response = api_client.get("/resumes/active/ats-report")
+
+    assert response.status_code == 502
+    assert db_session.query(ResumeAtsReport).count() == 0

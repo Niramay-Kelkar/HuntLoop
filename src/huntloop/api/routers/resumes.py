@@ -351,9 +351,44 @@ def get_active_ats_report(db: Session = Depends(get_db)) -> AtsReportResponse:
         # huntloop.api.main imports every router together - a module-level
         # import here would break importing the whole API in any
         # environment without that key set, not just this one endpoint.
-        from huntloop.resume_ats_report import generate_ats_report
+        #
+        # That same fail-fast is why this import is guarded rather than
+        # bare: on a deployment with no GROQ_API_KEY configured (the
+        # public demo API is exactly this - render.yaml deliberately
+        # defines no LLM provider keys), the import itself raises
+        # RuntimeError. Unguarded, that escaped the handler as an
+        # unhandled exception and Starlette turned it into a bare
+        # 500 "Internal Server Error" with no JSON body, on every single
+        # request, forever - a report can never be generated here, so
+        # the cache-miss path is the only path this deployment ever
+        # takes. Report generation being unconfigured is a deployment
+        # fact, not a server fault, so it gets a clean, structured 503
+        # the frontend can render instead.
+        try:
+            from huntloop.resume_ats_report import generate_ats_report
+        except (RuntimeError, ImportError) as exc:
+            logger.warning(
+                "ATS report requested but no report generator is available on this "
+                "deployment (%s: %s) - returning 503.",
+                type(exc).__name__,
+                exc,
+            )
+            raise HTTPException(
+                503,
+                "An ATS report has not been generated for this resume yet, and this "
+                "deployment is not configured to generate one on demand.",
+            ) from exc
 
-        report = generate_ats_report(resume.extracted_text)
+        try:
+            report = generate_ats_report(resume.extracted_text)
+        except Exception:
+            # generate_ats_report's own contract is to return None rather
+            # than raise on any provider failure, so reaching here means
+            # something genuinely unexpected broke inside it. Still not
+            # worth a bare 500 to the visitor: log the real traceback and
+            # report the same "no report available" outcome a None does.
+            logger.exception("generate_ats_report raised unexpectedly for resume_version_id=%s", resume.id)
+            report = None
         if report is None:
             raise HTTPException(
                 502, "Could not generate an ATS report right now - every configured LLM provider failed."
