@@ -371,6 +371,26 @@ services:
       # GRAFANA_ADMIN_PASSWORD in .env if you want something other than
       # the default.
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      # Connection details for the PostgreSQL datasource provisioned in
+      # observability/grafana/provisioning/datasources/datasource.yml
+      # (uid huntloop-postgres), which reads these rather than hardcoding
+      # anything - so no credential is ever committed. Defaults point at
+      # the real LOCAL system Postgres on the host: from inside this
+      # container, host.docker.internal is the host, exactly as the `api`
+      # service already reaches that same database (see its own
+      # DATABASE_URL note above).
+      #
+      # These feed Postgres-backed dashboard panels (currently
+      # huntloop-deep-dive.json) that read tables Prometheus knows
+      # nothing about - the modal_usage ledger and resume_deep_dives.
+      # Every provisioned query is a read-only SELECT; the role below
+      # does not need, and should not be given, write access.
+      HUNTLOOP_PG_HOST: ${HUNTLOOP_PG_HOST:-host.docker.internal}
+      HUNTLOOP_PG_PORT: ${HUNTLOOP_PG_PORT:-5432}
+      HUNTLOOP_PG_DATABASE: ${HUNTLOOP_PG_DATABASE:-jobsight}
+      HUNTLOOP_PG_USER: ${HUNTLOOP_PG_USER:-job_scraper}
+      HUNTLOOP_PG_PASSWORD: ${HUNTLOOP_PG_PASSWORD:-}
+      HUNTLOOP_PG_SSLMODE: ${HUNTLOOP_PG_SSLMODE:-disable}
     volumes:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana_data:/var/lib/grafana

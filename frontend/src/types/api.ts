@@ -285,3 +285,82 @@ export interface AdminFeedbackUpdateRequest {
   status?: FeedbackStatus;
   is_public?: boolean;
 }
+
+// ---------------------------------------------------------------------
+// Resume Deep-Dive (POST /jobs/{id}/deep-dive, GET /deep-dives/{id} -
+// huntloop.api.routers.deep_dive). Hand-mirrored from that router's
+// Pydantic schema, same as every other type here (no shared codegen -
+// a known, documented gap).
+// ---------------------------------------------------------------------
+
+// Mirrors huntloop.db_models.DeepDiveStatus. "done" and "failed" are the
+// two terminal states polling stops on.
+export type DeepDiveStatus = "pending" | "running" | "done" | "failed";
+
+export type DeepDiveFitRating = "strong" | "moderate" | "stretch";
+export type DeepDiveImportance = "high" | "medium" | "low";
+
+export interface DeepDiveStrength {
+  point: string;
+  resume_evidence: string;
+}
+
+export interface DeepDiveGap {
+  skill: string;
+  importance: DeepDiveImportance;
+  why_it_matters: string;
+  how_to_close: string;
+}
+
+export interface DeepDiveResumeEdit {
+  section: string;
+  suggestion: string;
+}
+
+/**
+ * The validated analysis payload, carrying its own `version` so a row
+ * written by an older prompt keeps rendering after a shape change.
+ *
+ * Every field is declared optional on purpose, and the panel reads all
+ * of them defensively: this is LLM-produced content that the backend
+ * normalizes and caps but does not model field-by-field (the API types
+ * it as a loose dict for exactly this reason), and rows persisted by an
+ * earlier version may legitimately be missing newer sections.
+ */
+export interface DeepDiveResult {
+  version?: string;
+  summary?: string;
+  fit_rating?: DeepDiveFitRating | string;
+  strengths?: DeepDiveStrength[];
+  gaps?: DeepDiveGap[];
+  resume_edits?: DeepDiveResumeEdit[];
+  interview_focus?: string[];
+  caveats?: string[];
+}
+
+export interface DeepDiveResponse {
+  id: number;
+  job_posting_id: number;
+  resume_version_id: number;
+  status: DeepDiveStatus;
+  // Populated only when status === "done".
+  result: DeepDiveResult | null;
+  // Short and sanitized server-side; populated only when status ===
+  // "failed". Safe to render as text.
+  error: string | null;
+  dispatched_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// The machine-readable `code` on a Deep-Dive error body
+// ({"detail": "...", "code": "..."}). Kept as a string union plus a
+// fallback so an unrecognized future code doesn't break the type.
+export type DeepDiveErrorCode =
+  | "job_not_found"
+  | "no_active_resume"
+  | "deep_dive_not_found"
+  | "modal_unavailable"
+  | "budget_exhausted"
+  | "rate_limited"
+  | (string & {});

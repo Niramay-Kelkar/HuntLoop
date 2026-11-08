@@ -63,3 +63,36 @@ services:
         sync: false
       - key: ADMIN_ALLOWED_EMAILS
         sync: false
+      # Required for the Resume Deep-Dive (POST /jobs/{id}/deep-dive,
+      # GET /deep-dives/{id} - huntloop.api.routers.deep_dive), which
+      # spawns a Modal function and polls it. sync: false, same
+      # reasoning as every secret above: Render prompts for these on the
+      # dashboard and NO VALUE IS EVER COMMITTED HERE.
+      #
+      # Create a DEDICATED Modal token for this deployment rather than
+      # reusing a local development one, so it can be revoked on its own
+      # (Modal dashboard -> Settings -> API Tokens, or
+      # `modal token new`). Both must be set together - either missing
+      # is treated as "Modal not configured", and the Deep-Dive endpoint
+      # then returns a clean 503 (code modal_unavailable) rather than
+      # falling back to anything, by design.
+      #
+      # NOTE: no GROQ_API_KEY/GEMINI_API_KEY is listed here, and none
+      # should be added for this feature. The Deep-Dive's LLM calls
+      # happen inside the Modal container, which reads its keys from the
+      # `huntloop-llm` Modal Secret - keeping every provider key out of
+      # this deployment's environment entirely, which is the main reason
+      # the feature is built this way. This demo API deliberately has no
+      # LLM provider keys at all.
+      - key: MODAL_TOKEN_ID
+        sync: false
+      - key: MODAL_TOKEN_SECRET
+        sync: false
+      # Optional, both with safe code-level defaults (5 and 10) - listed
+      # with a literal value rather than sync: false since neither is a
+      # secret and a public demo wants a tighter, explicit budget weight
+      # than a local dev box.
+      - key: MODAL_DEEP_DIVE_WEIGHT
+        value: "5"
+      - key: DEEP_DIVE_STALE_MINUTES
+        value: "10"

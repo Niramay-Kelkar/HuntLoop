@@ -12,3 +12,46 @@ datasources:
     url: http://prometheus:9090
     isDefault: true
     editable: false
+
+  # PostgreSQL, for dashboard panels that read application tables
+  # Prometheus knows nothing about - the modal_usage budget ledger and
+  # resume_deep_dives (see
+  # observability/grafana/provisioning/dashboards/huntloop-deep-dive.json).
+  # Those are rows in Postgres, not counters pushed to the Pushgateway,
+  # so there is no metric to query for "how many Deep-Dives are in each
+  # status right now" - the database itself is the source of truth.
+  #
+  # NO CREDENTIAL IS COMMITTED HERE. Every field below is an environment
+  # variable Grafana interpolates at provisioning time, set on the
+  # `grafana` service in docker-compose.yml, and defaulting to the real
+  # LOCAL system Postgres (host.docker.internal:5432 - from inside the
+  # container that is the host, the same way the `api` service reaches
+  # that database). Override HUNTLOOP_PG_* in .env to point it elsewhere.
+  #
+  # Read-only by intent: every provisioned panel query is a plain
+  # SELECT, and the role this connects as does not need write access.
+  # `editable: false` keeps the datasource itself from being edited in
+  # the UI, matching the Prometheus entry above.
+  #
+  # Pointing this at the live Neon demo database is DELIBERATELY NOT set
+  # up here - see docs/DEPLOY_DEMO.md's "Optional: a second Grafana
+  # datasource for Neon" section, which documents the dedicated
+  # read-only Postgres role to create first. It is documented, not
+  # created: adding a second datasource that could reach live data
+  # without that role existing is exactly the wrong default.
+  - name: HuntLoop Postgres
+    uid: huntloop-postgres
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: $HUNTLOOP_PG_HOST:$HUNTLOOP_PG_PORT
+    user: $HUNTLOOP_PG_USER
+    database: $HUNTLOOP_PG_DATABASE
+    isDefault: false
+    editable: false
+    secureJsonData:
+      password: $HUNTLOOP_PG_PASSWORD
+    jsonData:
+      database: $HUNTLOOP_PG_DATABASE
+      sslmode: $HUNTLOOP_PG_SSLMODE
+      postgresVersion: 1800
+      timescaledb: false

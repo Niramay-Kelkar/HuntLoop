@@ -40,8 +40,11 @@ def test_demo_mode_off_mounts_all_routes(api_client):
     # GET /admin/whoami) + GET /resumes/active/ats-report (huntloop.api.
     # routers.resumes, added for the resume ATS-report feature - mounted
     # on the safe `router`, unconditionally in both demo and non-demo
-    # mode, same as GET /resumes itself).
-    assert len(paths) == 18
+    # mode, same as GET /resumes itself) + the two Resume Deep-Dive
+    # routes (huntloop.api.routers.deep_dive - also mounted
+    # unconditionally in both modes, since it takes no upload and no
+    # caller-supplied key; see that module's docstring).
+    assert len(paths) == 20
     assert "/jobs/{job_id}/draft-answer" in paths
     assert "/resumes/upload" in paths
     assert "/resumes/{resume_id}/activate" in paths
@@ -51,6 +54,8 @@ def test_demo_mode_off_mounts_all_routes(api_client):
     assert "/admin/feedback" in paths
     assert "/admin/feedback/{feedback_id}" in paths
     assert "/admin/whoami" in paths
+    assert "/jobs/{job_id}/deep-dive" in paths
+    assert "/deep-dives/{deep_dive_id}" in paths
     assert "/demo-info" not in paths
 
 

@@ -5,6 +5,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { getJob } from "@/lib/api";
 import type { CompanyResearch } from "@/types/api";
+import { DeepDivePanel } from "@/components/DeepDivePanel";
 import { ErrorState } from "@/components/ErrorState";
 import { JobAssistantPanel } from "@/components/JobAssistantPanel";
 import { NotesEditor } from "@/components/NotesEditor";
@@ -182,6 +183,13 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
               )}
             </div>
           </div>
+
+          {/* Rendered in demo mode too, unlike JobAssistantPanel below -
+              the Deep-Dive endpoint takes no API key of the visitor's
+              and is mounted in both modes (see
+              huntloop.api.routers.deep_dive). Placed after the skills
+              card because it builds on the same matched/missing split. */}
+          <DeepDivePanel jobId={detail.id} />
 
           {!isDemoMode() && <JobAssistantPanel detail={detail} />}
 

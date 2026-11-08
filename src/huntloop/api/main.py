@@ -90,7 +90,19 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from huntloop.api.routers import admin, admin_feedback, dashboard, demo_info, drafting, feedback, health, jobs, resumes
+from huntloop.api.routers import (
+    admin,
+    admin_feedback,
+    dashboard,
+    deep_dive,
+    demo_info,
+    drafting,
+    feedback,
+    health,
+    jobs,
+    resumes,
+)
+from huntloop.api.routers.deep_dive import DeepDiveError, deep_dive_error_handler
 from huntloop.api.routers.drafting import _RateLimiter
 from huntloop.api.routers.resumes import MAX_UPLOAD_BYTES, MaxUploadSizeMiddleware
 from huntloop.api.trusted_client_ip import TrustedClientIPMiddleware
@@ -163,6 +175,20 @@ def create_app() -> FastAPI:
     # treatment as admin_feedback.router above. Used only by the frontend
     # nav to decide whether to render a link to /admin/feedback at all.
     app.include_router(admin.router)
+    # POST /jobs/{id}/deep-dive + GET /deep-dives/{id} - mounted
+    # unconditionally in BOTH modes, like feedback.router above and
+    # unlike drafting.router / resumes.unsafe_router below. It takes no
+    # file upload and no caller-supplied credential: the LLM keys for it
+    # live only in Modal's own `huntloop-llm` Secret, never in this
+    # process's environment, so there is nothing here that is unsafe to
+    # expose on the public demo. With no Modal tokens configured, every
+    # POST is simply a clean 503 (code modal_unavailable).
+    app.include_router(deep_dive.router)
+    # Lets huntloop.api.routers.deep_dive raise a status+detail+code from
+    # anywhere in its call stack and still render a flat
+    # {"detail": ..., "code": ...} body - see DeepDiveError's docstring
+    # for why a plain HTTPException can't express that shape.
+    app.add_exception_handler(DeepDiveError, deep_dive_error_handler)
 
     if demo_mode:
         app.include_router(demo_info.router)

@@ -532,6 +532,17 @@ def _write_demo_meta(target_session, snapshot_date: date) -> None:
 
 def _force_clear_target(target_session) -> None:
     for table in (
+        # Before job_postings AND resume_versions: resume_deep_dives has
+        # a NOT NULL foreign key to each of them. The ON DELETE CASCADE
+        # on both would in fact let Postgres clear these rows on its
+        # own, but relying on that would make the order of this tuple
+        # silently load-bearing in a way nothing here states - an
+        # explicit delete first keeps this list readable as what it
+        # claims to be (a foreign-key-safe teardown order) and keeps
+        # working if the cascade is ever tightened. The builder never
+        # GENERATES Deep-Dives - the demo ships none, and every run
+        # starts from the demo's own visitors pressing the button.
+        "resume_deep_dives",
         "job_locations",
         "job_metadata",
         "job_postings",

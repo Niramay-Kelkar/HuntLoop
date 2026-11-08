@@ -321,3 +321,91 @@ so this pipeline can never write back to it.
   wiring. If it does, confirm the service is actually being reached
   through Render's own URL (not some other path that bypasses Render's
   edge) and that `TRUSTED_PROXY_IPS` on Render is still `127.0.0.1`.
+
+---
+
+## Resume Deep-Dive: the manual setup it needs
+
+The Resume Deep-Dive (`POST /jobs/{id}/deep-dive`, `GET
+/deep-dives/{id}` — `huntloop.api.routers.deep_dive`) runs its LLM
+analysis inside a Modal function and is polled by the frontend. Three
+one-time manual steps are needed before it works on a deployment;
+without them the endpoint returns a clean, structured `503` with
+`"code": "modal_unavailable"` and the frontend panel says so, so nothing
+is broken in the meantime — the feature is simply unavailable.
+
+**1. Create the `huntloop-llm` Modal Secret.** This is where the LLM
+provider keys live, and the reason the whole feature is shaped this way:
+the demo API itself has no provider keys in its environment at all (see
+`render.yaml`), so no key ever reaches Render. The secret must be named
+exactly `huntloop-llm` and contain:
+
+| Variable | Required | Notes |
+|---|---|---|
+| `GROQ_API_KEY` | yes | Both Groq stages (`gpt-oss-120b`, then `gpt-oss-20b`) use this one key |
+| `GEMINI_API_KEY` | no | Without it the Gemini fallback stage is skipped |
+
+Create it with `modal secret create huntloop-llm GROQ_API_KEY=... GEMINI_API_KEY=...`
+or through Modal's dashboard. Nothing in this repo reads, writes, logs,
+or needs the values.
+
+**2. Deploy the Modal app.** `modal deploy
+src/huntloop/modal_resume_functions.py` — the same command the existing
+resume-processing functions already need, re-run after any change to
+that file. It now also deploys `deep_dive_remote`.
+
+**3. Set a dedicated Modal token on Render.** `MODAL_TOKEN_ID` and
+`MODAL_TOKEN_SECRET` are declared in `render.yaml` with `sync: false`,
+so Render prompts for them on the dashboard and no value is committed.
+Create a **separate** token for the deployment (Modal → Settings → API
+Tokens, or `modal token new`) rather than reusing a local development
+one, so it can be revoked independently.
+
+**4. Run the migration against Neon.** The feature needs the
+`resume_deep_dives` table (revision `d5e7f9a1b3c6`). Run `alembic
+upgrade head` against the Neon database yourself — nothing in this repo
+migrates a live database automatically.
+
+### Optional: a second Grafana datasource for Neon
+
+The local observability stack provisions a PostgreSQL datasource (uid
+`huntloop-postgres`, see
+`observability/grafana/provisioning/datasources/datasource.yml`) that
+backs the "HuntLoop Resume Deep-Dive" dashboard. It points at the
+**local** database by default and is the only Postgres datasource that
+exists.
+
+Pointing Grafana at the live Neon demo database as well is **documented
+here but deliberately not set up**, because doing it safely needs a
+database role that this repo cannot create for you:
+
+1. **In Neon, create a dedicated read-only role** — not the application
+   role the API connects as. Something like:
+
+   ```sql
+   CREATE ROLE grafana_readonly LOGIN PASSWORD '<a-new-password>';
+   GRANT CONNECT ON DATABASE <db> TO grafana_readonly;
+   GRANT USAGE ON SCHEMA public TO grafana_readonly;
+   GRANT SELECT ON ALL TABLES IN SCHEMA public TO grafana_readonly;
+   ALTER DEFAULT PRIVILEGES IN SCHEMA public
+     GRANT SELECT ON TABLES TO grafana_readonly;
+   ```
+
+   Every provisioned panel query is a plain `SELECT`, so `SELECT` is all
+   this role ever needs. Granting it more would be strictly worse.
+
+2. **Add a second datasource entry** alongside the existing one, with a
+   different `uid` (e.g. `huntloop-postgres-neon`), its own
+   `HUNTLOOP_NEON_PG_*` environment variables wired through the
+   `grafana` service in `docker-compose.yml` the same way the local ones
+   are, and `sslmode: require` (Neon requires TLS). Keep the committed
+   file free of credentials — variables only, exactly as the local entry
+   does it.
+
+3. **Duplicate the dashboard, don't repoint it.** Change the copy's
+   panel `datasource.uid` to the new one. Repointing the existing
+   dashboard would silently turn a local-only view into one that reads
+   live production data, which is precisely the mistake worth avoiding.
+
+Until all of that is done deliberately, the Grafana stack cannot reach
+Neon at all — which is the intended default.

@@ -22,10 +22,13 @@ import pytest
 from huntloop.db_models import ModalUsage
 from huntloop.modal_resume_processing import (
     DEFAULT_MONTHLY_INVOCATION_BUDGET,
+    LocalProcessingUnavailable,
     ModalUnavailable,
     _current_month_key,
     _invoke_modal,
+    _local_embed_text,
     _modal_configured,
+    _process_resume_locally,
     _reserve_invocation_slot,
     embed_resume_text,
 )
@@ -285,3 +288,145 @@ def test_embed_resume_text_falls_back_locally_when_budget_exhausted(db_session, 
 
     assert used_modal is False
     assert embedding == [9.9, 9.9]
+
+
+# ---------------------------------------------------------------------
+# Weighted reservations (added with the Resume Deep-Dive, which reserves
+# MODAL_DEEP_DIVE_WEIGHT slots instead of 1 - see
+# huntloop.modal_deep_dive). Every pre-existing caller still passes no
+# weight at all, so the tests above cover the default-1 behaviour; these
+# cover the weighting itself.
+# ---------------------------------------------------------------------
+
+
+def test_reserve_defaults_to_weight_one(db_session):
+    reserved, used_before, budget = _reserve_invocation_slot(db_session)
+
+    assert reserved is True
+    assert used_before == 0
+    row = db_session.query(ModalUsage).filter_by(month=_current_month_key()).one()
+    assert row.invocations_used == 1
+
+
+def test_reserve_increments_by_the_given_weight(db_session):
+    reserved, _used_before, _budget = _reserve_invocation_slot(db_session, weight=5)
+
+    assert reserved is True
+    row = db_session.query(ModalUsage).filter_by(month=_current_month_key()).one()
+    assert row.invocations_used == 5
+
+
+def test_reserve_refuses_rather_than_overshooting_the_cap(db_session, monkeypatch):
+    """A weight-5 request with only 3 slots left is refused outright and
+    charges nothing - leaving those 3 available to a weight-1 caller -
+    rather than being partially granted or allowed over the cap."""
+    monkeypatch.setenv("MODAL_MONTHLY_INVOCATION_BUDGET", "10")
+    db_session.add(ModalUsage(month=_current_month_key(), invocations_used=7))
+    db_session.commit()
+
+    reserved, used_before, budget = _reserve_invocation_slot(db_session, weight=5)
+
+    assert reserved is False
+    assert (used_before, budget) == (7, 10)
+    row = db_session.query(ModalUsage).filter_by(month=_current_month_key()).one()
+    db_session.refresh(row)
+    assert row.invocations_used == 7
+
+    # ... and a weight-1 caller can still use what's left.
+    assert _reserve_invocation_slot(db_session, weight=1)[0] is True
+    db_session.refresh(row)
+    assert row.invocations_used == 8
+
+
+def test_reserve_allows_a_weight_that_lands_exactly_on_the_cap(db_session, monkeypatch):
+    monkeypatch.setenv("MODAL_MONTHLY_INVOCATION_BUDGET", "10")
+    db_session.add(ModalUsage(month=_current_month_key(), invocations_used=5))
+    db_session.commit()
+
+    assert _reserve_invocation_slot(db_session, weight=5)[0] is True
+    row = db_session.query(ModalUsage).filter_by(month=_current_month_key()).one()
+    db_session.refresh(row)
+    assert row.invocations_used == 10
+    # And now nothing more fits, not even weight 1.
+    assert _reserve_invocation_slot(db_session, weight=1)[0] is False
+
+
+def test_reserve_treats_a_nonsense_weight_as_one(db_session):
+    assert _reserve_invocation_slot(db_session, weight=0)[0] is True
+    row = db_session.query(ModalUsage).filter_by(month=_current_month_key()).one()
+    assert row.invocations_used == 1
+
+
+def test_weighted_reservation_crossing_two_alert_thresholds_fires_each_once(db_session, monkeypatch):
+    """A weighted jump can cross 80% AND 95% in a single reservation.
+    huntloop.budget_alerts should then send both, once each, and never
+    re-fire for a threshold already passed - the behaviour weighting
+    could plausibly have broken, so it's asserted rather than assumed."""
+    monkeypatch.setenv("MODAL_MONTHLY_INVOCATION_BUDGET", "100")
+    db_session.add(ModalUsage(month=_current_month_key(), invocations_used=70))
+    db_session.commit()
+
+    sent = []
+
+    def _fake_send(db, *, ledger, period, used, cap, threshold):
+        sent.append(threshold)
+
+    monkeypatch.setattr("huntloop.budget_alerts._send_threshold_alert", _fake_send)
+
+    # 70 -> 97: crosses both 80 and 95 in one step.
+    assert _reserve_invocation_slot(db_session, weight=27)[0] is True
+    assert sorted(sent) == [80, 95]
+
+    # A further reservation in the same period re-fires nothing.
+    sent.clear()
+    assert _reserve_invocation_slot(db_session, weight=1)[0] is True
+    assert sent == []
+
+
+# ---------------------------------------------------------------------
+# LocalProcessingUnavailable - the local fallback's own lazy
+# sentence-transformers import failing, with no Modal to fall back from.
+# ---------------------------------------------------------------------
+
+
+@pytest.fixture()
+def no_embeddings_module(monkeypatch):
+    """Simulates an environment with no sentence-transformers/torch at
+    all (the lean demo image, and this project's own dev venv) by making
+    `import huntloop.embeddings` raise ImportError. sys.modules is set to
+    None, which Python's import system treats as "this module is
+    definitively absent" and raises ImportError for - the same
+    sys.modules technique the stub fixtures above use, inverted."""
+    monkeypatch.setitem(sys.modules, "huntloop.embeddings", None)
+
+
+def test_local_embed_raises_typed_error_when_the_import_fails(no_embeddings_module):
+    with pytest.raises(LocalProcessingUnavailable) as exc:
+        _local_embed_text("some text")
+
+    assert "sentence-transformers" in str(exc.value)
+
+
+def test_embed_resume_text_raises_local_processing_unavailable(db_session, no_embeddings_module):
+    """Not configured for Modal AND no local fallback available - the
+    one case where this function is allowed to raise rather than
+    returning a usable result. huntloop.api.routers.resumes turns this
+    into a structured 503 instead of a bodyless 500."""
+    with pytest.raises(LocalProcessingUnavailable):
+        embed_resume_text(db_session, "some resume text")
+
+
+def test_process_resume_locally_raises_local_processing_unavailable(no_embeddings_module, monkeypatch, tmp_path):
+    fake_ingestion = types.ModuleType("huntloop.resume_ingestion")
+    fake_ingestion.extract_text = lambda path: "real extracted text"
+    monkeypatch.setitem(sys.modules, "huntloop.resume_ingestion", fake_ingestion)
+
+    with pytest.raises(LocalProcessingUnavailable):
+        _process_resume_locally(str(tmp_path / "x.pdf"))
+
+
+def test_local_path_still_works_when_the_module_is_importable(db_session, stub_embed_text):
+    """The guard must not change the happy path - with an importable
+    huntloop.embeddings, nothing raises and the embedding comes back."""
+    embedding, used_modal = embed_resume_text(db_session, "some resume text")
+    assert (embedding, used_modal) == ([9.9, 9.9], False)

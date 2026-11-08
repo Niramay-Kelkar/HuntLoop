@@ -1,0 +1,148 @@
+{
+  "title": "HuntLoop Resume Deep-Dive",
+  "uid": "huntloop-deep-dive",
+  "editable": true,
+  "schemaVersion": 39,
+  "timezone": "browser",
+  "time": { "from": "now-30d", "to": "now" },
+  "refresh": "1m",
+  "tags": ["huntloop"],
+  "description": "Resume Deep-Dive activity and Modal budget use. Unlike this project's other dashboards, every panel here reads POSTGRES directly (datasource uid huntloop-postgres) rather than Prometheus: Deep-Dive state lives in the resume_deep_dives table and the budget in the modal_usage ledger, and 'how many runs are in each status right now' is a row count, not a pushed counter. Every query is a read-only SELECT. Prometheus-side Modal counters (including function=deep_dive_remote) are on the 'HuntLoop Modal Resume Processing' dashboard instead.",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Modal budget used vs cap, this month",
+      "description": "From the modal_usage ledger (huntloop.modal_resume_processing._reserve_invocation_slot) for the CURRENT calendar month. Counts weighted invocations, not calls: a resume parse/embed reserves 1, a Deep-Dive reserves MODAL_DEEP_DIVE_WEIGHT (default 5). The cap itself lives in MODAL_MONTHLY_INVOCATION_BUDGET, which the database does not know, so the threshold here is the default 500 - adjust it if that env var is changed. Budget-threshold alert emails fire at 80% and 95% (huntloop.budget_alerts).",
+      "type": "gauge",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "huntloop-postgres" },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "huntloop-postgres" },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COALESCE(SUM(invocations_used), 0) AS \"Invocations used\" FROM modal_usage WHERE month = to_char(now(), 'YYYY-MM');",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 500,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 400 },
+              { "color": "red", "value": 475 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "showThresholdLabels": false, "showThresholdMarkers": true }
+    },
+    {
+      "id": 2,
+      "title": "Deep-Dives by status",
+      "description": "Current row counts in resume_deep_dives, grouped by status (pending / running / done / failed - huntloop.db_models.DeepDiveStatus). A persistent `running` count that never drains is the signal for runs whose Modal call never resolved; those become re-dispatchable after DEEP_DIVE_STALE_MINUTES.",
+      "type": "piechart",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "huntloop-postgres" },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "huntloop-postgres" },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT status::text AS metric, COUNT(*) AS value FROM resume_deep_dives GROUP BY status ORDER BY status;",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": true },
+        "legend": { "displayMode": "list", "placement": "right", "showLegend": true }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Average completion time of finished runs",
+      "description": "AVG(updated_at - dispatched_at) over `done` rows only, in seconds. updated_at is set when a poll reconciles the run to done, so this measures dispatch-to-observed-completion - it includes the gap until the frontend's next poll noticed, not purely Modal execution time. Rows with no dispatched_at (never dispatched) are excluded.",
+      "type": "stat",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 0 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "huntloop-postgres" },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "huntloop-postgres" },
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT AVG(EXTRACT(EPOCH FROM (updated_at - dispatched_at))) AS \"Avg completion (s)\", COUNT(*) AS \"Finished runs\" FROM resume_deep_dives WHERE status = 'done' AND dispatched_at IS NOT NULL;",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "decimals": 1 },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "Avg completion (s)" },
+            "properties": [{ "id": "unit", "value": "s" }]
+          }
+        ]
+      },
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": true },
+        "textMode": "auto",
+        "colorMode": "none"
+      }
+    },
+    {
+      "id": 4,
+      "title": "Deep-Dive failures over time",
+      "description": "Failed runs bucketed by day, from resume_deep_dives.updated_at (when the run was recorded as failed). Includes every failure cause: a refused dispatch (Modal unavailable or the budget cap), an expired Modal output, the remote function raising, and a result that failed shape validation. The sanitized `error` text on each row says which; this panel is the volume signal.",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "huntloop-postgres" },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "huntloop-postgres" },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT date_trunc('day', updated_at) AS time, COUNT(*) AS \"failures\" FROM resume_deep_dives WHERE status = 'failed' AND $__timeFilter(updated_at) GROUP BY 1 ORDER BY 1;",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "bars", "fillOpacity": 60, "spanNulls": false }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "Deep-Dive runs started over time",
+      "description": "Runs bucketed by day from resume_deep_dives.dispatched_at - i.e. when Modal budget was actually spent, not when the row was created. Read alongside the budget gauge above: each bar costs MODAL_DEEP_DIVE_WEIGHT (default 5) ledger slots.",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "grafana-postgresql-datasource", "uid": "huntloop-postgres" },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "huntloop-postgres" },
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT date_trunc('day', dispatched_at) AS time, COUNT(*) AS \"runs started\" FROM resume_deep_dives WHERE dispatched_at IS NOT NULL AND $__timeFilter(dispatched_at) GROUP BY 1 ORDER BY 1;",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "bars", "fillOpacity": 60, "spanNulls": false }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

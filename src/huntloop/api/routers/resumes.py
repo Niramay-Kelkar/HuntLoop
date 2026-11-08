@@ -103,7 +103,7 @@ from huntloop.api.routers.drafting import _RateLimiter
 from huntloop.api.schemas.resume_ats_report import AtsReportResponse
 from huntloop.api.schemas.resumes import ResumeVersionSummary
 from huntloop.db_models import ResumeAtsReport, ResumeVersion
-from huntloop.modal_resume_processing import embed_resume_text, process_resume
+from huntloop.modal_resume_processing import LocalProcessingUnavailable, embed_resume_text, process_resume
 from huntloop.resume_ingestion import save_uploaded_pdf
 from huntloop.text_cleaning import clean_text
 
@@ -447,7 +447,24 @@ async def upload_resume(request: Request, file: UploadFile = File(...), db: Sess
     # of placed there manually first.
     saved_path = save_uploaded_pdf(next_version, file.filename, content)
 
-    processed = await process_resume(db, saved_path)
+    try:
+        processed = await process_resume(db, saved_path)
+    except LocalProcessingUnavailable as exc:
+        # Modal was unusable AND this deployment has no local
+        # sentence-transformers/torch to fall back to, so there is
+        # genuinely no way to process the upload here. Same reasoning as
+        # get_active_ats_report()'s 503 above: an unconfigured
+        # deployment is a deployment fact, not a server fault, and must
+        # not surface as the bodyless 500 a bare ImportError used to
+        # produce. The PDF stays on disk but no resume_versions row is
+        # created, so a retry after the deployment is fixed is clean.
+        logger.warning("Resume upload could not be processed on this deployment: %s", exc)
+        raise HTTPException(
+            503,
+            "Resume processing is not available on this deployment right now - the remote "
+            "processing service could not be reached and this server has no local fallback "
+            "installed. Please try again later.",
+        ) from exc
     extracted_text = processed.extracted_text
     if not extracted_text.strip():
         raise HTTPException(
@@ -506,7 +523,20 @@ def activate_resume(resume_id: int, request: Request, db: Session = Depends(get_
         return _to_summary(resume)
 
     if resume.embedding is None:
-        embedding, used_modal = embed_resume_text(db, resume.extracted_text)
+        try:
+            embedding, used_modal = embed_resume_text(db, resume.extracted_text)
+        except LocalProcessingUnavailable as exc:
+            # Same 503 reasoning as upload_resume() above. Nothing is
+            # committed, so the row stays inactive with a NULL embedding
+            # rather than being activated without one (which would make
+            # every job's match_score NULL until someone noticed).
+            logger.warning("Resume activation could not compute an embedding here: %s", exc)
+            raise HTTPException(
+                503,
+                "This resume version has no embedding yet and cannot be activated on this "
+                "deployment right now - the remote processing service could not be reached "
+                "and this server has no local fallback installed. Please try again later.",
+            ) from exc
         resume.embedding = embedding
         via = "Modal" if used_modal else "local"
         logger.info(
