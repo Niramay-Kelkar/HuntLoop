@@ -15059,3 +15059,68 @@ token for Render and set `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` there;
 run the migration against Neon. Then the still-outstanding step: real
 end-to-end verification against live Modal, which everything above
 deliberately stopped short of.
+
+---
+
+## 2026-11-11 — Apply the Deep-Dive migration to the Neon demo database
+
+**Did:** Applied Alembic revision `d5e7f9a1b3c6` (the `resume_deep_dives`
+table) to the live Neon demo database, which was still one revision
+behind at `c4d6e8f0a2b4`. This was the one remaining prerequisite from
+the 2026-11-07 entry's "Next (manual)" list that had to happen *before*
+the feature merges, because the new API route goes live on Render as
+soon as the deploy lands and the table has to exist first. The currently
+deployed API code does not reference the table, so adding it ahead of
+the merge is a no-op for the running demo. No code changed in this
+session — this entry is the only repo change.
+
+**Scope of writes:** exactly one, the upgrade itself (plus the
+`alembic_version` row update Alembic makes inside the same
+transaction). Every other database command in the session ran inside an
+explicit `SET TRANSACTION READ ONLY` transaction that was rolled back,
+so Postgres itself would have refused a stray write. No refresh script,
+no dataset builder, no backfill, no data change.
+
+**Before → after (Neon, read-only snapshots):**
+
+| | before 15:36:55 UTC | after 15:37:29 UTC |
+|---|---|---|
+| `alembic_version` | `c4d6e8f0a2b4` | `d5e7f9a1b3c6` |
+| tables in `public` | 23 | 24 (`resume_deep_dives` added) |
+| `companies` | 738 | 738 |
+| `job_postings` | 19,690 | 19,690 |
+| `resume_versions` | 1 | 1 |
+| `resume_skill_matches` | 0 | 0 |
+| `resume_ats_reports` | 1 | 1 |
+| `resume_deep_dives` | does not exist | exists, 0 rows |
+| `deep_dive_status` enum | does not exist | exists, 4 labels |
+
+The upgrade ran between 15:37:05 and 15:37:08 UTC. The before snapshot's
+exact timestamp (2026-11-11 15:36:55.815706 UTC) is recorded here so
+Neon's point-in-time restore has a target if it is ever needed.
+
+**Verified:** `alembic current` on Neon printed `c4d6e8f0a2b4` before
+and `d5e7f9a1b3c6 (head)` after, while local printed `d5e7f9a1b3c6` both
+times — the difference is what proved the connection really was Neon and
+not a `.env` fallback. The new table's full structure (10 columns with
+their types and nullability, both foreign keys `ON DELETE CASCADE`, the
+primary key, the `uq_resume_deep_dives_resume_job` unique constraint,
+its index, and the four enum labels in order) was dumped from the
+catalog on both databases and diffed: **byte-identical**. No sessions,
+locks or prepared transactions were left behind. The live API's `/health`
+returned `{"status":"ok"}` and `/jobs` returned `total: 19690`, matching
+the Neon row count exactly.
+
+**Found along the way:** `.env.deploy`'s URLs are unquoted and contain
+`&` (from `?sslmode=require&channel_binding=require`), so sourcing that
+file in bash splits on the `&` — the assignment gets backgrounded (so
+`DATABASE_URL` ends up unset) *and* bash's job-control notice echoes the
+whole line, password included, to the terminal. Do not `source
+.env.deploy`; parse it, or quote the values in the file. The connection
+URL in this session was passed only into a child process's environment,
+never through a shell.
+
+**Next:** merge the feature branch, deploy, and the Modal-side steps
+still listed in the 2026-11-07 entry (create the `huntloop-llm` Secret,
+`modal deploy`, a dedicated Render Modal token), then the real
+end-to-end verification against live Modal.
