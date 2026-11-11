@@ -4,6 +4,34 @@ Context for Claude Code sessions working in this repo. Keep this short — it's 
 reference for fast orientation, not documentation. Full setup/usage detail lives
 in README.md.
 
+## Secret handling
+
+Read this before running anything that touches an env file or a credential.
+A real credential has leaked into session output more than once in this
+project — most recently a live Neon password, which had to be rotated.
+
+- **Never source or dot-run an env file in a shell.** No `source .env`, no
+  `. ./.env.deploy`, no `export $(cat .env)`, no `set -a`. Values here
+  contain shell metacharacters such as `&`, `?` and `=` — bash splits on
+  them, which both breaks the assignment and can echo the whole line
+  (password included) through job-control output. Load an env file with a
+  small Python parser or `python-dotenv`'s `dotenv_values()`, and pass the
+  values only into the environment of a child process.
+- **Never print, echo or log a secret.** No `cat`/`head`/`grep` of an env
+  file that shows values, no `env`/`printenv`/`set`, no shell tracing
+  (`set -x`, `bash -x`), no `docker inspect` or `docker compose config`
+  output that exposes values, and no connection strings or tokens on a
+  command line. When a URL has to be shown, show only the host and
+  database name with the password masked.
+- **Do not edit any `.env` file unless explicitly asked.** If a value is
+  unquoted and contains shell metacharacters, report the variable name and
+  line number only.
+- **If a secret does appear in any output, say so first**, at the very top
+  of the report — name the variable, never the value — and state that it
+  needs rotating.
+- These rules apply to every token and key in the project, including Neon,
+  Modal, Clerk, Resend, Groq, Gemini and Tavily.
+
 ## Project overview
 
 HuntLoop, today, is a multi-ATS job-board scraper (Scrapy: Greenhouse + Lever

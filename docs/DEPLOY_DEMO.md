@@ -63,6 +63,15 @@ Postgres as the source and the new Neon project as the target. Set the
 two variables only in your own shell - never put them in a file that
 gets committed.
 
+Keep the quotes. A Neon connection string contains `&` and `?`, so an
+unquoted value is split by the shell - which breaks the assignment and
+can echo the whole line, password included, through bash's job-control
+output. For the same reason, never `source` / dot-run an env file that
+holds these values, and never `set -a` or `export $(cat ...)` one; if
+you keep them in a file, read it with `python-dotenv`'s
+`dotenv_values()` and pass the values into the child process's
+environment. See CLAUDE.md's "Secret handling" section.
+
 ```bash
 export SOURCE_DATABASE_URL="postgresql+psycopg2://<user>:<password>@localhost:5432/jobsight"
 export TARGET_DATABASE_URL="postgresql+psycopg2://<user>:<password>@<your-neon-host>/<dbname>?sslmode=require"
