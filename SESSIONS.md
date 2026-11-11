@@ -15124,3 +15124,72 @@ never through a shell.
 still listed in the 2026-11-07 entry (create the `huntloop-llm` Secret,
 `modal deploy`, a dedicated Render Modal token), then the real
 end-to-end verification against live Modal.
+
+## 2026-11-11 — Write the secret-handling rule into the repo, and audit for env-sourcing
+
+Documentation and audit only. No application code changed. No real `.env`
+file was edited, and no secret value was read into output at any point.
+
+**Why:** a credential has reached session output in this project more than
+once. The most recent case (see the entry above) was `. ./.env.deploy` in
+bash: the Neon URLs there are unquoted and contain `&`, so bash split on
+it, backgrounded the assignment, and its job-control notice echoed the
+whole line — live password included — into the transcript. The password
+was rotated. The rule needed to live in the repository, where every
+Claude Code session reads it, rather than only in the prompts.
+
+**CLAUDE.md** gained a short imperative **"Secret handling"** section
+directly under the intro, above "Project overview": never source or
+dot-run an env file (no `source`, no `. ./`, no `export $(cat ...)`, no
+`set -a` — load with a Python parser or `dotenv_values()` and pass values
+only into a child process's environment); never print, echo or log a
+secret (no value-revealing `cat`/`grep` of env files, no
+`env`/`printenv`/`set`, no shell tracing, no `docker inspect` /
+`docker compose config` output, no connection strings or tokens on a
+command line — mask the password and show host plus database only); don't
+edit a `.env` file unless asked, and report an unquoted metacharacter
+value by variable name and line number only; if a secret does appear in
+output, say so first, at the top, naming the variable but not the value,
+and state that it needs rotating. The rules cover every token and key in
+the project — Neon, Modal, Clerk, Resend, Groq, Gemini, Tavily. Nothing
+else in CLAUDE.md was reworded or removed.
+
+**Audit.** Searched every script, shell wrapper (including the cron and
+launchd wrappers), `docs/DEPLOY_DEMO.md`, the READMEs and comments for
+`source .env`, `. ./.env`, `set -a`, `export $(`, `export $(cat`, and
+value-revealing `cat`/`grep` of env files. **Nothing in the repository
+sources or dot-runs an env file** — the leak came from a command typed
+ad hoc in a session, not from anything checked in. Two real hits, both
+already safe, both now documented:
+
+- `scripts/run_orchestrator_cron.sh:219` reads one value by name
+  (`grep -E '^DATABASE_URL=' .env | cut -d= -f2-`) and every expansion
+  of it is already double-quoted, so an `&` in the value cannot split.
+  It does place the connection string on a `docker compose run -e
+  DATABASE_URL=...` command line (visible in `ps` to a local user), and
+  the script has no `set -x` anywhere, so nothing echoes it. Left
+  functionally untouched; a comment now explains why it greps one name
+  instead of sourcing, and that expansions must stay quoted.
+- `docs/DEPLOY_DEMO.md` already quotes its two `export` examples and uses
+  obviously fake placeholders. Added a short paragraph saying to keep the
+  quotes, why (`&`/`?` split), and not to source / `set -a` /
+  `export $(cat ...)` an env file holding these values.
+
+No shell tracing (`set -x`, `bash -x`) exists in any of the three shell
+scripts.
+
+**Example files.** Every placeholder in `.env.example` and
+`frontend/.env.local.example` was already obviously fake (`<password>`,
+`<your-groq-api-key>`), but the values were unquoted — and these contain
+`<`/`>`, which a shell reads as redirection. All 13 assignments in
+`.env.example` and both in `frontend/.env.local.example` are now
+double-quoted. Note `frontend/.env.local.example` is matched by
+`frontend/.gitignore`'s `.env*` rule and is therefore untracked, so that
+example has never actually shipped in the repo — flagged, not changed.
+
+**Real env files**, checked structurally (names and line numbers only, by
+a scratchpad script that never emits a value): `.env` — 16 assignments,
+**none** unquoted-with-metacharacters. `.env.deploy` — 3 assignments, two
+unquoted and containing `&` and `?`: `TARGET_DATABASE_URL_DIRECT` (line
+2) and `TARGET_DATABASE_URL_POOLED` (line 3). These are exactly the two
+lines that caused the leak. Left for the owner to quote.

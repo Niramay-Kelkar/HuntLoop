@@ -216,6 +216,13 @@ PYTHON="$REPO_ROOT/.venv/bin/python"
     exit 1
   fi
 
+  # Reads ONE value out of .env by name. Deliberately NOT `source
+  # .env` / `set -a` / `export $(cat .env)` - see CLAUDE.md's "Secret
+  # handling" section: these values contain shell metacharacters (`&`,
+  # `?`, `=`), so sourcing the file splits on them, which both breaks
+  # the assignment and can echo the whole line - password included -
+  # through bash's job-control output. Keep every expansion of this
+  # variable double-quoted for the same reason, and never echo it.
   DB_URL_FOR_DOCKER="$(grep -E '^DATABASE_URL=' "$REPO_ROOT/.env" | cut -d= -f2- | sed 's/localhost/host.docker.internal/')"
 
   # Root-caused 2026-09-04 (see SESSIONS.md "Investigate empty Grafana
