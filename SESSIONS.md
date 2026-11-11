@@ -14932,3 +14932,195 @@ here; the short version is that Phase B's real forks are where the
 Deep-Dive LLM call runs (Modal Secret vs BYOK), whether to build the
 first poll endpoint in the codebase or reuse the cached-report shape, and
 whether to fix the Render→Pushgateway gap before adding more panels.
+
+---
+
+## 2026-11-07 — Resume Deep-Dive (Modal Phase B + C)
+
+**Did:** Built the Resume Deep-Dive end to end: a heavier skill-gap
+analysis of the active resume against one job posting, run as a Modal
+function and polled by the frontend. This closes the Phase B/C items the
+Modal groundwork entry left open, including its flagged unknown — there
+was no submitter-facing poll-by-id endpoint anywhere in this codebase to
+copy from, so this sets that convention.
+
+New: migration `d5e7f9a1b3c6` (`resume_deep_dives`, unique on
+`(resume_version_id, job_posting_id)`, `deep_dive_status` enum) +
+`ResumeDeepDive`/`DeepDiveStatus`; `huntloop.deep_dive` (prompt,
+Groq-120b → Groq-20b → Gemini chain, `validate_deep_dive_result()`);
+`deep_dive_remote` in `huntloop.modal_resume_functions` (attaching the
+`huntloop-llm` Modal Secret, `timeout=600`, `retries=0`);
+`huntloop.modal_deep_dive` (spawn + non-blocking reconcile);
+`huntloop.api.routers.deep_dive` + its schema; `DeepDivePanel.tsx` and
+the `lib/api.ts`/`types/api.ts` additions; a Postgres Grafana datasource
+(uid `huntloop-postgres`) and the `huntloop-deep-dive` dashboard. Also
+extended `_reserve_invocation_slot` with an optional `weight`, hardened
+`modal_resume_processing`'s local fallback behind a typed
+`LocalProcessingUnavailable` (converted to a 503 by the resume routes
+instead of a bodyless 500), and made the demo dataset builder clear
+`resume_deep_dives` before its two parent tables.
+
+**Decided:** No local fallback for this feature, in any environment —
+the API process has no LLM keys by design (they live only in the Modal
+Secret), so "Modal unavailable" gets a structured 503 rather than a
+silent degradation. The result is copied into our own database on the
+first successful poll, because Modal call outputs expire; the call id is
+only a handle. Errors use `{detail, code}` with `detail` kept in the
+same place the existing ATS-report 503 puts it, so the frontend's
+established reader works unchanged. The endpoint is mounted in demo mode
+too, unlike drafting/resume-upload, since it takes no upload and no
+caller-supplied credential. The panel never POSTs on mount — POST also
+re-dispatches a failed row, so auto-running on page load would silently
+spend budget.
+
+**Three real bugs found by running things, not by reading code:**
+
+1. **Timestamp clock skew.** `created_at`/`updated_at` come from
+   `func.now()`, i.e. the *Postgres session's* timezone, which on this
+   machine is `America/New_York`, not UTC. Setting `dispatched_at` from
+   Python's UTC clock put it five hours off the other two — which made
+   the Grafana completion-time panel read **negative five hours**, and
+   made `_is_stale()`'s `created_at` fallback treat a seconds-old row as
+   stale, re-dispatching on every POST and burning budget on repeat.
+   Caught by reading back the first real row after a live POST. Fixed by
+   writing `dispatched_at` with `func.now()` and taking "now" from the
+   database in `_is_stale()`.
+2. **Modal's exception hierarchy.** An unfinished call raises
+   `modal.exception.TimeoutError`, which is **not** a subclass of the
+   builtin `TimeoutError` — the obvious `except TimeoutError` would
+   never fire, so every still-running poll would have been recorded as a
+   permanent failure. And `OutputExpiredError` **is** a subclass of
+   modal's `TimeoutError`, so it has to be caught first or an expired
+   output reads as "still running" forever. Verified directly against
+   the installed client (1.6.1) and its source.
+3. **Enum migration.** Pre-creating the enum with
+   `.create(checkfirst=True)` before `op.create_table` fails with
+   `DuplicateObject`, because `create_table` emits its own `CREATE TYPE`
+   for an Enum column. Hit for real on the first local upgrade; the
+   transaction rolled back cleanly (nothing orphaned, `alembic_version`
+   untouched), and the migration now follows `b7e2a5c9f1d3`'s shape.
+
+**Verified** (local database only — `DATABASE_URL` printed and asserted
+local before every step; `TARGET_DATABASE_URL`/`SOURCE_DATABASE_URL`
+were unset throughout and Neon was never contacted):
+- Migration upgrade → downgrade (table *and* enum type both dropped) →
+  re-upgrade, against the local Postgres.
+- Both endpoints driven with real HTTP against a locally-running API
+  with only the **Modal client** stubbed: 404 unknown job; 202 dispatch
+  (payload confirmed plain data, carrying the precomputed
+  matched/missing skills); repeat POST returning the same row with no
+  second spawn and the ledger still at one charge; poll → still running;
+  poll → done, with the validated result copied into Postgres and no
+  further Modal polling; the three failure paths (remote raised, output
+  expired, bad shape) each landing `failed` with sanitized text — the
+  stub's raw message never leaked, only the exception type; 503
+  `modal_unavailable` on a lookup failure with the ledger **not**
+  charged; 503 `budget_exhausted` refusing outright at the cap with zero
+  spawns; and the 5/60s rate limit allowing exactly five then 429.
+- The panel driven in a real browser against that API: idle → running →
+  (stub flipped to done mid-poll) the full result rendering with no
+  reload, all seven sections, then polling confirmed **stopped** (poll
+  count unchanged over 30s with the tab open on the finished result).
+- The Grafana dashboard: only the `grafana` container restarted; the new
+  datasource provisioned and its health check returning "Database
+  Connection OK"; all five panel queries, read straight out of the
+  dashboard JSON, returning real data through Grafana's own datasource
+  proxy; and the dashboard rendering in a browser. Completion time came
+  back as a **positive** 2.6 minutes — the same query that read −5h
+  before fix (1). Two clearly-labelled test rows were inserted into the
+  local `resume_deep_dives` for this and deleted afterwards; the table
+  and the `modal_usage` ledger were both confirmed restored to their
+  exact pre-verification state.
+
+**Tests:** backend 661 passed (599 baseline + 65 new: 25 in
+`test_deep_dive.py`, 24 in `test_api_deep_dive.py`, 3 in
+`test_build_demo_dataset_clear.py`, 10 added to
+`test_modal_resume_processing.py`, 3 to `test_api_resumes.py`), plus 3
+**pre-existing** failures in `tests/test_backfill_lock.py` — unrelated
+to this work and reproduced identically on a stashed, pristine tree: the
+real daily `backfill_skills_matching.py` run was holding the
+skills-matching advisory lock at the time. Left alone rather than
+killed, same precedent as previous sessions. Frontend 149 passed (129
+baseline + 14 `DeepDivePanel.test.tsx` + 6 `deepDiveErrorInfo` cases);
+`npx tsc --noEmit` clean. Every Modal interaction in the suites is
+mocked — `Function.from_name`, `spawn`, `FunctionCall.from_id`/`get`,
+the timeout and expired-output cases, and the ledger cap.
+
+**No new dependencies anywhere.** `groq` and `requests` were added to
+the Modal image definition only; both were already in
+`requirements.txt` and `requirements-demo.txt`, and the frontend gained
+nothing (the panel's tests use `fireEvent`, not `user-event`, which
+isn't a dependency here).
+
+**Next (manual, not done here):** create the `huntloop-llm` Modal Secret
+containing `GROQ_API_KEY` (and optionally `GEMINI_API_KEY`); `modal
+deploy src/huntloop/modal_resume_functions.py`; create a dedicated Modal
+token for Render and set `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` there;
+run the migration against Neon. Then the still-outstanding step: real
+end-to-end verification against live Modal, which everything above
+deliberately stopped short of.
+
+---
+
+## 2026-11-11 — Apply the Deep-Dive migration to the Neon demo database
+
+**Did:** Applied Alembic revision `d5e7f9a1b3c6` (the `resume_deep_dives`
+table) to the live Neon demo database, which was still one revision
+behind at `c4d6e8f0a2b4`. This was the one remaining prerequisite from
+the 2026-11-07 entry's "Next (manual)" list that had to happen *before*
+the feature merges, because the new API route goes live on Render as
+soon as the deploy lands and the table has to exist first. The currently
+deployed API code does not reference the table, so adding it ahead of
+the merge is a no-op for the running demo. No code changed in this
+session — this entry is the only repo change.
+
+**Scope of writes:** exactly one, the upgrade itself (plus the
+`alembic_version` row update Alembic makes inside the same
+transaction). Every other database command in the session ran inside an
+explicit `SET TRANSACTION READ ONLY` transaction that was rolled back,
+so Postgres itself would have refused a stray write. No refresh script,
+no dataset builder, no backfill, no data change.
+
+**Before → after (Neon, read-only snapshots):**
+
+| | before 15:36:55 UTC | after 15:37:29 UTC |
+|---|---|---|
+| `alembic_version` | `c4d6e8f0a2b4` | `d5e7f9a1b3c6` |
+| tables in `public` | 23 | 24 (`resume_deep_dives` added) |
+| `companies` | 738 | 738 |
+| `job_postings` | 19,690 | 19,690 |
+| `resume_versions` | 1 | 1 |
+| `resume_skill_matches` | 0 | 0 |
+| `resume_ats_reports` | 1 | 1 |
+| `resume_deep_dives` | does not exist | exists, 0 rows |
+| `deep_dive_status` enum | does not exist | exists, 4 labels |
+
+The upgrade ran between 15:37:05 and 15:37:08 UTC. The before snapshot's
+exact timestamp (2026-11-11 15:36:55.815706 UTC) is recorded here so
+Neon's point-in-time restore has a target if it is ever needed.
+
+**Verified:** `alembic current` on Neon printed `c4d6e8f0a2b4` before
+and `d5e7f9a1b3c6 (head)` after, while local printed `d5e7f9a1b3c6` both
+times — the difference is what proved the connection really was Neon and
+not a `.env` fallback. The new table's full structure (10 columns with
+their types and nullability, both foreign keys `ON DELETE CASCADE`, the
+primary key, the `uq_resume_deep_dives_resume_job` unique constraint,
+its index, and the four enum labels in order) was dumped from the
+catalog on both databases and diffed: **byte-identical**. No sessions,
+locks or prepared transactions were left behind. The live API's `/health`
+returned `{"status":"ok"}` and `/jobs` returned `total: 19690`, matching
+the Neon row count exactly.
+
+**Found along the way:** `.env.deploy`'s URLs are unquoted and contain
+`&` (from `?sslmode=require&channel_binding=require`), so sourcing that
+file in bash splits on the `&` — the assignment gets backgrounded (so
+`DATABASE_URL` ends up unset) *and* bash's job-control notice echoes the
+whole line, password included, to the terminal. Do not `source
+.env.deploy`; parse it, or quote the values in the file. The connection
+URL in this session was passed only into a child process's environment,
+never through a shell.
+
+**Next:** merge the feature branch, deploy, and the Modal-side steps
+still listed in the 2026-11-07 entry (create the `huntloop-llm` Secret,
+`modal deploy`, a dedicated Render Modal token), then the real
+end-to-end verification against live Modal.

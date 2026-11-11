@@ -20,10 +20,19 @@ Both try Modal first and fall back to running the exact same functions
 in-process (the original, pre-Modal behavior) whenever Modal isn't
 configured, this month's invocation budget is exhausted, or the remote
 call fails for any reason - a Modal outage, bad token, or network issue
-must never break resume upload or activation. Neither function raises;
-the caller never needs to know which path actually ran, only that it got
-a usable result. Every fallback is logged at WARNING with the specific
-reason (not configured / budget exhausted / remote error).
+must never break resume upload or activation. The caller never needs to
+know which path actually ran, only that it got a usable result. Every
+fallback is logged at WARNING with the specific reason (not configured /
+budget exhausted / remote error).
+
+The one exception to "these never raise": if Modal is unusable AND the
+local fallback's own lazy `huntloop.embeddings` import fails (no
+sentence-transformers/torch in this environment - true of the lean demo
+image and of this project's local dev venv), there is nothing left to
+fall back to and LocalProcessingUnavailable is raised, which
+huntloop.api.routers.resumes converts into a structured 503 rather than
+letting a bare ImportError become a bodyless 500. See that class's own
+docstring.
 
 Auth: MODAL_TOKEN_ID + MODAL_TOKEN_SECRET env vars, the same two-part
 token Modal's own `modal token new` / account settings page issues and
@@ -133,6 +142,31 @@ class ModalUnavailable(Exception):
         self.reason = reason
 
 
+class LocalProcessingUnavailable(Exception):
+    """Raised when Modal was unusable AND the local in-process fallback
+    cannot run either, because huntloop.embeddings (and therefore
+    sentence-transformers/torch) can't be imported in this environment.
+
+    This is the ONE case where process_resume()/embed_resume_text() do
+    raise rather than returning a usable result - there is genuinely
+    nothing left to fall back to, and the alternative is worse: before
+    this class existed, the lazy `from huntloop.embeddings import
+    embed_text` inside the fallback paths below raised a bare
+    ImportError straight out of the route handler, which Starlette
+    turned into a bodyless 500 "Internal Server Error". That is exactly
+    the shape the ATS-report endpoint already learned to avoid (see
+    huntloop.api.routers.resumes.get_active_ats_report's 503 branch): a
+    deployment that simply isn't configured to do this work is a
+    deployment fact, not a server fault, and deserves a structured 503
+    the frontend can render.
+
+    huntloop.api.routers.resumes catches this in both upload_resume()
+    and activate_resume() and converts it to a 503. Note this is a real
+    possibility, not a hypothetical: the lean demo image has no torch at
+    all, and this project's own local dev venv can't install it either
+    (see huntloop.embeddings' docstring)."""
+
+
 def _modal_configured() -> bool:
     return bool(os.getenv("MODAL_TOKEN_ID") and os.getenv("MODAL_TOKEN_SECRET"))
 
@@ -145,18 +179,40 @@ def _current_month_key() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m")
 
 
-def _reserve_invocation_slot(db: Session) -> tuple[bool, int, int]:
+def _reserve_invocation_slot(db: Session, weight: int = 1) -> tuple[bool, int, int]:
     """Atomically checks this month's invocation budget and, if there's
-    room, reserves one slot by incrementing the counter immediately - see
-    module docstring's Locking section for why this needs a row lock
-    (unlike the Tavily reference pattern) and why the slot is reserved
-    before the remote call rather than only after a successful one (a
-    Modal invocation that errors partway through still consumes real
-    compute time, so it still counts). Returns
+    room, reserves `weight` slots by incrementing the counter
+    immediately - see module docstring's Locking section for why this
+    needs a row lock (unlike the Tavily reference pattern) and why the
+    slot is reserved before the remote call rather than only after a
+    successful one (a Modal invocation that errors partway through still
+    consumes real compute time, so it still counts). Returns
     (reserved, used_before_this_call, budget) for logging; never raises
     on a normal "budget exhausted" outcome - that's communicated via the
     returned bool, not an exception (ModalUnavailable is raised by the
-    caller, which has the context to log a clear message)."""
+    caller, which has the context to log a clear message).
+
+    `weight` defaults to 1, which is byte-for-byte the original
+    behaviour for every pre-existing caller (resume processing and
+    embedding): `used_before + 1 > budget` is exactly the old
+    `used_before >= budget` check. A heavier function reserves more than
+    one slot - huntloop.modal_deep_dive passes MODAL_DEEP_DIVE_WEIGHT
+    (default 5), since a Deep-Dive runs a multi-provider LLM chain with
+    a 10-minute timeout rather than a seconds-long CPU job, and the
+    ledger counts invocations as a cost proxy (Modal reports no per-call
+    cost to reconcile against - see the module docstring). The weight is
+    an approximation of relative credit use, not a measured figure.
+
+    A reservation that WOULD cross the cap is refused outright rather
+    than partially granted or allowed to overshoot - so a weight-5
+    request with 3 slots left is refused, leaving those 3 for a
+    weight-1 caller. Budget-threshold alerts stay correct under
+    weighting: huntloop.budget_alerts fires on the percentage `used/cap`
+    reaches and records the highest threshold already alerted on, so a
+    weighted jump that crosses 80% and 95% in one step sends both emails
+    once each, and never re-fires for a threshold already passed."""
+    if weight < 1:
+        weight = 1
     month = _current_month_key()
     row = db.query(ModalUsage).filter_by(month=month).first()
     if row is None:
@@ -168,26 +224,26 @@ def _reserve_invocation_slot(db: Session) -> tuple[bool, int, int]:
     row = db.query(ModalUsage).filter_by(month=month).with_for_update().first()
     budget = _monthly_budget()
     used_before = row.invocations_used
-    if used_before >= budget:
+    if used_before + weight > budget:
         db.commit()  # releases the row lock; nothing incremented
         record_modal_budget(used=used_before, cap=budget)
         return False, used_before, budget
-    row.invocations_used = used_before + 1
+    row.invocations_used = used_before + weight
     db.commit()
-    record_modal_budget(used=used_before + 1, cap=budget)
+    record_modal_budget(used=used_before + weight, cap=budget)
     # Belt-and-suspenders on top of check_and_alert_budget_threshold's
     # own internal try/except: the real increment just above is already
     # committed, so nothing past this point may ever propagate and take
     # that real result down with it, even if the alert-check call itself
     # fails in some way its own internals can't catch.
     try:
-        check_and_alert_budget_threshold(db, ledger="modal", period=month, used=used_before + 1, cap=budget)
+        check_and_alert_budget_threshold(db, ledger="modal", period=month, used=used_before + weight, cap=budget)
     except Exception:
         logger.exception("Budget-threshold alert check raised unexpectedly for ledger=modal - invocation still succeeded")
     return True, used_before, budget
 
 
-def _prepare_invocation(db: Session, function_name: str):
+def _prepare_invocation(db: Session, function_name: str, weight: int = 1):
     """Shared setup for both the sync and async dispatch paths below:
     confirms Modal is configured, looks up the named already-deployed
     Modal function, and reserves one invocation against this month's
@@ -215,11 +271,12 @@ def _prepare_invocation(db: Session, function_name: str):
             reason="lookup_failed",
         ) from e
 
-    reserved, used_before, budget = _reserve_invocation_slot(db)
+    reserved, used_before, budget = _reserve_invocation_slot(db, weight=weight)
     if not reserved:
         raise ModalUnavailable(
             f"Modal monthly invocation budget reached ({used_before}/{budget} for "
-            f"{_current_month_key()}) - no new Modal invocations until next calendar month",
+            f"{_current_month_key()}, this call needs {weight}) - no new Modal invocations "
+            f"until next calendar month",
             reason="budget_exhausted",
         )
     return fn
@@ -277,7 +334,9 @@ async def process_resume(db: Session, pdf_path: str) -> ResumeProcessingResult:
     _invoke_modal_async). Tries Modal first - one remote invocation does
     both steps, mirroring the original in-process call order - and falls
     back to running extract_text()/embed_text() locally, unchanged, on
-    any failure. Never raises."""
+    any failure. Raises only LocalProcessingUnavailable, and only when
+    that local fallback cannot run either - see that class's
+    docstring."""
     try:
         with open(pdf_path, "rb") as f:
             pdf_bytes = f.read()
@@ -305,17 +364,45 @@ def _process_resume_locally(pdf_path: str) -> ResumeProcessingResult:
     extracted_text = extract_text(pdf_path)
     embedding = None
     if extracted_text.strip():
-        from huntloop.embeddings import embed_text  # lazy - see huntloop.embeddings docstring
-
-        embedding = embed_text(extracted_text)
+        embedding = _local_embed_text(extracted_text)
     return ResumeProcessingResult(extracted_text=extracted_text, embedding=embedding, used_modal=False)
+
+
+def _local_embed_text(text: str) -> list[float]:
+    """The lazy `huntloop.embeddings` import, in one place, with its
+    import failure turned into a typed LocalProcessingUnavailable
+    instead of a bare ImportError escaping the route handler as a
+    bodyless 500 (see that class's docstring).
+
+    Imported lazily, not at module level, for the long-standing reason
+    documented in huntloop.embeddings and huntloop.api.routers.resumes:
+    huntloop.api.main imports every router together, so a module-level
+    torch-dependent import here would break importing the WHOLE API in
+    any environment without torch, not just these two endpoints.
+
+    Only the import itself is translated. A failure inside embed_text()
+    once it HAS imported (e.g. an offline HuggingFace model load) is a
+    different, genuinely unexpected condition and is left to propagate
+    as before - not silently relabelled as a configuration problem."""
+    try:
+        from huntloop.embeddings import embed_text
+    except ImportError as exc:
+        raise LocalProcessingUnavailable(
+            "Modal was unavailable and the local embedding fallback cannot run here either - "
+            f"huntloop.embeddings could not be imported ({type(exc).__name__}: {exc}). This "
+            "deployment has no sentence-transformers/torch install."
+        ) from exc
+
+    return embed_text(text)
 
 
 def embed_resume_text(db: Session, text: str) -> tuple[list[float], bool]:
     """Embedding-only path for PATCH /resumes/{id}/activate's
     backfill-missing-embedding branch. Tries Modal first, falls back to
     the local embed_text() on any failure. Returns (embedding,
-    used_modal); never raises."""
+    used_modal). Raises only LocalProcessingUnavailable, and only when
+    that local fallback cannot run either - see that class's
+    docstring."""
     try:
         embedding = _invoke_modal(db, EMBED_TEXT_FUNCTION, (text,), "resume embedding")
         logger.info("Computed resume embedding via Modal")
@@ -324,6 +411,4 @@ def embed_resume_text(db: Session, text: str) -> tuple[list[float], bool]:
     except ModalUnavailable as e:
         logger.warning(f"Modal unavailable for resume embedding, falling back to the local path: {e}")
         record_modal_invocation(function=EMBED_TEXT_FUNCTION, outcome=f"fallback_{e.reason}")
-        from huntloop.embeddings import embed_text  # lazy
-
-        return embed_text(text), False
+        return _local_embed_text(text), False

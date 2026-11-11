@@ -1927,13 +1927,174 @@ conventions" and SESSIONS.md for the real current state).
   clearing `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` for every test in the
   module, so the suite stays hermetic regardless of what's in a real
   developer's `.env`. Full suite: 535/535 passing.
-  **Not yet done, deliberately out of scope for this step**: the actual
-  Resume Deep-Dive feature and its request/202/background/poll async
-  flow (Phase B), and a Grafana panel for this ledger/invocation activity
-  (Phase C) — see the investigation this phase was scoped from for why
-  those are separate, later steps, including a real open question Phase
-  B will need to resolve (no submitter-facing poll-by-id endpoint exists
-  anywhere in this codebase yet to copy from).
+  **Phase B (the Resume Deep-Dive itself) and Phase C (a Grafana view of
+  this ledger) are both BUILT now, 2026-11-07 — see the Resume Deep-Dive
+  bullet immediately below.** The open question flagged here (no
+  submitter-facing poll-by-id endpoint existed anywhere in this codebase
+  to copy from) was resolved by setting that convention in
+  `huntloop.api.routers.deep_dive`, which is now the reference for any
+  future spawn-and-poll flow.
+
+- **Resume Deep-Dive — a heavier per-job skill-gap analysis of the
+  active resume, run on Modal and POLLED by the frontend (added
+  2026-11-07, see SESSIONS.md). The first spawn-and-poll flow in this
+  codebase; nothing here existed to copy from.** Five new modules plus
+  one migration:
+  - `huntloop.deep_dive` — the prompt, the three-stage provider chain
+    (Groq `gpt-oss-120b` → Groq `gpt-oss-20b` → Gemini, the project's
+    standard order), and `validate_deep_dive_result()`. **It runs INSIDE
+    the Modal container, not in the API process**, so unlike every other
+    LLM module here it has NO import-time key check and NO module-level
+    third-party imports (`groq`/`requests` are lazy; `dotenv` is never
+    imported — see `huntloop.modal_resume_functions`' docstring for the
+    crash-loop that class of import caused the first time). Keys are
+    read at call time only. Carries the same résumé-grounding rule the
+    2026-08-30 Gemini prompt fix added ("the job posting mentions X" ≠
+    "the résumé shows X"), which matters more here since every
+    `strengths` entry must cite its own résumé evidence. Raises
+    `AllDeepDiveProvidersFailed` rather than returning None — a
+    Deep-Dive is one user-initiated run whose row must end up `failed`
+    with a real reason, not left NULL for a later batch.
+  - `huntloop.modal_resume_functions.deep_dive_remote` — the Modal
+    function. Attaches **`modal.Secret.from_name("huntloop-llm")`**
+    (must contain `GROQ_API_KEY`, optionally `GEMINI_API_KEY`; created
+    out of band by the owner, no value in this repo). Takes plain data,
+    **touches no database** (this container has neither sqlalchemy nor a
+    DATABASE_URL), `timeout=600`, and **`retries=0` stated explicitly
+    because it is load-bearing**: budget is reserved once per dispatch,
+    so a silent Modal retry would spend compute against a slot nobody
+    reserved. The image gained `groq` + `requests` — **Modal image only**;
+    both were already in `requirements.txt`/`requirements-demo.txt`, so
+    no dependency file changed.
+  - `huntloop.modal_deep_dive` — spawn + non-blocking reconcile; the
+    only place Modal client calls for this feature live. Reuses
+    `ModalUnavailable`/`_prepare_invocation` from
+    `huntloop.modal_resume_processing` unchanged. **`.spawn()`, not
+    `.remote()`** — a run takes minutes, which no HTTP request should
+    hold open. **The result is COPIED into our own database on the first
+    successful poll**: a Modal `FunctionCall`'s output expires
+    (`OutputExpiredError`), so `resume_deep_dives.modal_call_id` is only
+    a handle, valid for the window the call is still resolvable.
+    **`reconcile_deep_dive()`'s catch order is load-bearing and was
+    verified against the installed modal client (1.6.1), not assumed:**
+    an unfinished call raises `modal.exception.TimeoutError`, which is
+    **NOT** a subclass of the builtin `TimeoutError` (a bare
+    `except TimeoutError` never fires, so every still-running poll would
+    be recorded as a permanent failure), and
+    `modal.exception.OutputExpiredError` **IS a subclass of modal's
+    TimeoutError**, so it must be caught FIRST or an expired output is
+    misread as "still running" forever.
+  - `huntloop.api.routers.deep_dive` — the row lifecycle.
+    **`POST /jobs/{job_id}/deep-dive`**: 404 unknown job, 400 no active
+    resume; a `done` row → 200 with the full record; a fresh
+    `pending`/`running` row → 202 with that same record and **no second
+    dispatch**; a `failed` or stale row → re-dispatch in place (same
+    row, unique on `(resume_version_id, job_posting_id)` — not a history
+    table). **`GET /deep-dives/{id}`** is the poll: a `running` row is
+    reconciled against Modal under a `SELECT ... FOR UPDATE` row lock so
+    concurrent polls can't double-write, and the returned payload is
+    **re-validated** before being stored (this process didn't produce
+    that JSON; a successful Modal call is not on its own a reason to
+    trust its shape). Both routes are plain `def` so the blocking Modal
+    client call runs in a worker thread, same reasoning
+    `_invoke_modal` already documents.
+    **Mounted in BOTH demo and non-demo mode** (like `feedback.router`,
+    unlike `drafting.router`/`resumes.unsafe_router`): it takes no
+    upload and no caller-supplied credential, since the LLM keys live
+    only in the Modal Secret. **There is NO local fallback in any
+    environment, deliberately** — the API has no LLM keys by design, so
+    "Modal unavailable" genuinely means "cannot be done here" and gets a
+    structured 503, never a silent degradation.
+    **Errors are `{"detail": "<human>", "code": "<machine>"}`** —
+    `detail` stays exactly where the ATS-report 503 puts it so
+    `frontend/src/lib/api.ts`'s existing reader works, with `code`
+    alongside (`job_not_found` / `no_active_resume` /
+    `deep_dive_not_found` / `modal_unavailable` / `budget_exhausted` /
+    `rate_limited`). A plain `HTTPException` can't express that shape,
+    hence `DeepDiveError` + a handler registered in `create_app()`.
+    Per-IP rate limit 5/60s on POST only (same `_RateLimiter`).
+  - **Migration `d5e7f9a1b3c6`** (`resume_deep_dives`), chained to
+    `c4d6e8f0a2b4`. Enum `deep_dive_status` with lowercase labels; the
+    model's `Enum` column passes `values_callable` for the same reason
+    `JobApplication.status` does. **Do NOT pre-create the enum with
+    `.create(checkfirst=True)` before `op.create_table`** — `create_table`
+    emits its own `CREATE TYPE` for an Enum column, so pre-creating it
+    fails with `DuplicateObject` (hit for real while testing this
+    migration locally). `result` is cleared with **`sqlalchemy.null()`,
+    never a bare `None`** — the same JSON-column distinction that cost
+    this project a real bug on `job_postings.matched_skills`.
+  - **Ledger weighting.** `_reserve_invocation_slot(db, weight=1)` —
+    every pre-existing caller is unchanged (`used + 1 > budget` is
+    exactly the old `used >= budget`). A Deep-Dive reserves
+    `MODAL_DEEP_DIVE_WEIGHT` (env, default 5) as an **approximation** of
+    its heavier credit use, not a measured figure (Modal exposes no
+    per-call cost). A reservation that would cross the cap is **refused
+    outright, never partially granted** — weight 5 with 3 slots left is
+    refused, leaving those 3 for a weight-1 caller. Budget-threshold
+    alerts stay correct under weighting (a jump crossing 80% and 95% at
+    once sends both, once each) — asserted in a test, not assumed.
+  - **`DEEP_DIVE_STALE_MINUTES`** (env, default 10) bounds how long a
+    `running` row may sit before a POST may start it over.
+  - **TIMESTAMP CLOCK — a real bug found by running the endpoint, not by
+    inspection.** `created_at`/`updated_at` are filled by `func.now()`,
+    i.e. the POSTGRES session's timezone, which is **not necessarily
+    UTC** (on this dev machine it is `America/New_York`). Setting
+    `dispatched_at` from Python's UTC clock put it five hours off the
+    other two, which (a) made the Grafana completion-time panel read
+    **negative five hours** and (b) made `_is_stale()`'s `created_at`
+    fallback mark a seconds-old row as stale, which would have
+    re-dispatched every POST and burned budget on repeat. Fixed by
+    writing `dispatched_at` with `func.now()` and reading "now" from the
+    database in `_is_stale()`. **Don't reintroduce a Python-side
+    timestamp on this table** — it is only correct on a server that
+    happens to be set to UTC.
+  - **Frontend**: `frontend/src/components/DeepDivePanel.tsx` on the job
+    detail page (rendered in demo mode too). Idle → starting → running →
+    done/failed, plus distinct copy for `no_active_resume`,
+    `budget_exhausted` (no retry button — retrying can't help until the
+    month rolls over) and `modal_unavailable`. Polls with TanStack
+    Query's `refetchInterval`, 3s → 5s → 10s, stopping dead on a
+    terminal status and giving up after 11 minutes (just past the
+    server-side 600s Modal timeout) with a clear message.
+    **It never POSTs on mount** — POST also re-dispatches a failed row,
+    so auto-running on page load would silently spend budget; idle until
+    the user presses the button is the only safe default. Every `result`
+    field is read defensively. `deepDiveErrorInfo()` in `lib/api.ts`
+    reads the `{detail, code}` body, mirroring
+    `atsReportUnavailableMessage` and adding the code.
+  - **Observability**: `huntloop.modal_metrics`' existing counters now
+    also record `function="deep_dive_remote"`, with three extra outcomes
+    for the spawn-and-poll shape (`spawned` at dispatch, then `success`
+    or `failed` at reconciliation) — so one run normally records TWO
+    increments, and `spawned` exceeding success+failed is the signal for
+    runs nobody polled to completion. Plus a new dashboard,
+    `observability/grafana/provisioning/dashboards/huntloop-deep-dive.json`
+    (uid `huntloop-deep-dive`), which — unlike every other dashboard
+    here — reads **Postgres directly** via a new provisioned datasource
+    (uid `huntloop-postgres`), because "how many Deep-Dives are in each
+    status" is a row count, not a pushed metric. That datasource takes
+    every connection field from `HUNTLOOP_PG_*` env vars set on the
+    `grafana` service, defaulting to the local database through
+    `host.docker.internal` — **no credential is committed**. Pointing it
+    at Neon is **documented but deliberately not set up** (see
+    docs/DEPLOY_DEMO.md — it needs a dedicated read-only role first).
+  - **Manual steps this feature needs before it works anywhere** (none
+    of them done in-repo): create the `huntloop-llm` Modal Secret,
+    `modal deploy src/huntloop/modal_resume_functions.py`, set
+    `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` on Render (declared
+    `sync: false` in `render.yaml`), and run the migration against Neon.
+    Until then the endpoint returns a clean 503 and the panel says so —
+    nothing is broken. **Real end-to-end verification against live Modal
+    is still outstanding**; everything verified so far used a stubbed
+    Modal client (see SESSIONS.md).
+  - **Also hardened here**: `huntloop.modal_resume_processing`'s local
+    fallback now raises a typed `LocalProcessingUnavailable` when its
+    lazy `huntloop.embeddings` import fails, and
+    `huntloop.api.routers.resumes` converts that into a structured 503
+    instead of the bodyless 500 a bare `ImportError` used to produce.
+    And `scripts/build_demo_dataset.py`'s `_force_clear_target()` now
+    clears `resume_deep_dives` before `job_postings`/`resume_versions`
+    (its two NOT NULL parents); the builder never generates Deep-Dives.
 - **`DEMO_MODE` + a public Neon deployment exist (`huntloop.demo_mode`,
   `scripts/build_demo_dataset.py`/`scripts/deploy_demo_data.py`) — the
   public demo database's `companies` table is near-complete, NOT a small

@@ -622,3 +622,76 @@ def test_oversized_upload_is_rejected_with_413(api_client, db_session):
     # a request this large - it was rejected before upload_resume() (the
     # route handler) ever ran.
     assert db_session.query(ResumeVersion).count() == 0
+
+
+# ---------------------------------------------------------------------
+# "No Modal and no local fallback either" -> a structured 503, never a
+# bodyless 500. See huntloop.modal_resume_processing.
+# LocalProcessingUnavailable for the full reasoning; the point of these
+# tests is that a deployment with no sentence-transformers/torch (the
+# lean demo image, and this project's own dev venv) reports an
+# unconfigured deployment cleanly instead of crashing.
+# ---------------------------------------------------------------------
+
+
+@pytest.fixture()
+def no_embeddings_module(monkeypatch):
+    """The inverse of stub_embed_text: makes `import huntloop.embeddings`
+    raise ImportError, which is what Python's import system does for a
+    sys.modules entry set to None. Simulates the missing module without
+    needing an environment that genuinely lacks it."""
+    monkeypatch.setitem(sys.modules, "huntloop.embeddings", None)
+
+
+def test_upload_returns_503_when_neither_modal_nor_a_local_fallback_is_available(
+    api_client, db_session, no_embeddings_module, _uploaded_paths
+):
+    pdf_bytes = _minimal_pdf_bytes("Some resume content AAA")
+
+    response = api_client.post(
+        "/resumes/upload", files={"file": ("r.pdf", pdf_bytes, "application/pdf")}
+    )
+
+    assert response.status_code == 503
+    assert isinstance(response.json()["detail"], str)
+    assert response.json()["detail"]  # a real message, not an empty body
+    # No half-created version row is left behind.
+    assert db_session.query(ResumeVersion).count() == 0
+
+
+def test_activate_returns_503_when_an_embedding_is_needed_but_unavailable(
+    api_client, db_session, no_embeddings_module
+):
+    """Activation only needs an embedding when the target row has none.
+    With no way to compute one, the row must stay INACTIVE rather than
+    being activated with a NULL embedding (which would silently make
+    every job's match_score NULL)."""
+    active = _seed_resume(db_session, 1, is_active=True, embedding=EMBEDDING_A)
+    target = _seed_resume(db_session, 2, is_active=False, embedding=None)
+
+    response = api_client.patch(f"/resumes/{target.id}/activate")
+
+    assert response.status_code == 503
+    assert isinstance(response.json()["detail"], str)
+
+    db_session.refresh(active)
+    db_session.refresh(target)
+    assert active.is_active is True
+    assert target.is_active is False
+    assert target.embedding is None
+
+
+def test_activate_still_works_with_no_embeddings_module_when_one_is_already_stored(
+    api_client, db_session, no_embeddings_module
+):
+    """The 503 guard must be scoped to the branch that genuinely needs
+    the model - activating a row that already has an embedding never
+    imports huntloop.embeddings at all and must keep working."""
+    _seed_resume(db_session, 1, is_active=True, embedding=EMBEDDING_A)
+    target = _seed_resume(db_session, 2, is_active=False, embedding=EMBEDDING_B)
+
+    response = api_client.patch(f"/resumes/{target.id}/activate")
+
+    assert response.status_code == 200
+    db_session.refresh(target)
+    assert target.is_active is True

@@ -887,3 +887,84 @@ class ResumeAtsReport(Base):
 
     def __repr__(self):
         return f"<ResumeAtsReport(resume_version_id={self.resume_version_id}, score={self.score})>"
+
+
+class DeepDiveStatus(str, enum.Enum):
+    """Lifecycle of one Resume Deep-Dive run (see ResumeDeepDive below).
+
+    `pending` is the brief window between the row being created and the
+    Modal call actually being spawned; `running` means a Modal call id
+    is on the row and has not resolved yet; `done` and `failed` are the
+    two terminal states the frontend stops polling on.
+    """
+
+    PENDING = "pending"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+
+
+class ResumeDeepDive(Base):
+    """
+    One heavier skill-gap analysis of a resume version against a single
+    job posting - the Resume Deep-Dive (see huntloop.deep_dive,
+    huntloop.modal_deep_dive, huntloop.api.routers.deep_dive).
+
+    Keyed by (resume_version_id, job_posting_id) with a unique
+    constraint, the same shape ResumeSkillMatch above already uses for
+    per-resume-version job data: one Deep-Dive per resume/job pair, not
+    a history table. Re-running a failed or stale Deep-Dive updates this
+    same row in place rather than inserting a second one.
+
+    `modal_call_id` is ONLY a handle, never the storage. Modal's own
+    function-call results expire (modal.exception.OutputExpiredError),
+    so the finished payload is copied into `result` here the first time
+    a poll sees it; after that this row is self-sufficient and the call
+    id is of historical interest only. `result` is the validated dict
+    huntloop.deep_dive.validate_deep_dive_result() returns (carrying its
+    own `version` field), never a raw provider response.
+
+    `error` is a short, SANITIZED message - an exception type and a
+    human sentence, never raw provider output and never resume or job
+    text, both of which can be echoed back inside a provider's own
+    error body.
+    """
+    __tablename__ = "resume_deep_dives"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    resume_version_id = Column(
+        Integer, ForeignKey("resume_versions.id", ondelete="CASCADE"), nullable=False
+    )
+    job_posting_id = Column(
+        Integer, ForeignKey("job_postings.id", ondelete="CASCADE"), nullable=False
+    )
+    status = Column(
+        # Same values_callable requirement as JobApplication.status above -
+        # without it SQLAlchemy maps the Python member NAME ("PENDING")
+        # instead of the lowercase .value the migration's Postgres enum
+        # labels actually use, and every read raises LookupError. See
+        # that column's own comment for the full history.
+        Enum(DeepDiveStatus, name="deep_dive_status", values_callable=lambda cls: [e.value for e in cls]),
+        nullable=False,
+        default=DeepDiveStatus.PENDING,
+        server_default=DeepDiveStatus.PENDING.value,
+    )
+    modal_call_id = Column(String(255), nullable=True)
+    result = Column(JSON, nullable=True)
+    error = Column(Text, nullable=True)
+    dispatched_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "resume_version_id", "job_posting_id",
+            name="uq_resume_deep_dives_resume_job",
+        ),
+    )
+
+    def __repr__(self):
+        return (
+            f"<ResumeDeepDive(resume_version_id={self.resume_version_id}, "
+            f"job_posting_id={self.job_posting_id}, status={self.status})>"
+        )

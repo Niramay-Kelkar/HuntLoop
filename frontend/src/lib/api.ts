@@ -38,6 +38,8 @@ import type {
   PublicFeedbackItem,
   ResumeVersionSummary,
   AtsReportResponse,
+  DeepDiveErrorCode,
+  DeepDiveResponse,
 } from "@/types/api";
 
 // Exported so lib/adminApi.ts (a separate module since its requests need
@@ -287,4 +289,56 @@ export function submitFeedback(payload: FeedbackSubmitRequest): Promise<Feedback
 // endpoint's docstring.
 export function getPublicFeedback(): Promise<PublicFeedbackItem[]> {
   return apiFetch<PublicFeedbackItem[]>("/feedback/public");
+}
+
+// POST /jobs/{id}/deep-dive (huntloop.api.routers.deep_dive) - starts,
+// or returns, the Resume Deep-Dive for this job against the active
+// resume. Idempotent per (job, active resume): a 202 means a run is in
+// flight (newly started or already running), a 200 means a finished one
+// already existed. Either way the body is the same shape, so callers
+// don't branch on the status code - they branch on `status`.
+export function startDeepDive(jobId: number): Promise<DeepDiveResponse> {
+  return apiFetch<DeepDiveResponse>(`/jobs/${jobId}/deep-dive`, { method: "POST" });
+}
+
+// GET /deep-dives/{id} - the polling endpoint. The server reconciles a
+// `running` row against Modal on each call, so polling is what actually
+// advances a run to done/failed; stop polling once `status` is one of
+// those two.
+export function getDeepDive(deepDiveId: number): Promise<DeepDiveResponse> {
+  return apiFetch<DeepDiveResponse>(`/deep-dives/${deepDiveId}`);
+}
+
+/**
+ * Reads a Deep-Dive endpoint's structured error body
+ * ({"detail": "<human message>", "code": "<machine code>"}).
+ *
+ * Same shape and the same reasoning as atsReportUnavailableMessage
+ * above - the backend's own `detail` is shown rather than a generic
+ * alarm - but this one also returns `code`, because the UI genuinely
+ * has to word two of them differently: budget_exhausted is "come back
+ * next month" while modal_unavailable is "try again later", and
+ * no_active_resume isn't an error at all so much as a missing
+ * prerequisite.
+ *
+ * Returns null for anything that isn't an ApiError with a parseable
+ * {detail, code} JSON body - an unknown 503 from a proxy's own error
+ * page, a network failure, a timeout - all of which really are
+ * unexpected and should fall through to the generic error state.
+ */
+export function deepDiveErrorInfo(
+  error: unknown,
+): { detail: string; code: DeepDiveErrorCode } | null {
+  if (!(error instanceof ApiError)) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(error.detail);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const { detail, code } = parsed as { detail?: unknown; code?: unknown };
+  if (typeof detail !== "string" || detail.trim() === "") return null;
+  if (typeof code !== "string" || code.trim() === "") return null;
+  return { detail: detail.trim(), code: code.trim() };
 }

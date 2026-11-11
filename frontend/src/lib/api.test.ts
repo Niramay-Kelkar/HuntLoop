@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
   atsReportUnavailableMessage,
+  deepDiveErrorInfo,
   getJob,
   getJobs,
   getLocations,
@@ -212,5 +213,51 @@ describe("atsReportUnavailableMessage", () => {
     expect(atsReportUnavailableMessage(new Error("boom"))).toBeNull();
     expect(atsReportUnavailableMessage(null)).toBeNull();
     expect(atsReportUnavailableMessage(undefined)).toBeNull();
+  });
+});
+
+// deepDiveErrorInfo reads the Deep-Dive endpoints' structured
+// {detail, code} error body. Same contract as
+// atsReportUnavailableMessage above, plus the machine code - the UI
+// genuinely words budget_exhausted and modal_unavailable differently.
+describe("deepDiveErrorInfo", () => {
+  it("returns detail and code for a structured error body", () => {
+    const err = new ApiError(
+      "POST failed with 503",
+      503,
+      JSON.stringify({ detail: "Budget used up.", code: "budget_exhausted" }),
+    );
+    expect(deepDiveErrorInfo(err)).toEqual({
+      detail: "Budget used up.",
+      code: "budget_exhausted",
+    });
+  });
+
+  it("works for any status, not just 503", () => {
+    const err = new ApiError(
+      "POST failed with 400",
+      400,
+      JSON.stringify({ detail: "No active resume is on file.", code: "no_active_resume" }),
+    );
+    expect(deepDiveErrorInfo(err)?.code).toBe("no_active_resume");
+  });
+
+  it("returns null when the body is not JSON", () => {
+    expect(deepDiveErrorInfo(new ApiError("x", 503, "<html>gateway error</html>"))).toBeNull();
+  });
+
+  it("returns null when the body has no code", () => {
+    const err = new ApiError("x", 503, JSON.stringify({ detail: "Something." }));
+    expect(deepDiveErrorInfo(err)).toBeNull();
+  });
+
+  it("returns null when the body has no detail", () => {
+    const err = new ApiError("x", 503, JSON.stringify({ code: "modal_unavailable" }));
+    expect(deepDiveErrorInfo(err)).toBeNull();
+  });
+
+  it("returns null for a non-ApiError", () => {
+    expect(deepDiveErrorInfo(new Error("boom"))).toBeNull();
+    expect(deepDiveErrorInfo(null)).toBeNull();
   });
 });
