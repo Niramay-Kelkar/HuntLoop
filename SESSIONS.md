@@ -15315,3 +15315,96 @@ Backend suite 667 passed; frontend suite 149 passed (20 files).
 `modal_usage` was left untouched at `2026-10 = 9`, `2026-11 = 20` —
 real spend. 20 rather than 15 because of the 5 the bug above charged
 before it was fixed.
+
+---
+
+## 2026-11-12 — Redesign the Resume Deep-Dive panel as a report
+
+**Did:** A frontend-only design pass over `DeepDivePanel.tsx`. The
+finished state used to read as a flat stack of same-weight rows; it now
+reads as a report, inside the existing "Register" visual identity (no
+new tokens, fonts, dependencies, shadows, radii above 4px, or one-off
+`text-[Npx]`). **No API, backend, type, query-key or polling change** —
+the lifecycle, the back-off schedule, the 11-minute ceiling and every
+error state behave exactly as before.
+
+What changed, section by section:
+
+- **Verdict header.** The panel's own `h2` keeps its place; once a
+  report is on screen the intro blurb is replaced by a meta line
+  carrying the job title, the company and, in mono, how long ago the
+  analysis was generated (`timeAgo(updated_at)`, the helper the job
+  detail page already uses). `DeepDivePanel` therefore takes two new
+  optional props, `jobTitle` / `companyName`, passed from
+  `JobDetailClient` — optional so the panel still renders standalone.
+  The fit rating became a ruled stamp (`FitStamp`) in the
+  SponsorBadge idiom, with the rating **spelled out** — STRONG FIT /
+  MODERATE FIT / STRETCH — so colour is only ever a second, redundant
+  signal. Stretch is deliberately neutral rather than red: a stretch
+  role is a real option, not an error. The summary sits beside it at
+  16px, capped at a 65-character measure.
+- **Strengths.** Two columns on desktop, one below `sm`. The point is a
+  semibold 16px line; the evidence is a `blockquote` with a 2px accent
+  rule and an 11px "FROM YOUR RESUME" label, so a quote from the resume
+  is visibly a quote.
+- **Gaps.** Sorted high → medium → low, stable within a level (`Array#sort`
+  is stable, so the model's own ordering survives inside a level; an
+  unrecognised importance sorts last rather than being dropped).
+  Importance is a small ruled tag: a three-step bar **plus** the word.
+  Each gap is a heading with two labelled blocks, "Why it matters" and
+  "How to close it", side by side on desktop and stacked below `sm`.
+  Past three gaps the rest fold behind "Show N more" (the heading's
+  count still reports the true total).
+- **Resume edits.** A ruled list, mono section label over the
+  suggestion, with a real `<button>` Copy per row that writes that row's
+  own suggestion to the clipboard and shows "Copied" for two seconds. A
+  clipboard rejection is swallowed rather than claiming a copy that
+  never happened.
+- **Interview focus / caveats.** Focus items are square hairline chips;
+  caveats are a quiet note. Both sections, heading included, vanish
+  entirely when their list is empty.
+- **Running state.** The bare status line became an honest indeterminate
+  ruled bar, a real elapsed-seconds counter in mono, and "Usually takes
+  10 to 20 seconds". **No faked stages — the backend reports none.** The
+  sweep is defined as `.deep-dive-bar` in `globals.css` with an explicit
+  `prefers-reduced-motion` branch that replaces it with a static
+  full-width track rather than a frozen one-third segment.
+- **Accessibility.** Real `h2`/`h3`/`h4` hierarchy, exactly one
+  `role="status" aria-live="polite"` region per state (the progress
+  label while running, the notice title on an error, the meta line when
+  a report lands), `aria-label` on the importance tag and the Copy
+  button, an `sr-only` spelling of the elapsed counter, and the global
+  2px `:focus-visible` ring on every control. Verified single-column
+  with no horizontal scroll at a 500px viewport.
+
+One lint fix the redesign forced: the elapsed counter needs the run's
+start instant during render, and `react-hooks/refs` rightly rejects
+reading `startedAtRef.current` there. The instant is now held twice —
+the ref for `refetchInterval` and the timeout effect, a state value for
+the counter — set together in the mutation's `onMutate`.
+
+**Verified:** Driven in a real browser at `http://localhost:3010`
+against a local API on port 8010 (local Postgres `localhost/jobsight`),
+using **three clearly-labelled test rows inserted directly into the
+local `resume_deep_dives` table** — a full six-gap mixed-importance
+result, a minimal result with empty `interview_focus`/`caveats` and one
+gap, and one `running` row. The running row was given a NULL
+`modal_call_id` on purpose: `get_deep_dive` returns such a row untouched
+without reconciling, so **Modal was never contacted and no credit was
+spent.** Confirmed live: the fold and its count, the sort order, Copy
+showing "Copied" on the right row, the empty sections disappearing
+heading and all, the elapsed counter ticking, and the keyboard focus
+ring. Before/after screenshots at 1440px and 500px were captured outside
+the repo.
+
+Frontend suite **160 passed (20 files)**, up from the 149 baseline — 11
+new Deep-Dive tests covering the hidden empty sections, the importance
+sort (including stability within a level), the fold, the Copy button's
+target text and confirmation, each fit-stamp wording, an unrecognised
+rating, and the elapsed counter. `tsc --noEmit` and `npm run build`
+clean. `eslint` is clean apart from one **pre-existing** error in
+`FeedbackTrigger.tsx` (confirmed present on master, left alone).
+
+**Cleanup:** all three test rows deleted; `resume_deep_dives` is back to
+0 rows, its state before this session. Nothing was written to Neon or
+any live service.

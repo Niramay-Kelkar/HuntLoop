@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DeepDivePanel } from "./DeepDivePanel";
 import { ApiError } from "@/lib/api";
 import * as api from "@/lib/api";
-import type { DeepDiveResponse, DeepDiveResult } from "@/types/api";
+import type { DeepDiveGap, DeepDiveResponse, DeepDiveResult } from "@/types/api";
 
 /**
  * The real logic worth pinning down here is the polling lifecycle -
@@ -312,5 +312,167 @@ describe("DeepDivePanel", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(get.mock.calls.length).toBe(callsAtGiveUp);
     expect(screen.getByRole("button", { name: /start a new run/i })).toBeInTheDocument();
+  });
+
+  /**
+   * The report layout itself. These cover the parts that are real logic
+   * rather than markup: which sections appear at all, the order gaps are
+   * presented in, the fold, the copy affordance, and the honest elapsed
+   * counter on the running state.
+   */
+  describe("report layout", () => {
+    /** Renders a finished result and waits for it to be on screen. */
+    async function renderResult(result: DeepDiveResult) {
+      vi.spyOn(api, "startDeepDive").mockResolvedValue(makeRecord({ status: "done", result }));
+      vi.spyOn(api, "getDeepDive").mockResolvedValue(makeRecord({ status: "done", result }));
+      renderPanel();
+      await click(screen.getByRole("button", { name: /run deep-dive/i }));
+      await waitFor(() => expect(screen.getByRole("button", { name: /run again/i })).toBeInTheDocument());
+    }
+
+    function gap(skill: string, importance: string): DeepDiveGap {
+      return {
+        skill,
+        importance,
+        why_it_matters: `${skill} matters here.`,
+        how_to_close: `Practise ${skill}.`,
+      } as DeepDiveGap;
+    }
+
+    /** The skill headings, in the order they are rendered. */
+    function renderedGapSkills(): string[] {
+      return screen
+        .getAllByRole("heading", { level: 4 })
+        .map((heading) => heading.textContent ?? "");
+    }
+
+    it("hides the interview-focus and caveats sections, headings included, when their lists are empty", async () => {
+      await renderResult({ ...RESULT, interview_focus: [], caveats: [] });
+
+      // The sections that do have content are still there...
+      expect(screen.getByText("Strengths")).toBeInTheDocument();
+      expect(screen.getByText("Gaps")).toBeInTheDocument();
+      // ...and the empty ones are gone entirely - heading and all, not
+      // an empty section with a lonely title.
+      expect(screen.queryByText("Interview focus")).not.toBeInTheDocument();
+      expect(screen.queryByText("Caveats")).not.toBeInTheDocument();
+    });
+
+    it("sorts gaps high, then medium, then low regardless of the order they arrive in", async () => {
+      await renderResult({
+        ...RESULT,
+        gaps: [gap("Terraform", "low"), gap("Kafka", "high"), gap("Go", "medium")],
+      });
+
+      expect(renderedGapSkills()).toEqual(["Kafka", "Go", "Terraform"]);
+    });
+
+    it("keeps the model's own order within one importance level", async () => {
+      await renderResult({
+        ...RESULT,
+        gaps: [gap("Kubernetes", "high"), gap("Kafka", "high"), gap("Go", "medium")],
+      });
+
+      expect(renderedGapSkills()).toEqual(["Kubernetes", "Kafka", "Go"]);
+    });
+
+    it("folds gaps past the third behind a 'Show N more' control that reveals the rest", async () => {
+      await renderResult({
+        ...RESULT,
+        gaps: [
+          gap("Kubernetes", "high"),
+          gap("Kafka", "high"),
+          gap("Go", "medium"),
+          gap("Terraform", "medium"),
+          gap("gRPC", "low"),
+        ],
+      });
+
+      expect(renderedGapSkills()).toEqual(["Kubernetes", "Kafka", "Go"]);
+      // The count in the heading still reports every gap, not just the
+      // visible ones.
+      const showMore = screen.getByRole("button", { name: "Show 2 more" });
+
+      await click(showMore);
+
+      expect(renderedGapSkills()).toEqual(["Kubernetes", "Kafka", "Go", "Terraform", "gRPC"]);
+      expect(screen.getByRole("button", { name: /show fewer/i })).toBeInTheDocument();
+    });
+
+    it("shows no fold control when there are three gaps or fewer", async () => {
+      await renderResult({ ...RESULT, gaps: [gap("Kafka", "high"), gap("Go", "medium")] });
+
+      expect(screen.queryByRole("button", { name: /show \d+ more/i })).not.toBeInTheDocument();
+    });
+
+    it("copies the matching suggestion and confirms, then returns to its resting label", async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, "clipboard", {
+        value: { writeText },
+        configurable: true,
+      });
+
+      await renderResult({
+        ...RESULT,
+        resume_edits: [
+          { section: "Summary", suggestion: "Lead with payments infrastructure." },
+          { section: "Skills", suggestion: "Drop jQuery; add Docker." },
+        ],
+      });
+
+      const copyButtons = screen.getAllByRole("button", { name: /copy suggestion/i });
+      expect(copyButtons).toHaveLength(2);
+
+      // The second button must copy the SECOND suggestion, not the first.
+      await click(copyButtons[1]);
+
+      expect(writeText).toHaveBeenCalledTimes(1);
+      expect(writeText).toHaveBeenCalledWith("Drop jQuery; add Docker.");
+      await waitFor(() => expect(copyButtons[1]).toHaveTextContent("Copied"));
+      // The other button is untouched.
+      expect(copyButtons[0]).toHaveTextContent("Copy");
+
+      // The confirmation is temporary.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_500);
+      });
+      expect(copyButtons[1]).toHaveTextContent("Copy");
+    });
+
+    it.each([
+      ["strong", "Strong fit"],
+      ["moderate", "Moderate fit"],
+      ["stretch", "Stretch"],
+    ])("spells the %s fit rating out in the stamp", async (rating, label) => {
+      await renderResult({ ...RESULT, fit_rating: rating });
+
+      // The word itself carries the verdict - colour is only a second,
+      // redundant signal.
+      expect(screen.getByText(label)).toBeInTheDocument();
+    });
+
+    it("renders an unrecognised fit rating as its own text rather than dropping it", async () => {
+      await renderResult({ ...RESULT, fit_rating: "excellent" });
+
+      expect(screen.getByText("excellent")).toBeInTheDocument();
+    });
+
+    it("shows a ticking elapsed counter while a run is in progress", async () => {
+      vi.spyOn(api, "startDeepDive").mockResolvedValue(makeRecord({ status: "running" }));
+      vi.spyOn(api, "getDeepDive").mockResolvedValue(makeRecord({ status: "running" }));
+
+      renderPanel();
+      await click(screen.getByRole("button", { name: /run deep-dive/i }));
+
+      await waitFor(() => expect(screen.getByText("0s")).toBeInTheDocument());
+      expect(screen.getByText(/usually takes 10 to 20 seconds/i)).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+
+      // Real elapsed time, not a faked stage sequence.
+      await waitFor(() => expect(screen.getByText(/^[45]s$/)).toBeInTheDocument());
+    });
   });
 });
