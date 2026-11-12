@@ -264,6 +264,17 @@ def _prepare_invocation(db: Session, function_name: str, weight: int = 1):
 
     try:
         fn = modal.Function.from_name(MODAL_APP_NAME, function_name)
+        # from_name() is LAZY - it builds a handle without contacting
+        # Modal at all, so on its own it raises for nothing: a bad or
+        # expired token, or an app that was never deployed, both sail
+        # through here and only blow up later at the actual .remote()/
+        # .spawn(), which the caller charges as a real invocation.
+        # Found live (2026-11-11, see SESSIONS.md): a deliberately fake
+        # MODAL_TOKEN_ID still reserved the full Deep-Dive weight before
+        # failing. hydrate() forces the lookup to happen HERE, which is
+        # what makes the "a lookup failure is never charged" contract
+        # above actually hold.
+        fn.hydrate()
     except Exception as e:
         raise ModalUnavailable(
             f"Could not look up Modal function {function_name!r} - not deployed yet, or a "

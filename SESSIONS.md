@@ -15193,3 +15193,125 @@ a scratchpad script that never emits a value): `.env` — 16 assignments,
 unquoted and containing `&` and `?`: `TARGET_DATABASE_URL_DIRECT` (line
 2) and `TARGET_DATABASE_URL_POOLED` (line 3). These are exactly the two
 lines that caused the leak. Left for the owner to quote.
+
+## 2026-11-11 — First real end-to-end verification of the Resume Deep-Dive against live Modal
+
+Everything before this ran against a stubbed Modal client. This is the
+first time `deep_dive_remote` has actually executed on Modal. Verified
+against the LOCAL database only (`localhost:5432/jobsight`, from
+`/Users/niramaykelkar/Desktop/HuntLoop/.env`); `TARGET_DATABASE_URL`,
+`TARGET_DATABASE_URL_DIRECT/_POOLED` and `SOURCE_DATABASE_URL` were
+confirmed unset at runtime, not assumed, and stripped from every child
+process's environment. Nothing was written to Neon and no live Render or
+Vercel URL was called. The only external write was the authorized
+`modal deploy`.
+
+**Pre-flight.** Local database at `d5e7f9a1b3c6 (head)`, single head.
+Modal workspace `niramay-kelkar`, environment `main`, Secret
+`huntloop-llm` present (names only, never values).
+
+**Deploy.** `modal deploy src/huntloop/modal_resume_functions.py` as
+documented **fails outright** — `huntloop has no spec - might not be
+installed?`. The file sits inside the `huntloop` package, which Modal
+resolves and mounts as a whole, so `src` has to be importable. The real
+command is `PYTHONPATH=src modal deploy
+src/huntloop/modal_resume_functions.py`; the docstring, CLAUDE.md and
+docs/DEPLOY_DEMO.md were corrected to say so. With that, the deploy
+built a fresh image in 57s and created all three functions —
+`process_resume_remote`, `embed_text_remote`, `deep_dive_remote` — all
+three confirmed live by hydrating their handles. Because a redeploy
+replaces the two pre-existing functions' code, `embed_text_remote` was
+smoke-tested for real: `"hello world"` returned a 384-float vector, the
+expected `all-MiniLM-L6-v2` width.
+
+**Live runs** (active resume version 4, id 6):
+
+| run | posting | wall time | time after dispatch |
+|---|---|---|---|
+| cold (first ever real call) | 819, Palantir "American Tech Fellowship" | **16.4s** | 12.5s |
+| warm | 845, Wealthfront "Backend Engineer" | **12.7s** | 9.6s |
+| browser | 825, Palantir "Backend SWE - Infrastructure" | ~12s | — |
+
+Far quicker than the panel's "usually takes under a minute" copy, even
+cold — the container cold start is small next to the LLM call.
+
+**Result quality (run on posting 819), judged against the real resume
+text.** Honest verdict: good, and genuinely grounded. The payload
+re-validates through `validate_deep_dive_result()` byte-identically,
+`fit_rating` is a legal value, and every list and string is inside its
+cap (summary 460/1200; strengths 4/6, gaps 2/6, resume_edits 2/6). Each
+of the four strengths cites evidence that is really in the resume —
+checked token by token, every claimed term is present (Java, Python,
+C#, Docker, Kubernetes, GitHub Actions, Jenkins, PostgreSQL, Oracle,
+MySQL, SQL Server, query optimization, indexing, connection pooling,
+the SAP/RFC remediation agent). No skill was claimed that the resume
+does not show. Both gaps are real in both directions: the resume has
+`bash` but never the words `linux` or `shell`, and nothing on
+embedded/firmware/sensors/robotics — and the job description genuinely
+mentions all of them.
+
+**One quality wobble, not a bug:** run 819 returned `interview_focus: []`
+and `caveats: []` while run 845 filled both with five and three items.
+The validator allows empty lists and the panel reads defensively, so
+nothing breaks, but the model is inconsistent about those two fields.
+Flagged, prompt deliberately left alone.
+
+**Ledger.** `MODAL_DEEP_DIVE_WEIGHT` is 5. Before: `2026-10 = 9`, no
+`2026-11` row. After three real dispatches: `2026-11 = 15`, exactly
+3 x 5. A repeat `POST /jobs/819/deep-dive` on an already-`done` row
+returned **200 with the full stored record, did not re-dispatch**
+(`modal_call_id` and `dispatched_at` unchanged) and **did not charge**.
+
+**Modal logs.** Scanned structurally: no value of `GROQ_API_KEY`,
+`GEMINI_API_KEY`, `MODAL_TOKEN_ID/SECRET`, `DATABASE_URL`,
+`POSTGRES_PASSWORD`, `TAVILY_API_KEY`, `CLERK_SECRET_KEY` or
+`RESEND_API_KEY` appears anywhere in them, and no fragment of the resume
+text does either. One real **provider failover** is visible:
+`Groq openai/gpt-oss-120b returned JSON that failed shape validation`
+then `Groq openai/gpt-oss-20b call failed (BadRequestError)` — that run
+was served by Gemini, the third stage. The 120b shape-validation failure
+is the same ~18% `json_validate_failed` flakiness already documented for
+Groq. **Observability gap found:** the success line
+(`Deep-Dive generated via %s`) is `logger.info` and `setup_logging()`
+never runs inside the Modal container, so only WARNING and above
+surface — which means **you cannot tell which provider answered a
+successful run**. Worth fixing separately.
+
+**Browser check.** Frontend run locally against the local API. Clicking
+Run Deep-Dive on the job detail page took the panel idle → running
+("Analyzing your resume against this role…") → done with the MODERATE
+FIT badge, summary and evidence-backed strengths, **without a reload**.
+Polling stopped dead on completion: exactly 3 `GET /deep-dives/13`
+requests, still 3 after a further 10s. Note for local dev: Next 16
+blocks `127.0.0.1` as a cross-origin dev host, so the page renders only
+skeletons there and never calls the API — use `http://localhost:3010`.
+
+**Invalid-token failure path — found and fixed a real bug.** With a
+deliberately fake `MODAL_TOKEN_ID` in one process, the API correctly
+returned **503 `{"detail": ..., "code": "modal_unavailable"}`** and the
+panel correctly showed "Deep-Dive isn't available right now" with a Try
+again button. But **the ledger was charged 5 units for a dispatch Modal
+never received** (15 → 20), contradicting
+`_prepare_invocation`'s own documented contract that a lookup failure
+is never charged.
+
+Cause: `modal.Function.from_name()` is **lazy** — it builds a handle
+without contacting Modal at all, so a bad or expired token, or an app
+that was never deployed, sails straight through the lookup `try` block.
+The budget is then reserved, and the auth failure only surfaces later at
+`.spawn()`, which is classified `invocation_error` and charged on
+purpose. Fix (the one code change in this task): `_prepare_invocation()`
+now calls `fn.hydrate()` inside the same `try`, forcing the lookup to
+really happen before the budget is touched. Re-tested live with the fake
+token: still 503 `modal_unavailable`, ledger unchanged at 20. Covered by
+a new regression test,
+`test_invoke_modal_does_not_charge_when_the_function_fails_to_hydrate`.
+This applies to the resume parse/embed path too, not just Deep-Dive.
+
+Backend suite 667 passed; frontend suite 149 passed (20 files).
+
+**Cleanup.** All 6 `resume_deep_dives` rows this task created (ids
+11-16) were printed and deleted; the table is back to 0 rows.
+`modal_usage` was left untouched at `2026-10 = 9`, `2026-11 = 20` —
+real spend. 20 rather than 15 because of the 5 the bug above charged
+before it was fixed.

@@ -1,8 +1,12 @@
 """
 The actual Modal App/Image/Function definitions for resume parsing +
 embedding generation - deployed via
-`modal deploy src/huntloop/modal_resume_functions.py` (re-run after any
-change to this file). huntloop.modal_resume_processing (the orchestration
+`PYTHONPATH=src modal deploy src/huntloop/modal_resume_functions.py`
+(re-run after any change to this file). The `PYTHONPATH=src` is
+REQUIRED, not optional: this file sits inside the `huntloop` package, so
+Modal resolves and mounts that whole package, and without `src` on the
+path the deploy fails outright with "huntloop has no spec - might not be
+installed?" (hit for real on the first live deploy, 2026-11-11). huntloop.modal_resume_processing (the orchestration
 module huntloop.api.routers.resumes actually calls - budget ledger,
 fallback, SQLAlchemy) is deliberately kept OUT of this file, and this
 file is deliberately kept minimal - see below for why.
