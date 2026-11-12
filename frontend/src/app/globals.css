@@ -168,6 +168,37 @@
 }
 
 /*
+ * The Deep-Dive panel's indeterminate progress bar. The backend reports
+ * no progress stages, so the bar is honestly indeterminate: a short
+ * segment sweeping a fixed track, never a percentage. Kept out of
+ * @layer base so the keyframes are not stripped.
+ *
+ * Under prefers-reduced-motion the sweep is replaced by a static
+ * full-width track rather than a frozen one-third segment, so the
+ * running state still reads as "in progress" without any movement.
+ */
+@keyframes deep-dive-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(300%);
+  }
+}
+
+.deep-dive-bar {
+  animation: deep-dive-sweep 1.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .deep-dive-bar {
+    animation: none !important;
+    width: 100%;
+    opacity: 0.45;
+  }
+}
+
+/*
  * Rendered job-description HTML (sanitized third-party content from the
  * ATS scrapers - see src/lib/sanitizeHtml.ts). Kept out of @layer base
  * so these element rules reliably style the injected markup.

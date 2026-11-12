@@ -189,7 +189,7 @@ export function JobDetailClient({ jobId }: { jobId: number }) {
               and is mounted in both modes (see
               huntloop.api.routers.deep_dive). Placed after the skills
               card because it builds on the same matched/missing split. */}
-          <DeepDivePanel jobId={detail.id} />
+          <DeepDivePanel jobId={detail.id} jobTitle={detail.job_title} companyName={company} />
 
           {!isDemoMode() && <JobAssistantPanel detail={detail} />}
 
