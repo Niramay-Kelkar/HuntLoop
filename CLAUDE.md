@@ -2108,7 +2108,8 @@ conventions" and SESSIONS.md for the real current state).
     docs/DEPLOY_DEMO.md — it needs a dedicated read-only role first).
   - **Manual steps this feature needs before it works anywhere** (none
     of them done in-repo): create the `huntloop-llm` Modal Secret,
-    `modal deploy src/huntloop/modal_resume_functions.py`, set
+    `PYTHONPATH=src modal deploy src/huntloop/modal_resume_functions.py`
+    (the `PYTHONPATH=src` is required - see that file's docstring), set
     `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` on Render (declared
     `sync: false` in `render.yaml`), and run the migration against Neon.
     Until then the endpoint returns a clean 503 and the panel says so —

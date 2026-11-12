@@ -176,6 +176,25 @@ def test_invoke_modal_raises_without_touching_the_ledger_on_lookup_failure(db_se
     assert db_session.query(ModalUsage).filter_by(month=month).first() is None
 
 
+def test_invoke_modal_does_not_charge_when_the_function_fails_to_hydrate(db_session, configured):
+    """modal.Function.from_name() is lazy - it never contacts Modal, so a
+    bad/expired token or a never-deployed app does NOT fail there. Without
+    the explicit hydrate() in _prepare_invocation, that failure surfaces
+    later at .remote()/.spawn() and gets charged as a real invocation.
+    Found live with a deliberately fake MODAL_TOKEN_ID (2026-11-11, see
+    SESSIONS.md), which reserved the full weight for a call Modal never
+    received."""
+    unhydratable = MagicMock()
+    unhydratable.hydrate.side_effect = RuntimeError("401 unauthenticated")
+    with patch("huntloop.modal_resume_processing.modal.Function.from_name", return_value=unhydratable):
+        with pytest.raises(ModalUnavailable, match="Could not look up"):
+            _invoke_modal(db_session, "embed_text_remote", ("some text",), "test")
+
+    unhydratable.remote.assert_not_called()
+    month = _current_month_key()
+    assert db_session.query(ModalUsage).filter_by(month=month).first() is None
+
+
 def test_invoke_modal_reserves_a_slot_before_dispatch_and_returns_the_result(db_session, configured):
     fake_fn = MagicMock()
     fake_fn.remote.return_value = [0.1, 0.2]

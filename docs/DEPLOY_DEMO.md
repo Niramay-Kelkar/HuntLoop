@@ -358,10 +358,13 @@ Create it with `modal secret create huntloop-llm GROQ_API_KEY=... GEMINI_API_KEY
 or through Modal's dashboard. Nothing in this repo reads, writes, logs,
 or needs the values.
 
-**2. Deploy the Modal app.** `modal deploy
+**2. Deploy the Modal app.** `PYTHONPATH=src modal deploy
 src/huntloop/modal_resume_functions.py` — the same command the existing
 resume-processing functions already need, re-run after any change to
-that file. It now also deploys `deep_dive_remote`.
+that file. It now also deploys `deep_dive_remote`. The `PYTHONPATH=src`
+prefix is required: the file lives inside the `huntloop` package, which
+Modal mounts as a whole, and without it the deploy fails with
+"huntloop has no spec - might not be installed?".
 
 **3. Set a dedicated Modal token on Render.** `MODAL_TOKEN_ID` and
 `MODAL_TOKEN_SECRET` are declared in `render.yaml` with `sync: false`,
