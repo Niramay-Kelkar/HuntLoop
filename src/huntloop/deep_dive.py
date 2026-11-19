@@ -78,6 +78,35 @@ from huntloop.text_cleaning import clean_text
 
 logger = logging.getLogger(__name__)
 
+
+def enable_info_logging() -> None:
+    """Makes this module's INFO lines - in particular the "generated
+    via" line naming which provider actually answered - visible in the
+    Modal function's own logs.
+
+    Needed because huntloop.logging_config.setup_logging() is NEVER run
+    inside the Modal container (nothing in huntloop.modal_resume_functions
+    calls it, deliberately - see that module's docstring on keeping the
+    deployed module minimal), so the root logger is left at its default:
+    no handlers and an effective level of WARNING, which means every
+    INFO line here was silently dropped and nobody could tell from the
+    Modal logs which of the three provider stages served a successful
+    run.
+
+    Called from huntloop.modal_resume_functions.deep_dive_remote, i.e.
+    only inside the remote container - the API process keeps using
+    setup_logging() exactly as before. basicConfig() attaches a stderr
+    handler (which Modal captures) and is a no-op if the host already
+    configured handlers, so the two levels are raised explicitly
+    afterwards, and never lowered past a host that asked for DEBUG."""
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    root = logging.getLogger()
+    if root.level == logging.NOTSET or root.level > logging.INFO:
+        root.setLevel(logging.INFO)
+    if logger.level == logging.NOTSET or logger.level > logging.INFO:
+        logger.setLevel(logging.INFO)
+
+
 # Stamped into every stored result so a future prompt/shape change can
 # be told apart from an older cached row without guessing. Bump this
 # when the output shape changes in a way the frontend has to care about.
@@ -434,17 +463,24 @@ def generate_deep_dive(
     )
 
     attempts = (
-        ("groq_120b", lambda: _via_groq(GROQ_PRIMARY_MODEL, user_content)),
-        ("groq", lambda: _via_groq(GROQ_SECONDARY_MODEL, user_content)),
-        ("gemini", lambda: _via_gemini(user_content)),
+        ("groq_120b", GROQ_PRIMARY_MODEL, lambda: _via_groq(GROQ_PRIMARY_MODEL, user_content)),
+        ("groq", GROQ_SECONDARY_MODEL, lambda: _via_groq(GROQ_SECONDARY_MODEL, user_content)),
+        ("gemini", GEMINI_MODEL_NAME, lambda: _via_gemini(user_content)),
     )
 
-    for name, call in attempts:
+    # Provider name, model name and stage number ONLY - never any part
+    # of the prompt, the resume, the job description or the result. See
+    # enable_info_logging() for why these lines need it to be called
+    # first to show up in the Modal logs at all.
+    for stage, (name, model, call) in enumerate(attempts, start=1):
         result = call()
         if result is not None:
-            logger.info("Deep-Dive generated via %s", name)
+            logger.info("Deep-Dive generated via %s (%s), stage %d", name, model, stage)
             return result
-        logger.info("Deep-Dive: %s did not produce a usable result - trying the next provider", name)
+        logger.info(
+            "Deep-Dive: %s (%s), stage %d did not produce a usable result - trying the next provider",
+            name, model, stage,
+        )
 
     raise AllDeepDiveProvidersFailed(
         "Every configured provider (Groq gpt-oss-120b, Groq gpt-oss-20b, Gemini) failed to "
