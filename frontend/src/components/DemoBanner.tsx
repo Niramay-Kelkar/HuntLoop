@@ -11,8 +11,10 @@ const REPO_URL = "https://github.com/Niramay-Kelkar/HuntLoop";
 /**
  * Shown on every page when NEXT_PUBLIC_DEMO_MODE is on. Tells a visitor
  * this is a fixed sample, not a live scrape, and points them at the
- * repo for the real thing (their own resume, AI drafting, a live
- * tracker) - none of which this demo offers, see huntloop.demo_mode.
+ * repo for the parts this demo cannot offer - uploading their own
+ * resume, BYOK answer drafting, and a tracker that saves (see
+ * huntloop.demo_mode). The Resume Deep-Dive does run in the demo, so
+ * it is deliberately not listed here.
  *
  * Renders nothing outside demo mode or before the snapshot date loads,
  * so this never flashes an empty bar.
