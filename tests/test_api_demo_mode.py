@@ -154,6 +154,21 @@ def test_demo_info_route_with_no_demo_meta_row(demo_api_client):
     assert isinstance(body["message"], str) and len(body["message"]) > 0
 
 
+def test_demo_info_message_matches_what_demo_mode_really_disables(demo_api_client):
+    """The message used to say "the tracker and AI features are disabled
+    here", which is wrong: the Resume Deep-Dive is mounted in demo mode
+    (see huntloop.api.main.create_app) and runs for real, since its LLM
+    keys live in Modal's secret rather than this API's environment. It
+    must name the three things that ARE off and not claim AI is."""
+    message = demo_api_client.get("/demo-info").json()["message"].lower()
+
+    assert "deep-dive" in message
+    assert "resume upload" in message
+    assert "drafting" in message
+    assert "tracker changes are not saved" in message
+    assert "ai features are disabled" not in message
+
+
 def test_demo_info_route_with_demo_meta_row(demo_api_client, db_session):
     from huntloop.db_models import DemoMeta
 

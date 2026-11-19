@@ -145,8 +145,17 @@ def deep_dive_remote(payload: dict) -> dict:
     Raises huntloop.deep_dive.AllDeepDiveProvidersFailed if every
     provider fails - deliberately allowed to propagate, so the polling
     caller records a real `failed` reason instead of a placeholder
-    result."""
-    from huntloop.deep_dive import generate_deep_dive
+    result.
+
+    Calls huntloop.deep_dive.enable_info_logging() first so the one line
+    naming which provider stage actually answered shows up in this
+    function's Modal logs - nothing configures logging inside this
+    container, so the root logger sits at WARNING and that INFO line was
+    being dropped. It carries the provider name, model name and stage
+    number only, never prompt, resume, job or result text."""
+    from huntloop.deep_dive import enable_info_logging, generate_deep_dive
+
+    enable_info_logging()
 
     return generate_deep_dive(
         resume_text=payload.get("resume_text", ""),

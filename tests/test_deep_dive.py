@@ -9,17 +9,21 @@ docstring) and `requests` is monkeypatched for the Gemini stage. No key
 is needed and nothing touches the network.
 """
 import json
+import logging
 import sys
 import types
 
 import pytest
 
 from huntloop.deep_dive import (
+    GEMINI_MODEL_NAME,
+    GROQ_PRIMARY_MODEL,
     MAX_LIST_ITEMS,
     MAX_SUMMARY_CHARS,
     RESULT_VERSION,
     AllDeepDiveProvidersFailed,
     build_user_content,
+    enable_info_logging,
     generate_deep_dive,
     validate_deep_dive_result,
 )
@@ -329,3 +333,120 @@ def test_gemini_is_skipped_without_a_key_and_the_error_still_raises(monkeypatch)
 
     with pytest.raises(AllDeepDiveProvidersFailed):
         generate_deep_dive("r", "T", "C", "j", [], [])
+
+
+# ---------------------------------------------------------------------
+# The provider line in the Modal logs
+#
+# Nothing configures logging inside the Modal container, so the root
+# logger sits at WARNING and this module's INFO lines were dropped -
+# nobody could tell which provider stage answered a successful run.
+# enable_info_logging() (called by
+# huntloop.modal_resume_functions.deep_dive_remote) is what makes them
+# visible, and the line itself must never carry resume or job text.
+# ---------------------------------------------------------------------
+_SECRET_RESUME_TEXT = "SENTINEL-RESUME Four years of Django at Acme, SSN-shaped filler."
+_SECRET_JOB_TEXT = "SENTINEL-JOB We run our own Kubernetes clusters in-house."
+
+
+def test_success_logs_the_provider_model_and_stage(monkeypatch, caplog):
+    monkeypatch.setenv("GROQ_API_KEY", "gsk-fake")
+    _install_fake_groq(monkeypatch, [json.dumps(_valid_payload())])
+
+    with caplog.at_level(logging.INFO, logger="huntloop.deep_dive"):
+        generate_deep_dive(_SECRET_RESUME_TEXT, "Title", "Co", _SECRET_JOB_TEXT, [], [])
+
+    success_lines = [r.getMessage() for r in caplog.records if "generated via" in r.getMessage()]
+    assert len(success_lines) == 1
+    line = success_lines[0]
+    assert "groq_120b" in line
+    assert GROQ_PRIMARY_MODEL in line
+    assert "stage 1" in line
+
+
+def test_the_logged_stage_number_follows_the_failover(monkeypatch, caplog):
+    """A run served by the third provider must say stage 3, not stage 1."""
+    monkeypatch.setenv("GROQ_API_KEY", "gsk-fake")
+    monkeypatch.setenv("GEMINI_API_KEY", "gem-fake")
+    _install_fake_groq(monkeypatch, [_FakeGroqError("a"), _FakeGroqError("b")])
+
+    import requests
+
+    class _Resp:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "candidates": [
+                    {"content": {"parts": [{"text": json.dumps(_valid_payload())}]}}
+                ]
+            }
+
+    monkeypatch.setattr(requests, "post", lambda *a, **k: _Resp())
+
+    with caplog.at_level(logging.INFO, logger="huntloop.deep_dive"):
+        generate_deep_dive(_SECRET_RESUME_TEXT, "Title", "Co", _SECRET_JOB_TEXT, [], [])
+
+    line = next(r.getMessage() for r in caplog.records if "generated via" in r.getMessage())
+    assert "gemini" in line
+    assert GEMINI_MODEL_NAME in line
+    assert "stage 3" in line
+
+
+def test_no_resume_or_job_text_is_logged_anywhere(monkeypatch, caplog):
+    """The whole point of the line is observability WITHOUT leaking the
+    prompt - assert it over every record the run emits, not just the
+    success line."""
+    monkeypatch.setenv("GROQ_API_KEY", "gsk-fake")
+    _install_fake_groq(monkeypatch, ["not json at all", json.dumps(_valid_payload())])
+
+    with caplog.at_level(logging.DEBUG, logger="huntloop.deep_dive"):
+        generate_deep_dive(_SECRET_RESUME_TEXT, "Title", "Co", _SECRET_JOB_TEXT, [], [])
+
+    assert caplog.records, "expected the run to log something"
+    for record in caplog.records:
+        message = record.getMessage()
+        assert "SENTINEL-RESUME" not in message
+        assert "SENTINEL-JOB" not in message
+        assert "Django" not in message
+        assert "Kubernetes" not in message
+
+
+@pytest.fixture
+def _restored_logging():
+    """enable_info_logging() deliberately mutates global logging state
+    (root level, this module's logger level, and a basicConfig stderr
+    handler), so every test that calls it puts all three back."""
+    root = logging.getLogger()
+    deep_dive_logger = logging.getLogger("huntloop.deep_dive")
+    saved = (root.level, deep_dive_logger.level, list(root.handlers))
+    try:
+        yield root, deep_dive_logger
+    finally:
+        root.handlers[:] = saved[2]
+        root.setLevel(saved[0])
+        deep_dive_logger.setLevel(saved[1])
+
+
+def test_enable_info_logging_lets_the_info_line_through(_restored_logging):
+    """Without this, the root logger's default WARNING level drops the
+    line entirely inside the Modal container."""
+    root, deep_dive_logger = _restored_logging
+    root.setLevel(logging.WARNING)
+    deep_dive_logger.setLevel(logging.NOTSET)
+    assert not deep_dive_logger.isEnabledFor(logging.INFO)
+
+    enable_info_logging()
+
+    assert deep_dive_logger.isEnabledFor(logging.INFO)
+    assert root.handlers, "expected a handler Modal can capture"
+
+
+def test_enable_info_logging_does_not_raise_a_debug_host_to_info(_restored_logging):
+    root, _ = _restored_logging
+    root.setLevel(logging.DEBUG)
+
+    enable_info_logging()
+
+    assert root.level == logging.DEBUG

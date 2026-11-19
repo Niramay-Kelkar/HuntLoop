@@ -15408,3 +15408,121 @@ clean. `eslint` is clean apart from one **pre-existing** error in
 **Cleanup:** all three test rows deleted; `resume_deep_dives` is back to
 0 rows, its state before this session. Nothing was written to Neon or
 any live service.
+
+---
+
+## 2026-11-19 — Documentation cleanup, the Deep-Dive provider log line, and the demo notice (written retroactively)
+
+**Note on dating:** this entry is written retroactively. The cleanup
+itself was done on 2026-11-19; the live Deep-Dive run recorded at the
+bottom happened a week earlier, on 2026-11-12, and was never logged at
+the time.
+
+**Did:** Four small, unrelated fixes an audit turned up, one commit
+each on `chore/docs-and-logging-cleanup`.
+
+1. **CLAUDE.md, two stale statements.** The Tavily section still gave
+   `TAVILY_MONTHLY_REQUEST_BUDGET`'s default as 600; the code default is
+   `DEFAULT_MONTHLY_BUDGET = 800` in
+   `scripts/backfill_company_research.py`, raised in commit `5b30da3`.
+   Corrected, with the earlier figure kept where it appears inside the
+   2026-10-02 session narrative, marked as the default of the time. The
+   Resume Deep-Dive section's "manual steps … none of them done in-repo"
+   and "real end-to-end verification against live Modal is still
+   outstanding; everything verified so far used a stubbed Modal client"
+   were both false and are replaced with a short, accurate status
+   paragraph: the `huntloop-llm` Secret exists, the Modal app
+   `huntloop-resume-processing` is deployed with all three functions
+   (`process_resume_remote`, `embed_text_remote`, `deep_dive_remote`),
+   `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` are set on Render, migration
+   `d5e7f9a1b3c6` is applied to Neon, live verification happened
+   2026-11-11 (commit `322ed95`), and one real Deep-Dive has completed
+   through the live stack. The deploy command
+   (`PYTHONPATH=src modal deploy src/huntloop/modal_resume_functions.py`,
+   `PYTHONPATH=src` required) and the "no tokens configured means a clean
+   503" note are kept. Also corrected one test count in the same section
+   (`tests/test_modal_resume_processing.py` is 28 tests today, not the 16
+   it had when written). Nothing unrelated was reworded or moved.
+
+2. **This entry**, covering the above and the retroactive note below.
+
+3. **The answering provider is now visible in the Modal logs.**
+   `huntloop.deep_dive` logged which provider produced a successful
+   result at INFO, but nothing calls
+   `huntloop.logging_config.setup_logging()` inside the Modal container
+   (deliberately — `huntloop.modal_resume_functions` is kept minimal),
+   so the root logger sat at its default WARNING with no handlers and
+   that line was silently dropped. Nobody could tell from the Modal logs
+   which of the three provider stages answered. Added
+   `huntloop.deep_dive.enable_info_logging()` — a `basicConfig` stderr
+   handler (which Modal captures) plus an explicit level raise for the
+   root and module loggers, never lowering a host that asked for DEBUG —
+   and called it at the top of `deep_dive_remote`, i.e. only inside the
+   remote container; the API process keeps using `setup_logging()`
+   exactly as before. The line itself now names the provider, the model
+   and the stage number ("Deep-Dive generated via gemini
+   (gemini-3.5-flash-lite), stage 3"), and the failover line matches.
+   **It carries nothing else** — no prompt, resume, job description,
+   result or key. Five new tests in `tests/test_deep_dive.py` cover the
+   success line's three fields, the stage number following a real
+   failover to the third provider, the absence of sentinel resume and
+   job strings from *every* record a run emits, and
+   `enable_info_logging()`'s own two cases. No result schema, database,
+   API response or frontend change.
+
+4. **The demo notice was inaccurate.** `GET /demo-info` said "The
+   tracker and AI features are disabled here." Read against
+   `huntloop.api.main.create_app()`, what demo mode actually does is:
+   never mount `resumes.unsafe_router` (upload and activation) or
+   `drafting.router` (BYOK answer drafting), and make
+   `PATCH /jobs/{id}/application` a no-op that writes nothing. The
+   Resume Deep-Dive is mounted in **both** modes and runs for real —
+   its LLM keys live in Modal's own secret, never in this API's
+   environment — as do match scores, matched/missing skills and the
+   precomputed ATS report the demo builder seeds. The message now reads:
+   "This is a live demo running on a small sample of real job postings
+   and sponsorship data. Resume upload and bring-your-own-key answer
+   drafting are turned off, and tracker changes are not saved. The
+   Resume Deep-Dive works here." The message exists in exactly one place
+   (`huntloop.api.routers.demo_info._MESSAGE`) — checked; `DemoBanner.tsx`
+   renders only the snapshot date and its own repo line, never this
+   string, so its user-facing copy needed no change, only a docstring
+   that had implied the Deep-Dive was unavailable too. One new test in
+   `tests/test_api_demo_mode.py` asserts the message names the three
+   things that are off, mentions the Deep-Dive, and no longer claims AI
+   is disabled.
+
+**Tests:** backend **673 passed**, zero failures (667 before this
+branch, plus the six new tests above). Notably the three
+`tests/test_backfill_lock.py` tests that have been failing on this
+machine for weeks passed this run — the orphaned Postgres connection
+holding advisory lock 1751937901 is gone, so the baseline was an
+environment artifact, as documented, not a code fault. Frontend **160
+passed (20 files)**, unchanged.
+
+**Not done, on purpose:** nothing was deployed. Fix 3 changes code that
+runs inside Modal, so **it only takes effect after
+`PYTHONPATH=src modal deploy src/huntloop/modal_resume_functions.py`**,
+which is left for the owner to run. No Modal function was invoked, no
+credit spent, and Neon, Render and Vercel were not contacted at all —
+tests ran against the local database only (`localhost:5432/jobsight`).
+
+**Retroactive note — a real Deep-Dive ran through the live stack on
+2026-11-12, around 09:22 Pacific.** It was never recorded at the time;
+the 2026-11-11 and 2026-11-12 entries above both state that nothing was
+written to Neon, which was true of those sessions. The facts below come
+from a read-only check of the live database on 2026-11-19 (no live
+system was contacted during this cleanup task itself):
+
+- `resume_deep_dives` on Neon holds **one row** — id 1, status `done`,
+  `resume_version_id` 4, `job_posting_id` 55412.
+- The Neon `modal_usage` row for `2026-11` reads **5 invocations**,
+  exactly one weight-5 Deep-Dive (`MODAL_DEEP_DIVE_WEIGHT`, default 5)
+  and nothing else.
+- No budget-alert threshold was crossed.
+
+Who triggered that run and why is not recorded, and is deliberately not
+guessed at here. It is, however, the one real end-to-end confirmation
+that the deployed path works: a `done` row with a result on Neon is only
+reachable if the Render service holds valid Modal tokens, the
+`huntloop-llm` Secret resolves, and `deep_dive_remote` really ran.
