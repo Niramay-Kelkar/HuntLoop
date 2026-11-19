@@ -1800,9 +1800,11 @@ conventions" and SESSIONS.md for the real current state).
   stalest). **Credit budget is real and tight: this Tavily account has a
   hard 1000 credits/month, and there were 389 companies in the DB when
   this was built — a single full pass already costs meaningfully against
-  that cap.** `TAVILY_MONTHLY_REQUEST_BUDGET` (env var, default 600 —
-  well under the 1000 hard cap, leaving headroom for company growth and
-  manual testing) is enforced against a DURABLE ledger (`tavily_usage`,
+  that cap.** `TAVILY_MONTHLY_REQUEST_BUDGET` (env var, default 800 —
+  `DEFAULT_MONTHLY_BUDGET` in
+  `scripts/backfill_company_research.py`, raised from the original 600 in
+  commit `5b30da3`; still under the 1000 hard cap, leaving headroom for
+  company growth and manual testing) is enforced against a DURABLE ledger (`tavily_usage`,
   one row per calendar month, incremented by 1 and committed immediately
   after each real response received) — NOT an in-memory counter, so it
   survives the script being re-run or the process restarting. The budget
@@ -1835,7 +1837,8 @@ conventions" and SESSIONS.md for the real current state).
   those 3 (`fetched_at` unchanged, usage ledger additive) and moved on to
   new companies; the monthly budget was forced to its real current usage
   both at-startup and mid-run and correctly stopped cleanly both times,
-  then the real default (600) was confirmed still in effect (no code
+  then the real default of the time (600 — since raised to 800, see
+  above) was confirmed still in effect (no code
   edit needed — the cap was only overridden via a one-off env var on the
   command line); the real job-detail API endpoint and a real browser
   load of the job-detail page both showed the stored research for a
@@ -1942,7 +1945,7 @@ conventions" and SESSIONS.md for the real current state).
   attempts above, plus the one successful call) — confirmed via direct
   query, not assumed. Budget-cap-reached and lookup-failure/dispatch-
   failure fallback are both covered by `tests/test_modal_resume_processing.py`
-  (16 tests, mocking `modal.Function.from_name` rather than calling real
+  (16 tests when written, 28 today, mocking `modal.Function.from_name` rather than calling real
   Modal — deterministic, no token needed, no network, safe for CI) —
   each proven to fall back to the local path without over- or
   under-charging the ledger. **A real test-hermeticity bug was found and
@@ -2106,16 +2109,24 @@ conventions" and SESSIONS.md for the real current state).
     `host.docker.internal` — **no credential is committed**. Pointing it
     at Neon is **documented but deliberately not set up** (see
     docs/DEPLOY_DEMO.md — it needs a dedicated read-only role first).
-  - **Manual steps this feature needs before it works anywhere** (none
-    of them done in-repo): create the `huntloop-llm` Modal Secret,
-    `PYTHONPATH=src modal deploy src/huntloop/modal_resume_functions.py`
-    (the `PYTHONPATH=src` is required - see that file's docstring), set
-    `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` on Render (declared
-    `sync: false` in `render.yaml`), and run the migration against Neon.
-    Until then the endpoint returns a clean 503 and the panel says so —
-    nothing is broken. **Real end-to-end verification against live Modal
-    is still outstanding**; everything verified so far used a stubbed
-    Modal client (see SESSIONS.md).
+  - **Deployment status: LIVE and verified end to end against real
+    Modal** (2026-11-11, commit `322ed95` — see SESSIONS.md). All four
+    manual steps this feature needs are done: the `huntloop-llm` Modal
+    Secret exists, the Modal app `huntloop-resume-processing` is deployed
+    with all three functions (`process_resume_remote`,
+    `embed_text_remote`, `deep_dive_remote`),
+    `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` are set on Render (declared
+    `sync: false` in `render.yaml`, so they are never in this repo), and
+    migration `d5e7f9a1b3c6` is applied to the live Neon database. One
+    real Deep-Dive has since completed through the live stack
+    (2026-11-12 — see SESSIONS.md). **Redeploy after any change to
+    `src/huntloop/modal_resume_functions.py` or to anything it imports at
+    call time (`huntloop.deep_dive`), with
+    `PYTHONPATH=src modal deploy src/huntloop/modal_resume_functions.py`**
+    — the `PYTHONPATH=src` is required, see that file's docstring. In an
+    environment with no Modal tokens configured (a local dev run, a fresh
+    checkout) the endpoint returns a clean 503 and the panel says so —
+    nothing is broken.
   - **Also hardened here**: `huntloop.modal_resume_processing`'s local
     fallback now raises a typed `LocalProcessingUnavailable` when its
     lazy `huntloop.embeddings` import fails, and
