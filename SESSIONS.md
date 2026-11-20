@@ -15526,3 +15526,118 @@ guessed at here. It is, however, the one real end-to-end confirmation
 that the deployed path works: a `done` row with a result on Neon is only
 reachable if the Render service holds valid Modal tokens, the
 `huntloop-llm` Secret resolves, and `deep_dive_remote` really ran.
+
+---
+
+## 2026-11-20 — Deep-Dive report polish, plus one real run against local
+
+**Did (frontend polish, `frontend/src/components/DeepDivePanel.tsx`):**
+Six changes, all presentation; no backend change, no new dependency, and
+the polling lifecycle, the fit stamp, the strengths layout, the
+"Show N more" fold, the copy buttons, the running/failed/unavailable
+states and the empty-section hiding are all untouched.
+
+1. **Gap column headers once, not per gap.** `GapColumnHeaders` renders
+   "Why it matters" / "How to close it" as a single ruled header row
+   above the gap list at `sm:` and up, aligned to the same two-column
+   grid each gap already used. Each gap's own label is kept in the
+   accessibility tree but taken off the page there (`sm:sr-only`), so
+   the stacked narrow layout — where a header row above the list would
+   no longer sit above the right-hand column — still names both blocks.
+   The header row is `aria-hidden`, since announcing the pair twice
+   would be worse than not at all. It only renders when at least one
+   visible gap actually fills both columns, and a gap with only a "how
+   to close" keeps an empty wide-screen placeholder so it stays under
+   its own heading.
+2. **At-a-glance line.** One mono line under the verdict, built from the
+   data by `glanceLine()`: the strengths count then the gap counts by
+   importance, e.g. "4 strengths, 2 high, 2 medium, 1 low gaps". A count
+   of zero is omitted rather than printed, single counts are
+   singularised ("1 strength, 1 medium gap"), and the line disappears
+   entirely when there is nothing to count. Commas throughout, no
+   dashes — a dash reads as a range next to figures.
+3. **Start-here line.** When any gap is high importance, a short "Start
+   with: <skill>" line near the summary links to that gap by anchor
+   (`gapAnchorId`, `deep-dive-gap-<i>` on each gap `<li>`, plus
+   `scroll-mt-6`). High gaps sort first, so the first high gap is always
+   among those shown before the fold and the anchor can never point at
+   something hidden. Nothing renders when there is no high gap.
+4. **Interview focus chips** now sit on the page surface with a hairline
+   border and no grey fill, matching the ruled chip style used elsewhere
+   in the app.
+5. **Caveats contrast.** `text-text-faint` measured **3.95:1** against
+   the panel's white surface — under WCAG AA for normal text. Moved to
+   the existing `text-text-subtle` token, **5.93:1**, which passes.
+   No new token, no palette change.
+6. **Tests.** Eight new tests in `DeepDivePanel.test.tsx` cover the
+   glance-line counts, the omission of zero counts and the singular
+   forms, the start-here line present with a high gap and absent
+   without one, the anchor resolving to a visible gap, the header row
+   rendering once while each gap keeps its accessible names, the header
+   row being absent when no gap fills both columns, and the chips and
+   caveats staying hidden when empty. Two pre-existing assertions that
+   looked a high gap's skill up by bare text were narrowed to the gap
+   heading, because that skill is now legitimately named twice on the
+   page (start-here line and heading) — a test update, not a behaviour
+   change.
+
+`npx tsc --noEmit`, `eslint` and `npm run build` are all clean. Note:
+`next build` and `next dev` both interrupt themselves with a Next.js
+security-upgrade notice that has to be retried past; the build itself
+compiles and exits 0. That upgrade has not been taken here.
+
+**Visual check, no spend:** two clearly-labelled test rows were inserted
+into the LOCAL `resume_deep_dives` table (one with six gaps of mixed
+importance, one with a single gap and empty `interview_focus`/`caveats`)
+and viewed in a real browser at `localhost:3010` at about 1440px and
+500px, before and after the polish. No Modal call was involved: a POST
+against a job that already has a `done` row returns that row as a plain
+200 without dispatching (see `deep_dive.start_deep_dive`). Both test
+rows were deleted afterwards; the table was left empty.
+
+**Did (one real run, local database only):** Before sending anything,
+the effective monthly cap read 500 (`MODAL_MONTHLY_INVOCATION_BUDGET`
+unset, so the code default applies), the Deep-Dive weight read 5
+(`MODAL_DEEP_DIVE_WEIGHT` unset, code default), and the local
+`modal_usage` row for this month read 20 — comfortably under the cap.
+`modal app list` / `modal app history` confirmed
+`huntloop-resume-processing` deployed **today at 07:25 PST from commit
+`43c7442`**, the merge that carries the provider-logging change; all
+three functions resolved by name through a read-only lookup (the CLI has
+no function-list command).
+
+Exactly one `POST /jobs/22621/deep-dive` was sent against a real local
+posting that already had matched skills for the active resume (five9,
+"Sr Software Engineer | AI"), then polled to completion in about eight
+seconds. **No second POST, no retry, no resume upload or activation.**
+
+The new log line is there and reads as intended:
+`huntloop.deep_dive: Deep-Dive generated via groq_120b
+(openai/gpt-oss-120b), stage 1` — provider, model and stage number.
+**Stage 1 means the primary provider answered and no failover
+happened.** No resume text, no job description and no key appears
+anywhere in the fetched logs. The provider line appears twice in the
+fetched log history while only one dispatch was made; the ledger moving
+by exactly the weight, the single row, the single `modal_call_id` and
+`deep_dive_remote`'s explicit `retries=0` all say one call, so this
+looks like duplicated log delivery rather than a second run, though the
+logs alone cannot prove that.
+
+The result is well grounded: every strength quotes a real line from the
+resume (the AS400-to-Spring-Boot migration, the Kubernetes-on-GCP test
+rebuild, the Prometheus/Splunk stack), and the gaps are posting
+requirements the resume genuinely does not show (PHP/Laravel, IVR/VoIP
+domain knowledge, Azure). Viewed in the polished panel at both widths.
+
+**Ledger:** 20 → **25**, exactly the weight of 5, confirming a single
+dispatch. Viewing the finished row twice more in the browser afterwards
+left it at 25. The one `resume_deep_dives` row this run created was
+deleted; `modal_usage` was left as it is, because it reflects real
+spend.
+
+**Not touched:** Neon and every other live surface, Render, Vercel.
+Nothing was deployed and no `modal deploy` was run. Backend suite
+673/673, frontend suite 168/168.
+
+**Next:** The Next.js security upgrade the build keeps recommending is
+still open and was deliberately not taken as part of this work.
