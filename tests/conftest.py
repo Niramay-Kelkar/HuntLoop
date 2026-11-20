@@ -19,6 +19,8 @@ a fully separate namespace, so the test schema's tables are physically
 distinct from `public.job_postings` and friends; nothing here ever reads
 from or writes to the real tables.
 """
+import socket
+import sys
 import uuid
 
 import pytest
@@ -115,49 +117,163 @@ def db_session(pipeline):
     session.close()
 
 
+# A value that is obviously not a real credential, used in place of
+# every third-party key for the whole suite - see
+# _no_real_provider_credentials below. Tests may compare against this
+# constant (a boolean assertion); no test should ever print a resolved
+# credential value, real or sentinel.
+TEST_CREDENTIAL_SENTINEL = "huntloop-test-sentinel-not-a-real-credential"
+
+# Every environment variable that holds a third-party credential this
+# project can spend real money / real send-allowance through. All of
+# them are forced to the sentinel for every test - see the fixture.
+SENTINEL_CREDENTIAL_ENV_VARS = (
+    # Email / notification delivery (Knock triggers the send, Resend
+    # delivers it)
+    "RESEND_API_KEY",
+    "KNOCK_API_KEY",
+    # Paid/quota-limited LLM and search providers
+    "GROQ_API_KEY",
+    "GEMINI_API_KEY",
+    "MISTRAL_API_KEY",
+    "CEREBRAS_API_KEY",
+    "TAVILY_API_KEY",
+    # Modal (remote compute, billed against a monthly credit budget)
+    "MODAL_TOKEN_ID",
+    "MODAL_TOKEN_SECRET",
+)
+
+# The same credentials again, as module-level constants captured at
+# import time. Clearing the environment variable alone is not enough for
+# these: whichever module imported first already read the real value out
+# of the real .env (every one of these modules, and
+# huntloop.knock_client/huntloop.resend_client, call load_dotenv() at
+# import time), so the real key survives in the module's own attribute.
+# Only modules already imported are touched - a module imported later
+# reads the already-sentinelled environment anyway.
+SENTINEL_CREDENTIAL_MODULE_ATTRS = (
+    ("huntloop.skills_matching", "GROQ_API_KEY"),
+    ("huntloop.skills_matching_groq_120b", "GROQ_API_KEY"),
+    ("huntloop.skills_matching_gemini", "GEMINI_API_KEY"),
+    ("huntloop.skills_matching_mistral", "MISTRAL_API_KEY"),
+    ("huntloop.resume_ats_report", "GROQ_API_KEY"),
+    ("huntloop.resume_ats_report", "GEMINI_API_KEY"),
+    ("huntloop.feedback_triage", "GROQ_API_KEY"),
+    ("huntloop.feedback_triage", "GEMINI_API_KEY"),
+    ("huntloop.company_research", "TAVILY_API_KEY"),
+)
+
+# Hostnames (matched as suffixes, case-insensitively) that no test may
+# ever resolve, let alone connect to. These are the real paid/live
+# services this project talks to; the local database and anything else
+# on localhost is deliberately NOT in this list.
+BLOCKED_PROVIDER_HOST_SUFFIXES = (
+    "resend.com",
+    "knock.app",
+    "tavily.com",
+    "groq.com",
+    "generativelanguage.googleapis.com",
+    "mistral.ai",
+    "cerebras.ai",
+    "modal.com",
+)
+
+
+class BlockedProviderCall(RuntimeError):
+    """Raised instead of resolving/connecting to a real provider host."""
+
+
+def _is_blocked_host(host) -> bool:
+    if not isinstance(host, str):
+        return False
+    host = host.strip().strip(".").lower()
+    return any(host == s or host.endswith("." + s) for s in BLOCKED_PROVIDER_HOST_SUFFIXES)
+
+
 @pytest.fixture(autouse=True)
-def _no_real_resend_api_key(monkeypatch):
-    """Project-wide safety net, added 2026-10-09 after a real incident -
-    see SESSIONS.md's "Resend test-isolation incident" entry for the
-    full writeup. Running the test suite locally during Resend Phase B
-    development sent 16 REAL emails through a live Resend API key: two
-    pre-existing Modal tests (test_reserve_refuses_once_budget_is_reached_and_does_not_increment,
-    test_invoke_modal_raises_once_budget_is_reached in
-    tests/test_modal_resume_processing.py) legitimately drive a fake
-    budget to exactly 100% of a tiny cap in one call - which, once Phase
-    B wired a real alert-email side effect into that same code path,
-    means they also cross both the 80% and 95% alert thresholds for
-    real. Neither test mocked huntloop.resend_client.send_email or
-    huntloop.budget_alerts.check_and_alert_budget_threshold, and nothing
-    suite-wide prevented the real RESEND_API_KEY already sitting in this
-    project's real .env from being live in os.environ during that test -
-    huntloop.resend_client calls load_dotenv() at import time, so the
-    real key was present for every test in the suite except the one file
-    (tests/test_resend_client.py) that happened to have its own
-    autouse fixture deleting it, which is also the file Phase A's own
-    author incorrectly assumed would set precedent project-wide.
+def _no_real_provider_credentials(monkeypatch, request):
+    """Project-wide safety net making it impossible for the test suite to
+    send a real email, trigger a real notification, or spend real LLM /
+    search / compute credit - whether or not an individual test remembers
+    to mock anything.
 
-    This fixture is the structural fix: it deletes RESEND_API_KEY from
-    the environment before EVERY test in the entire suite runs,
-    regardless of file, regardless of whether that test remembers to
-    mock anything itself. huntloop.resend_client.send_email() always
-    checks `_configured()` (RESEND_API_KEY present) FIRST, before any
-    network code runs - so with this fixture in place, a test can only
-    ever reach a real `resend.Emails.send()` call if it explicitly sets
-    its own key back (e.g. tests/test_resend_client.py's `configured`
-    fixture, which sets a deliberately fake "re_test_key" value, never
-    a real one) AND fails to mock the send call itself - both of those
-    remain an individual test's own explicit choice, not something that
-    can happen by omission or by a future test author not knowing this
-    history.
+    Added 2026-11-20 after real alert emails ("HuntLoop: modal budget at
+    80% / 95%") kept arriving in the owner's inbox on exactly the days
+    the suite had been run. The 2026-10-09 fixture this replaces deleted
+    RESEND_API_KEY only, which was the whole sending path at the time;
+    once the alert path was rewired through Knock
+    (huntloop.budget_alerts -> huntloop.knock_client.trigger_workflow,
+    which posts to api.knock.app and lets Knock deliver via its
+    Resend-backed channel), KNOCK_API_KEY became the credential that
+    mattered and nothing suite-wide cleared it. Two Modal ledger tests
+    (test_reserve_refuses_rather_than_overshooting_the_cap and
+    test_reserve_allows_a_weight_that_lands_exactly_on_the_cap in
+    tests/test_modal_resume_processing.py) drive a fake 10-invocation cap
+    to 80% and 100%, which crosses the real alert thresholds; the alert
+    failure path swallows every exception, so the sends were completely
+    invisible in the suite's own output.
 
-    This is a deliberate safety net making a real send *structurally
-    impossible by default*, not just a style preference - do not remove
-    it or make it opt-in/per-file. It was verified, not just written:
-    see SESSIONS.md for the full-suite run with resend.Emails.send
-    itself temporarily patched to raise on any unmocked call, confirming
-    zero tests reach it for real."""
-    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+    Two independent layers, deliberately, since either alone has a hole:
+
+    (a) Every credential environment variable, and every module-level
+        constant that already captured one at import time, is replaced
+        with TEST_CREDENTIAL_SENTINEL. Clearing the variable is not
+        enough on its own: these modules call load_dotenv() at import,
+        so a module imported mid-test re-reads the real .env.
+
+    (b) DNS resolution and socket connection to the real provider hosts
+        is blocked outright, with a message naming the test that tried
+        it. This is the layer that actually guarantees nothing leaves the
+        machine - a sentinel key would otherwise still produce a real
+        HTTP request that merely gets rejected, which still contacts the
+        provider.
+
+    Tests that deliberately exercise a sending path keep working exactly
+    as before, by setting their own obviously-fake key and mocking the
+    transport (tests/test_knock_client.py, tests/test_resend_client.py),
+    or by stubbing the alert/sender function itself. Do not remove this
+    fixture or make it opt-in/per-file.
+    """
+    for var in SENTINEL_CREDENTIAL_ENV_VARS:
+        monkeypatch.setenv(var, TEST_CREDENTIAL_SENTINEL)
+
+    for module_name, attr in SENTINEL_CREDENTIAL_MODULE_ATTRS:
+        module = sys.modules.get(module_name)
+        if module is not None and getattr(module, attr, None) is not None:
+            monkeypatch.setattr(module, attr, TEST_CREDENTIAL_SENTINEL, raising=False)
+
+    test_id = request.node.nodeid
+    real_getaddrinfo = socket.getaddrinfo
+    real_create_connection = socket.create_connection
+
+    def _guarded_getaddrinfo(host, *args, **kwargs):
+        if _is_blocked_host(host):
+            raise BlockedProviderCall(
+                f"Blocked an outbound call to a real provider host from {test_id} - "
+                f"the test suite may not contact live paid services. Mock the sender "
+                f"(see tests/conftest.py's _no_real_provider_credentials)."
+            )
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    def _guarded_create_connection(address, *args, **kwargs):
+        if isinstance(address, tuple) and address and _is_blocked_host(address[0]):
+            raise BlockedProviderCall(
+                f"Blocked an outbound connection to a real provider host from {test_id} - "
+                f"the test suite may not contact live paid services."
+            )
+        return real_create_connection(address, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", _guarded_getaddrinfo)
+    monkeypatch.setattr(socket, "create_connection", _guarded_create_connection)
+
+
+# Historical note (2026-10-09, the "Resend test-isolation incident" in
+# SESSIONS.md): an earlier, narrower version of the fixture above
+# deleted RESEND_API_KEY only, after a suite run sent 16 real emails
+# through the then-current direct-Resend sending path. That incident is
+# why this protection exists at all; the 2026-11-20 rewrite above
+# generalised it to every provider credential plus an outbound-network
+# block, after the same class of leak recurred through Knock.
 
 
 @pytest.fixture()

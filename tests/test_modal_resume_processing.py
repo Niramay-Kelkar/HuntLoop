@@ -343,18 +343,24 @@ def test_reserve_refuses_rather_than_overshooting_the_cap(db_session, monkeypatc
     db_session.add(ModalUsage(month=_current_month_key(), invocations_used=7))
     db_session.commit()
 
-    reserved, used_before, budget = _reserve_invocation_slot(db_session, weight=5)
+    # The weight-1 reservation at the end of this test takes a 10-slot
+    # cap to 8 (80%), which is a real budget-alert threshold crossing -
+    # so the alert check is stubbed out, same as every other test in this
+    # file that moves the ledger past a threshold. Without this, this
+    # test really did send a real alert email (see tests/conftest.py).
+    with patch("huntloop.modal_resume_processing.check_and_alert_budget_threshold"):
+        reserved, used_before, budget = _reserve_invocation_slot(db_session, weight=5)
 
-    assert reserved is False
-    assert (used_before, budget) == (7, 10)
-    row = db_session.query(ModalUsage).filter_by(month=_current_month_key()).one()
-    db_session.refresh(row)
-    assert row.invocations_used == 7
+        assert reserved is False
+        assert (used_before, budget) == (7, 10)
+        row = db_session.query(ModalUsage).filter_by(month=_current_month_key()).one()
+        db_session.refresh(row)
+        assert row.invocations_used == 7
 
-    # ... and a weight-1 caller can still use what's left.
-    assert _reserve_invocation_slot(db_session, weight=1)[0] is True
-    db_session.refresh(row)
-    assert row.invocations_used == 8
+        # ... and a weight-1 caller can still use what's left.
+        assert _reserve_invocation_slot(db_session, weight=1)[0] is True
+        db_session.refresh(row)
+        assert row.invocations_used == 8
 
 
 def test_reserve_allows_a_weight_that_lands_exactly_on_the_cap(db_session, monkeypatch):
@@ -362,12 +368,16 @@ def test_reserve_allows_a_weight_that_lands_exactly_on_the_cap(db_session, monke
     db_session.add(ModalUsage(month=_current_month_key(), invocations_used=5))
     db_session.commit()
 
-    assert _reserve_invocation_slot(db_session, weight=5)[0] is True
-    row = db_session.query(ModalUsage).filter_by(month=_current_month_key()).one()
-    db_session.refresh(row)
-    assert row.invocations_used == 10
-    # And now nothing more fits, not even weight 1.
-    assert _reserve_invocation_slot(db_session, weight=1)[0] is False
+    # 5 -> 10 of a 10-slot cap crosses both real alert thresholds (80%
+    # and 95%), so the alert check is stubbed - this test sent two real
+    # alert emails before that was added (see tests/conftest.py).
+    with patch("huntloop.modal_resume_processing.check_and_alert_budget_threshold"):
+        assert _reserve_invocation_slot(db_session, weight=5)[0] is True
+        row = db_session.query(ModalUsage).filter_by(month=_current_month_key()).one()
+        db_session.refresh(row)
+        assert row.invocations_used == 10
+        # And now nothing more fits, not even weight 1.
+        assert _reserve_invocation_slot(db_session, weight=1)[0] is False
 
 
 def test_reserve_treats_a_nonsense_weight_as_one(db_session):

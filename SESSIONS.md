@@ -15719,3 +15719,56 @@ the Python 3.13 / Postgres 18 prerequisites.
 `scripts/run_orchestrator_cron.sh` and the backend suite's real-email
 test-isolation problem are both still open, and neither was touched
 here.
+
+---
+
+## 2026-11-20 — Stop the test suite from sending real alert emails
+
+**Did:** Traced the real "HuntLoop: modal budget at 80%/95%" emails
+arriving on days the backend suite was run. The sending path is
+`huntloop.budget_alerts.check_and_alert_budget_threshold` ->
+`huntloop.knock_client.trigger_workflow` -> a real
+`requests.post https://api.knock.app/v1/workflows/{key}/trigger` (Knock
+delivers via its Resend-backed channel, which is why the mail arrives
+from `onboarding@resend.dev`). `huntloop.knock_client` calls
+`load_dotenv()` at import, so the real `KNOCK_API_KEY` was live in
+`os.environ` for every test. The October 2026 conftest safety net only
+deleted `RESEND_API_KEY` — correct for the old direct-Resend path,
+useless once the alert was rewired through Knock.
+
+Confirmed dynamically in a child process with every credential replaced
+by a sentinel and the senders swapped for a recorder that raises: exactly
+two tests reached a real send, three attempts per suite run — 
+`test_reserve_refuses_rather_than_overshooting_the_cap` (a 10-slot cap
+taken to 8, crossing 80%) and
+`test_reserve_allows_a_weight_that_lands_exactly_on_the_cap` (5 -> 10 of
+10, crossing 80% and 95% in one step), both in
+`tests/test_modal_resume_processing.py`. Neither mocked the alert check,
+and `budget_alerts` swallows every exception, so the sends left no trace
+in the suite's output. No real email was sent during this investigation.
+
+**Fixed, tests only:** `tests/conftest.py`'s autouse
+`_no_real_provider_credentials` now (a) replaces every provider
+credential — Resend, Knock, Groq, Gemini, Mistral, Cerebras, Tavily, both
+Modal tokens — in the environment *and* in the module-level constants
+that captured one at import time, with an obvious sentinel; and (b)
+blocks DNS resolution and socket connection to the real provider hosts,
+raising an error that names the test that tried it. Localhost (the test
+database) is deliberately untouched. The two Modal tests above now stub
+the alert check, matching the existing precedent elsewhere in that file.
+New `tests/test_no_real_sends_guard.py` proves both halves: each
+credential resolves to the sentinel, each provider host is blocked, and
+an unmocked `trigger_workflow` call ends as a blocked `trigger_error`
+instead of a delivered notification.
+
+**Verified:** full backend suite in a child process with sentinel
+credentials — 690 passed (673 baseline + 17 new guard tests), including
+the three advisory-lock tests. A second full run with the senders
+replaced by a recorder showed zero unintended real-send attempts.
+
+**Also noticed, not changed:**
+`tests/test_detect_ats_for_sponsors.py::test_upsert_hits_inserts_new_and_fills_null_or_unknown`
+makes a real unauthenticated HTTP GET to a public ATS board API through
+`upsert_hits` — a live service, though a free one that spends no credit.
+
+**Next:** Nothing outstanding from this work.
