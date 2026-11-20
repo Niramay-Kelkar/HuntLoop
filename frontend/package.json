@@ -2,6 +2,7 @@
   "name": "frontend",
   "version": "0.1.0",
   "private": true,
+  "description": "HuntLoop's Next.js frontend - dashboard, job list and detail, application tracker, and resume management.",
   "scripts": {
     "dev": "next dev",
     "build": "next build",

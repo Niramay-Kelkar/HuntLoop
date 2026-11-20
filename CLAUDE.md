@@ -2145,11 +2145,11 @@ conventions" and SESSIONS.md for the real current state).
   volume — while capping each company's own postings at
   `PER_COMPANY_CAP = 40` (preferring US-located postings) so a handful of
   very large boards (Workday, iCIMS) don't crowd out the many smaller
-  ones. As of the most recent sync (2026-10-10, see SESSIONS.md), Neon
-  holds **738 `companies` rows vs. 743 locally** (near-full parity) but
-  only **19,294 `job_postings` rows vs. ~97k+ locally** — confirm current
-  real counts directly against Neon before quoting a number, rather than
-  assuming either side of this split. (The database started much
+  ones. As of the most recent check (2026-11-19), Neon holds **738
+  `companies` rows vs. 743 locally** (near-full parity) but only
+  **19,690 `job_postings` rows vs. ~217k locally** (local count verified
+  2026-11-20) — confirm current real counts directly against Neon before
+  quoting a number, rather than assuming either side of this split. (The database started much
   smaller — 389 companies — before the 2026-10-05 "expand the public demo
   dataset" step grew company coverage to near-parity; don't describe
   today's company count as 389 or as curated.)
