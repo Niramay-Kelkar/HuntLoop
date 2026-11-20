@@ -7,7 +7,8 @@ frontend. No real values are filled in here - follow along in your own
 accounts.
 
 Nothing is deployed as part of writing this document. You do the
-clicking.
+clicking. (This project's own demo has since been deployed by
+following these steps — the instructions below are not hypothetical.)
 
 ## Before you start
 

@@ -18,6 +18,11 @@ a dashboard, job list, and application tracker to run the search.
 Everything is self-hosted: your resume and application data stay in
 your own database.
 
+Heavier work — resume parsing/embedding, and the per-job Resume
+Deep-Dive — runs on [Modal](#modal-serverless-compute) serverless
+functions with a local fallback, and per-company context comes from
+[Tavily](#company-research-tavily-optional) search.
+
 See ["Project status"](#project-status) for what's built, and
 `CLAUDE.md` for full architectural detail this file doesn't repeat.
 
@@ -35,6 +40,8 @@ See ["Project status"](#project-status) for what's built, and
 - [Running tests](#running-tests)
 - [API service](#api-service)
 - [Frontend](#frontend)
+- [Modal serverless compute](#modal-serverless-compute)
+- [Company research (Tavily)](#company-research-tavily-optional)
 - [Demo mode](#demo-mode-optional)
 - [Reverse proxy / HTTPS for self-hosting](#reverse-proxy--https-for-self-hosting-optional-opt-in)
 - [Observability stack](#observability-stack-optional-opt-in)
@@ -60,11 +67,20 @@ See ["Project status"](#project-status) for what's built, and
   wage-filing data, with a rough per-company salary estimate derived
   from those same filings.
 - **A FastAPI backend** exposing filtering/sorting/pagination over
-  postings, an application tracker, resume version management, and a
+  postings, an application tracker, resume version management, an ATS
+  compatibility report for the active resume, a feedback endpoint, and a
   BYOK (bring-your-own-key) resume-grounded drafting assistant.
 - **A Next.js frontend** — dashboard, filterable job list (cards/table
   views), a job detail page with a chat assistant, a kanban/list
   application tracker, and resume upload/version management.
+- **Modal serverless compute** for resume parsing/embedding and the
+  asynchronous per-job Resume Deep-Dive, each with a weighted monthly
+  usage ledger (see ["Modal serverless compute"](#modal-serverless-compute)).
+- **Per-company research** from a single Tavily search per company,
+  shown on the job detail page (see ["Company
+  research"](#company-research-tavily-optional)).
+- **Email alerts** (Resend, routed through Knock) when a usage ledger
+  crosses 80% or 95% of its monthly cap, and when new feedback arrives.
 - **Fully containerized**: one `docker compose up --build` brings up
   Postgres, the scraper, the API, and the frontend together, already
   migrated and pre-seeded with real sample data.
@@ -72,7 +88,7 @@ See ["Project status"](#project-status) for what's built, and
   suites against a real Postgres service on every push/PR.
 - **Optional opt-in extras**: a Caddy-fronted HTTPS reverse proxy for
   self-hosting on a real domain, and a Prometheus/Grafana observability
-  stack for scrape metrics.
+  stack with six pre-provisioned dashboards.
 
 ## Architecture
 
@@ -84,21 +100,28 @@ flowchart LR
     API["FastAPI backend"]
     FE["Next.js frontend"]
     LCA[("DOL LCA data (optional)")]
-    LLM["Groq / Gemini (skills matching + BYOK drafting)"]
+    LLM["Groq / Gemini (skills matching, drafting, Deep-Dive)"]
+    Modal["Modal (resume parse/embed, Deep-Dive)"]
+    Tavily["Tavily (company research)"]
     You(("You"))
 
     ATS --> Scraper --> DB
     LCA -.-> DB
+    Tavily -.-> DB
     DB --> API
     LLM -.-> API
+    Modal -.-> API
+    LLM -.-> Modal
     API --> FE --> You
 ```
 
 The scraper (`main.py`) and the API/frontend are independent processes.
 They only share the same Postgres database — the scraper never calls
-the API, and the API never scrapes. Resume embeddings and
-skills-matching calls go out to Groq/Gemini. Everything else stays in
-your own Postgres instance.
+the API, and the API never scrapes. Skills matching, the BYOK drafting
+assistant and the Resume Deep-Dive call out to Groq/Gemini; resume
+parsing and embedding run on Modal, falling back to in-process
+`sentence-transformers` when Modal isn't configured. Everything else
+stays in your own Postgres instance.
 
 ## Quick start
 
@@ -201,10 +224,16 @@ DATABASE_URL=postgresql+psycopg2://<user>:<password>@localhost:5432/<dbname>
 The app fails fast with a clear error if `DATABASE_URL` is missing — see
 `huntloop/settings.py`.
 
-`alembic upgrade head` creates/updates all tables (`companies`, `job_sources`,
-`job_postings`, `job_locations`, `job_skills`, `job_metadata`,
-`lca_disclosures`, `sponsor_name_overrides`, `resume_versions`,
-`job_applications`) to match the current schema.
+`alembic upgrade head` applies all 30 migrations, creating/updating
+every table to match the current schema — the core scraping/matching set
+(`companies`, `job_sources`, `job_postings`, `job_locations`,
+`job_skills`, `job_metadata`, `lca_disclosures`,
+`sponsor_name_overrides`, the two sponsor aggregate tables,
+`resume_versions`, `resume_skill_matches`, `job_applications`), plus the
+later feature tables (`resume_deep_dives`, `resume_ats_reports`,
+`company_research`, `feedback`) and the usage ledgers behind the
+third-party integrations (`modal_usage`, `tavily_usage`, `resend_usage`,
+`knock_usage`, `budget_alert_state`).
 
 `python scripts/seed_sample_job_postings.py` loads the same small real
 sample dataset (~194 real job postings across 28 companies spanning all 7
@@ -420,12 +449,17 @@ crontab -l | grep -v 'run_orchestrator_cron.sh' | crontab -
   of each, e.g.:
   ```
   === HuntLoop scheduled run started 2026-08-22 03:00:01 PDT ===
-  --- stage 1/2: scraper orchestrator (main.py) ---
+  --- stage 1/2: scraper orchestrator (main.py, via docker compose run) ---
   --- stage 1/2 finished with exit code 0 ---
-  --- stage 2/2: skills-matching backfill (scripts/backfill_skills_matching.py) ---
-  --- stage 2/2 finished with exit code 0 ---
-  === run finished with exit code 0 (scrape=0, skills=0) at 2026-08-22 03:04:12 PDT ===
+  --- stage 2/3: skills-matching backfill (scripts/backfill_skills_matching.py) ---
+  --- stage 2/3 finished with exit code 0 ---
+  --- stage 3/3: department categorization backfill (scripts/backfill_department_category.py) ---
+  --- stage 3/3 finished with exit code 0 ---
+  === run finished with exit code 0 at 2026-08-22 03:04:12 PDT ===
   ```
+  (The first stage's label still reads `1/2` rather than `1/3` in
+  `scripts/run_orchestrator_cron.sh` — a cosmetic leftover from when
+  there were two stages, not a sign that a stage is missing.)
   A non-zero overall exit code (or an `ERROR: .venv/bin/python not
   found` line, if the venv itself is missing) means at least one stage
   failed. Check this file first — it's the fastest way to answer "did
@@ -460,9 +494,18 @@ pytest
 
 The suite has grown well past the original pipeline smoke tests. It now
 covers the pipeline, spiders, ATS detection/onboarding, matching, the
-API, and more (300+ tests as of this writing — don't expect that count
-to stay accurate; run `pytest` for the real current total). Illustrative
-early example, still representative of the format:
+Modal integration and Deep-Dive, company research, notifications, and
+the API — **840+ automated tests in total** across the backend and the
+frontend. Don't expect any exact count to stay accurate; run the suites
+for the real current totals (`pytest --collect-only -q` is the quickest
+way to see how many backend tests exist without running them). The
+frontend suite is Vitest + React Testing Library:
+
+```bash
+cd frontend && npm test
+```
+
+Illustrative early example, still representative of the backend format:
 
 ```
 ============================= test session starts ==============================
@@ -516,7 +559,22 @@ kept to the shape, not every query param/edge case):
   new-jobs-in-the-last-7-days.
 - `GET /resumes` / `POST /resumes/upload` / `PATCH /resumes/{id}/activate`
   - resume version history, PDF upload (extract → embed → activate), and
-  reactivating a prior version.
+  reactivating a prior version. Extraction and embedding go through
+  Modal when it's configured, and fall back to running in-process
+  otherwise (see ["Modal serverless compute"](#modal-serverless-compute)).
+- `GET /resumes/active/ats-report` - an ATS-compatibility score and
+  structured critique of the active resume, from one LLM call
+  (`huntloop.resume_ats_report`). No job description is involved - this
+  rates the resume on its own.
+- `POST /jobs/{id}/deep-dive` / `GET /deep-dives/{id}` - start a Resume
+  Deep-Dive for one posting and poll it to completion. See ["Modal
+  serverless compute"](#modal-serverless-compute).
+- `POST /feedback` / `GET /feedback/public` - submit feedback (persisted
+  immediately, triaged later out of band) and read the entries that have
+  been explicitly marked public. `raw_text` is never exposed publicly.
+- `GET /admin/feedback` / `PATCH /admin/feedback/{id}` / `GET /admin/whoami`
+  - the owner's own feedback review tool, gated behind a verified,
+  allow-listed Clerk session in both demo and non-demo mode.
 - `POST /jobs/{id}/draft-answer` - BYOK (bring-your-own-key) resume-grounded
   drafting of free-form application answers via a user-supplied Groq/Gemini
   API key (`{"prompt", "provider", "api_key"}`) - the key is never read
@@ -555,10 +613,17 @@ TanStack Query for data fetching. Real pages exist for:
 - **Dashboard** (`/dashboard`, the default landing route)
 - **Job list** (`/jobs`) — filterable/sortable, cards or table view
 - **Job detail** — matched/missing skill chips, sponsor/salary-estimate
-  sidebar, sanitized-HTML description, and a chat assistant panel
-  (read-only Q&A plus the BYOK drafting endpoint)
+  sidebar, a company-research card, sanitized-HTML description, a chat
+  assistant panel (read-only Q&A plus the BYOK drafting endpoint), and
+  the Resume Deep-Dive panel
 - **Application tracker** (`/applications`) — kanban and list views
-- **Resume version management** (`/resumes`) — upload and activate
+- **Resume version management** (`/resumes`) — upload, activate, and
+  the ATS report for the active resume
+- **Public feedback status** (`/status`) — read-only, grouped by status
+- **Admin feedback review** (`/admin/feedback`) — Clerk-gated, the
+  owner's own triage view
+
+A feedback trigger is mounted on every page via the root layout.
 
 `frontend/src/types/api.ts` and `frontend/src/lib/api.ts` mirror the
 backend's Pydantic schemas/endpoints, kept manually in sync (no shared
@@ -603,10 +668,92 @@ API must already be running for either workflow above - via Docker (per
 ["Run with Docker"](#run-with-docker)/["API service"](#api-service)) or
 `uvicorn ... --reload`.
 
+## Modal serverless compute
+
+Two kinds of work run on [Modal](https://modal.com) rather than in the
+API process: resume parsing/embedding, and the Resume Deep-Dive. The
+Modal app is `huntloop-resume-processing`
+(`src/huntloop/modal_resume_functions.py`) and holds three functions —
+`process_resume_remote`, `embed_text_remote` and `deep_dive_remote`.
+
+**Resume parsing and embedding.** `POST /resumes/upload` and
+`PATCH /resumes/{id}/activate` call Modal first and **fall back to the
+same in-process code** (`pdfplumber` + `sentence-transformers`) on any
+failure — Modal not configured, the monthly budget exhausted, or the
+remote call erroring. Neither path raises, so a Modal outage never
+breaks resume upload.
+
+**Resume Deep-Dive.** A heavier per-job analysis of the active resume:
+fit rating, strengths with resume evidence, gaps with importance and how
+to close them, suggested resume edits, interview focus and caveats. It
+is too slow for one HTTP request, so `POST /jobs/{id}/deep-dive`
+*spawns* the Modal function and returns a row id, and the frontend panel
+(`frontend/src/components/DeepDivePanel.tsx`) polls
+`GET /deep-dives/{id}` until it is `done` or `failed`. Rows live in
+`resume_deep_dives`, one per (resume version, job posting). The LLM keys
+for it live only in a Modal Secret named `huntloop-llm`, never in the
+API process — so unlike resume processing there is **no local fallback**
+here by design: with Modal unconfigured the endpoint returns a clean 503
+and the panel says so.
+
+**Usage ledger.** `modal_usage` records invocations per calendar month
+against `MODAL_MONTHLY_INVOCATION_BUDGET` (default 500). A Deep-Dive
+reserves `MODAL_DEEP_DIVE_WEIGHT` slots (default 5) rather than one, as
+an approximation of its heavier compute; a reservation that would cross
+the cap is refused outright rather than partially granted. Crossing 80%
+or 95% of the cap sends one email alert each, once per month
+(`huntloop.budget_alerts`, `ALERT_THRESHOLDS_PERCENT = (80, 95)`) — the
+same shared mechanism every other usage ledger here uses. Two of the
+provisioned Grafana dashboards cover this: "HuntLoop Modal Resume
+Processing" and "HuntLoop Deep-Dive".
+
+**Setup.** Put `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` in `.env` (from
+`modal token new`), create the `huntloop-llm` Secret in your own Modal
+account with `GROQ_API_KEY` (and optionally `GEMINI_API_KEY`), then
+deploy:
+
+```bash
+PYTHONPATH=src modal deploy src/huntloop/modal_resume_functions.py
+```
+
+`PYTHONPATH=src` is required — see that file's own docstring.
+**Re-deploy after any change to that file or to `huntloop.deep_dive`,
+which it imports at call time.** With no Modal tokens configured,
+resume upload still works (local fallback) and Deep-Dive returns 503;
+nothing is broken.
+
+## Company research (Tavily, optional)
+
+Each company can carry a short research snapshot — a summary, recent
+news links, and funding/hiring signals — shown in a "Company research"
+card on the job detail page and returned as `company_research` on
+`GET /jobs/{id}`. It is null until that company has a snapshot, never a
+stuck loading state.
+
+This is enrichment at the **company** level, not per posting, since many
+postings share one company. `scripts/backfill_company_research.py` makes
+**exactly one Tavily `/search` request per company**
+(`search_depth="basic"`, the cheaper tier), and derives the
+funding/hiring signals locally from that same response rather than
+spending further requests. Snapshots refresh at most once every 30 days
+per company.
+
+Requests are counted in the durable `tavily_usage` ledger, one row per
+calendar month, checked before every call and capped by
+`TAVILY_MONTHLY_REQUEST_BUDGET` (default 800 in
+`scripts/backfill_company_research.py`). A run that would cross the cap
+stops cleanly at it and leaves the rest for next month. The script is
+run manually; it is deliberately not wired into the daily scheduled
+stages. Set `TAVILY_API_KEY` in `.env` to use it — everything else in
+HuntLoop works without it.
+
 ## Demo mode (optional)
 
-Nothing is deployed publicly yet, so there is no live link here - this
-is the local mechanism for building one later.
+A read-only public demo of this stack is deployed — Neon for the
+database, Render for the API, Vercel for the frontend. See
+[`docs/DEPLOY_DEMO.md`](docs/DEPLOY_DEMO.md) for the step-by-step setup
+if you want to stand up your own. It runs on free tiers, so treat it as
+a demo, not a service.
 
 `DEMO_MODE=true` on the API (see `huntloop.demo_mode`) turns it
 read-only: the resume upload/activate routes and the BYOK drafting
@@ -618,7 +765,14 @@ database (essentially every company with a relevant, embedded posting
 across all 7 ATS platforms, capped at 40 postings per company,
 per-company sponsor aggregates instead of raw LCA rows, one fictional
 resume) from a source database into a target database, and refuses to
-run if they are the same database. On the frontend, `NEXT_PUBLIC_DEMO_MODE=true` (build time)
+run if they are the same database. The deployed demo database currently
+holds 738 companies — each with a Tavily research snapshot — and 19,690
+job postings (verified 2026-11-19). The feedback endpoints and the
+Deep-Dive endpoints **are** mounted in demo mode: neither takes an
+upload or a caller-supplied credential, and the Deep-Dive's LLM keys
+live only in the Modal Secret, never in the API process. The
+Clerk-gated admin feedback routes are mounted in both modes too. On the
+frontend, `NEXT_PUBLIC_DEMO_MODE=true` (build time)
 shows a banner, hides the AI assistant and resume-upload controls, and
 shows a wake-up message if a sleeping free-tier backend is slow to
 answer. See `SESSIONS.md`'s "Add read-only demo mode and a demo dataset
@@ -717,14 +871,17 @@ applies here as for plain `docker compose up`.
 
 ## Observability stack (optional, opt-in)
 
-Prometheus + Pushgateway + Grafana, for local metrics on scraping
-activity. `main.py`'s orchestrator (`huntloop.metrics`) pushes per-run
-metrics to the Pushgateway as one batch at the end of each run: jobs
-scraped, inserted, skipped-as-duplicate, and errored (labeled by company
-and source), plus the run's duration. A pre-provisioned Grafana dashboard
-visualizes them. Metrics are observability, not a hard dependency — if
-the Pushgateway is unreachable, `main.py` logs one warning and the
-scrape completes normally.
+Prometheus + Pushgateway + Grafana, for local metrics on scraping and
+the other background work. `main.py`'s orchestrator (`huntloop.metrics`)
+pushes per-run metrics to the Pushgateway as one batch at the end of
+each run: jobs scraped, inserted, skipped-as-duplicate, and errored
+(labeled by company and source), plus the run's duration. Six
+pre-provisioned Grafana dashboards visualize these and the later
+subsystems — scraping activity, skills-matching backfill, feedback
+volume, Modal resume processing, Deep-Dive, and notifications. Metrics
+are observability, not a hard dependency — if the Pushgateway is
+unreachable, the caller logs one warning and the real work completes
+normally.
 
 These three services live behind the `observability` Compose profile, so
 a plain `docker-compose up` (regular dev work) never starts them:
@@ -760,13 +917,19 @@ docker-compose --profile observability up -d prometheus pushgateway grafana
   in `.env`, local dev
   only, not a real secret). Both its Prometheus datasource
   (`observability/grafana/provisioning/datasources/datasource.yml`) and
-  the **"HuntLoop Scraping Activity" dashboard**
-  (`observability/grafana/provisioning/dashboards/huntloop-scraping.json`,
-  loaded via the file provider at
+  all six dashboards
+  (`observability/grafana/provisioning/dashboards/*.json`, loaded via
+  the file provider at
   `observability/grafana/provisioning/dashboards/dashboards.yml`) are
   pre-provisioned on container start — no manual "Add data source" or
   "Import dashboard" click-through needed on a fresh bring-up. The
-  dashboard has 4 panels: jobs scraped over time (by company), jobs
+  Deep-Dive dashboard additionally reads Postgres directly through its
+  own provisioned datasource (configured from `HUNTLOOP_PG_*` env vars,
+  no credential committed), because "how many Deep-Dives are in each
+  status" is a row count rather than a pushed metric. The
+  **"HuntLoop Scraping Activity"** dashboard
+  (`huntloop-scraping.json`) has 4 panels: jobs scraped over time (by
+  company), jobs
   inserted vs. skipped-as-duplicate (by company), scrape error count, and
   run duration trend — all querying the metrics above directly, no new
   ones. Verify the datasource is connected via the API rather than just
@@ -1039,15 +1202,27 @@ were used to help implement and review that direction, not to set it.
   Groq/Gemini-backed matched/missing-skills engine)
 - Optional H-1B/DOL sponsorship matching with salary estimates (see
   ["H-1B sponsorship data"](#h-1b-sponsorship-data-optional))
-- FastAPI backend — jobs, applications, resumes, dashboard stats, BYOK
-  drafting assistant ([full endpoint list](#api-service))
+- FastAPI backend — jobs, applications, resumes, dashboard stats, ATS
+  report, feedback, BYOK drafting assistant
+  ([full endpoint list](#api-service))
 - Next.js frontend — dashboard, filterable job list/detail, application
-  tracker, resume version management, BYOK chat assistant
+  tracker, resume version management, BYOK chat assistant, Deep-Dive
+  panel
+- Modal serverless resume parsing/embedding with a local fallback, and
+  the asynchronous Resume Deep-Dive, both behind a weighted monthly
+  usage ledger ([detail](#modal-serverless-compute))
+- Per-company Tavily research snapshots on the job detail page
+  ([detail](#company-research-tavily-optional))
+- Feedback capture with out-of-band LLM triage, and email alerts
+  (Resend via Knock) for new feedback and for usage ledgers crossing
+  80%/95% of their monthly cap
+- A read-only public demo deployed on Neon + Render + Vercel
+  ([`docs/DEPLOY_DEMO.md`](docs/DEPLOY_DEMO.md))
 - Docker Compose for the full stack, pre-seeded with real sample data
 - CI running the full backend + frontend test suite against a real
   Postgres on every push/PR
-- Optional HTTPS reverse proxy (Caddy) and Prometheus/Grafana
-  observability stack
+- Optional HTTPS reverse proxy (Caddy) and a Prometheus/Grafana
+  observability stack with six pre-provisioned dashboards
 - Local (launchd-scheduled) daily scrape + skills-matching +
   department-categorization automation
 
@@ -1058,8 +1233,9 @@ were used to help implement and review that direction, not to set it.
 - A foreign key from `companies` to `lca_disclosures` — deliberately
   deferred, since one company can span multiple legal entities in the
   LCA data
-- A hosted-database / GitHub Actions deployment — scheduling is still
-  local-machine-only (`launchd`)
+- Scheduled runs against the hosted database — the demo's data is
+  pushed from a local run, and the daily scrape/matching schedule is
+  still local-machine-only (`launchd`), not GitHub Actions
 - An automated `pip-audit`/`bandit` CI step, and full `requirements.txt`
   pinning (currently partial)
 - An AI resume-review UI (missing-keyword/phrasing/formatting

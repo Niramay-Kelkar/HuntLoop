@@ -15641,3 +15641,81 @@ Nothing was deployed and no `modal deploy` was run. Backend suite
 
 **Next:** The Next.js security upgrade the build keeps recommending is
 still open and was deliberately not taken as part of this work.
+
+---
+
+## 2026-11-20 — Documentation audit and README refresh
+
+**Did:** Audited README.md line by line against the code, the config and
+read-only local database queries, and brought it back in line with what
+the project actually is now. Documentation only — the one non-doc change
+is a `description` field added to `frontend/package.json`, which is inert
+metadata (the frontend suite still passes 168/168 after it).
+
+What was stale, and what it says now:
+
+- **Test count.** "300+ tests as of this writing" → **840+ automated
+  tests** across backend and frontend, with a pointer to
+  `pytest --collect-only -q` and `cd frontend && npm test` for the real
+  current totals. Backend is **673 collected** (`pytest --collect-only
+  -q`, run today); the frontend suite **passes 168/168** (run today);
+  673 + 168 = 841. The full backend suite was deliberately **not** run,
+  because it currently sends real alert emails — a known test-isolation
+  problem being fixed separately. Its last known full-run result is
+  **673 passing, including the three advisory-lock tests**.
+- **Modal was undocumented.** New "Modal serverless compute" section:
+  the `huntloop-resume-processing` app and its three functions, resume
+  parsing/embedding with a local fallback, the Deep-Dive spawn-and-poll
+  flow with no local fallback by design, the `huntloop-llm` Secret, the
+  `modal_usage` ledger (budget 500, Deep-Dive weight 5) and the 80%/95%
+  alert thresholds, and the `PYTHONPATH=src modal deploy
+  src/huntloop/modal_resume_functions.py` command with its re-deploy
+  rule.
+- **Tavily was undocumented.** New "Company research (Tavily)" section:
+  one `search_depth="basic"` request per company, signals derived
+  locally from that same response, the 30-day refresh, and the
+  `tavily_usage` ledger capped at 800/month.
+- **"Nothing is deployed publicly yet, so there is no live link here"**
+  → a read-only demo is deployed on Neon + Render + Vercel, pointing at
+  `docs/DEPLOY_DEMO.md`. No URL, no uptime or traffic claims.
+- **Demo-mode paragraph** gained the real demo-database size (738
+  companies with research, 19,690 postings, verified 2026-11-19) and the
+  fact that the feedback, Deep-Dive and Clerk-gated admin routes *are*
+  mounted in demo mode.
+- **Architecture diagram and the paragraph under it** said resume
+  embeddings go out to Groq/Gemini. They don't — embeddings run on
+  Modal, or in-process as a fallback. Modal and Tavily added to the
+  diagram.
+- **Endpoint list** was missing `GET /resumes/active/ats-report`, the
+  Deep-Dive pair, the feedback pair and the admin trio.
+- **Migration/table list** named ten tables; there are 24, across 30
+  migrations. Rewritten to name the core set plus the later feature
+  tables and the four usage ledgers.
+- **Observability** said "a pre-provisioned Grafana dashboard"; there
+  are **six**, and the Deep-Dive one reads Postgres directly through its
+  own provisioned datasource.
+- **Scheduled-runs log example** showed two stages; there are three.
+  Noted that stage one's label still reads `1/2` in
+  `scripts/run_orchestrator_cron.sh` — cosmetic, not a missing stage,
+  and deliberately not "fixed" here since this was a docs-only pass.
+- **Features / Project status** gained Modal, Deep-Dive, Tavily,
+  feedback + triage, the ATS report and the email alerts; "a
+  hosted-database deployment" moved out of "Not yet built", narrowed to
+  the part that is still true (scheduled runs are still local-only).
+- **Frontend page list** gained the Deep-Dive panel, the company
+  research card, the ATS report, `/status` and `/admin/feedback`.
+- `docs/DEPLOY_DEMO.md` noted that the demo has since actually been
+  deployed by following it.
+- `CLAUDE.md`: only the one clearly-wrong figure, the demo-vs-local row
+  counts (19,294 / ~97k → 19,690 / ~217k). Nothing else reworded.
+
+Verified and found already correct, so left alone: the seven ATS
+platforms, the sample dataset's 194 postings / 28 companies / 7 sources
+/ ~7,200 LCA rows (counted from the committed CSVs), the LCA fiscal
+years 2021/2022/2024/2025, every badge, every issue-template link, and
+the Python 3.13 / Postgres 18 prerequisites.
+
+**Next:** The stage-label inconsistency in
+`scripts/run_orchestrator_cron.sh` and the backend suite's real-email
+test-isolation problem are both still open, and neither was touched
+here.
