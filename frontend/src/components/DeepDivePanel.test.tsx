@@ -172,7 +172,9 @@ describe("DeepDivePanel", () => {
     expect(screen.getByText("Python depth")).toBeInTheDocument();
     expect(screen.getByText("Four years of Django at Acme.")).toBeInTheDocument();
     expect(screen.getByText("Gaps")).toBeInTheDocument();
-    expect(screen.getByText("Kubernetes")).toBeInTheDocument();
+    // By heading, not by text: a high-importance gap is also named by the
+    // start-here line above the report, so the bare text matches twice.
+    expect(screen.getByRole("heading", { level: 4, name: "Kubernetes" })).toBeInTheDocument();
     expect(screen.getByText("Resume edits")).toBeInTheDocument();
     expect(screen.getByText("Interview focus")).toBeInTheDocument();
     expect(screen.getByText("Caveats")).toBeInTheDocument();
@@ -455,6 +457,115 @@ describe("DeepDivePanel", () => {
       await renderResult({ ...RESULT, fit_rating: "excellent" });
 
       expect(screen.getByText("excellent")).toBeInTheDocument();
+    });
+
+    it("counts the strengths and the gaps by importance in the glance line", async () => {
+      await renderResult({
+        ...RESULT,
+        strengths: [
+          { point: "Python depth", resume_evidence: "Four years of Django." },
+          { point: "SQL", resume_evidence: "Owned the reporting schema." },
+          { point: "Mentoring", resume_evidence: "Led two interns." },
+          { point: "On-call", resume_evidence: "Two years in rotation." },
+        ],
+        gaps: [
+          gap("Kubernetes", "high"),
+          gap("Kafka", "high"),
+          gap("Go", "medium"),
+          gap("Terraform", "medium"),
+          gap("gRPC", "low"),
+        ],
+      });
+
+      expect(screen.getByText("4 strengths, 2 high, 2 medium, 1 low gaps")).toBeInTheDocument();
+    });
+
+    it("omits an importance level with no gaps, and singularises a count of one", async () => {
+      await renderResult({
+        ...RESULT,
+        strengths: [{ point: "Python depth", resume_evidence: "Four years of Django." }],
+        gaps: [gap("Go", "medium")],
+      });
+
+      // No "0 high" / "0 low" anywhere - a zero count is left out, not
+      // printed.
+      expect(screen.getByText("1 strength, 1 medium gap")).toBeInTheDocument();
+      expect(screen.queryByText(/0 (high|medium|low)/)).not.toBeInTheDocument();
+    });
+
+    it("shows no glance line at all when there are no strengths and no gaps", async () => {
+      await renderResult({ ...RESULT, strengths: [], gaps: [] });
+
+      expect(screen.queryByText(/strengths?,/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/gaps?$/)).not.toBeInTheDocument();
+    });
+
+    it("names the first high gap in a start-here line linking to that gap", async () => {
+      await renderResult({
+        ...RESULT,
+        gaps: [gap("Go", "medium"), gap("Kubernetes", "high"), gap("Kafka", "high")],
+      });
+
+      expect(screen.getByText(/start with:/i)).toBeInTheDocument();
+      // The FIRST high gap once sorted - not the first one that arrived.
+      const link = screen.getByRole("link", { name: "Kubernetes" });
+      const target = link.getAttribute("href")?.slice(1) ?? "";
+      expect(target).not.toBe("");
+      // The anchor resolves to a gap that is actually on the page, and is
+      // not folded away behind "Show more".
+      const gapItem = document.getElementById(target);
+      expect(gapItem).not.toBeNull();
+      expect(gapItem).toHaveTextContent("Kubernetes");
+    });
+
+    it("shows no start-here line when no gap is high importance", async () => {
+      await renderResult({
+        ...RESULT,
+        gaps: [gap("Go", "medium"), gap("gRPC", "low")],
+      });
+
+      expect(screen.queryByText(/start with:/i)).not.toBeInTheDocument();
+    });
+
+    it("renders the gap column labels once as a header row, not once per gap", async () => {
+      await renderResult({
+        ...RESULT,
+        gaps: [gap("Kubernetes", "high"), gap("Kafka", "high"), gap("Go", "medium")],
+      });
+
+      // Three gaps, so a per-gap label would appear four times in all
+      // (header plus one each). Each label appears once on the page as a
+      // header, plus one accessible-only copy inside each gap so a
+      // stacked mobile layout never loses the name.
+      const headerRow = document.querySelector('[aria-hidden="true"].sm\\:grid');
+      expect(headerRow).not.toBeNull();
+      expect(headerRow).toHaveTextContent("Why it matters");
+      expect(headerRow).toHaveTextContent("How to close it");
+
+      // Every gap still names both of its blocks for assistive tech.
+      expect(screen.getAllByText("Why it matters")).toHaveLength(4);
+      expect(screen.getAllByText("How to close it")).toHaveLength(4);
+    });
+
+    it("renders no gap header row when no gap fills both columns", async () => {
+      await renderResult({
+        ...RESULT,
+        gaps: [{ skill: "Kubernetes", importance: "high", why_it_matters: "Clusters." } as DeepDiveGap],
+      });
+
+      expect(document.querySelector('[aria-hidden="true"].sm\\:grid')).toBeNull();
+      expect(screen.getByRole("heading", { level: 4, name: "Kubernetes" })).toBeInTheDocument();
+    });
+
+    it("keeps the chips and caveats hidden when their lists are empty", async () => {
+      await renderResult({ ...RESULT, interview_focus: [], caveats: [] });
+
+      expect(screen.queryByText("Interview focus")).not.toBeInTheDocument();
+      expect(screen.queryByText("Caveats")).not.toBeInTheDocument();
+      expect(screen.queryByText(RESULT.caveats?.[0] as string)).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(RESULT.interview_focus?.[0] as string),
+      ).not.toBeInTheDocument();
     });
 
     it("shows a ticking elapsed counter while a run is in progress", async () => {

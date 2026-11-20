@@ -105,6 +105,38 @@ function sortGapsByImportance(gaps: DeepDiveGap[]): DeepDiveGap[] {
   );
 }
 
+/** Anchor target for one gap, so the start-here line can link to it. */
+function gapAnchorId(index: number): string {
+  return `deep-dive-gap-${index}`;
+}
+
+/**
+ * The at-a-glance line: how much of each thing the report found, built
+ * from the data rather than written. A count of zero is left out
+ * entirely rather than printed as "0 low" - the reader should see only
+ * what is actually there. Commas throughout: a dash reads as a range
+ * next to figures.
+ */
+function glanceLine(strengths: DeepDiveStrength[], gaps: DeepDiveGap[]): string {
+  const parts: string[] = [];
+
+  if (strengths.length > 0) {
+    parts.push(`${strengths.length} ${strengths.length === 1 ? "strength" : "strengths"}`);
+  }
+
+  const counted = ["high", "medium", "low"]
+    .map((level) => [level, gaps.filter((g) => g?.importance === level).length] as const)
+    .filter(([, count]) => count > 0);
+  const countedTotal = counted.reduce((sum, [, count]) => sum + count, 0);
+
+  if (counted.length > 0) {
+    const listed = counted.map(([level, count]) => `${count} ${level}`).join(", ");
+    parts.push(`${listed} ${countedTotal === 1 ? "gap" : "gaps"}`);
+  }
+
+  return parts.join(", ");
+}
+
 export function DeepDivePanel({
   jobId,
   jobTitle,
@@ -505,12 +537,47 @@ function Section({
   );
 }
 
-/** A labelled block inside a gap - "Why it matters" / "How to close it". */
+/**
+ * A labelled block inside a gap - "Why it matters" / "How to close it".
+ *
+ * On wide screens the two blocks sit side by side under one ruled header
+ * row (see GapColumnHeaders), so repeating the label in every gap is
+ * noise: the label is kept in the accessibility tree via sr-only but
+ * taken off the page. Narrow screens stack the blocks, where the header
+ * row no longer sits above the right column, so the label stays visible
+ * and nothing loses its name.
+ */
 function GapNote({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <p className="mb-1 font-mono text-xs uppercase tracking-[0.06em] text-text-faint">{label}</p>
+      <p className="mb-1 font-mono text-xs uppercase tracking-[0.06em] text-text-faint sm:sr-only sm:mb-0">
+        {label}
+      </p>
       <p className="text-sm leading-relaxed text-text-secondary">{children}</p>
+    </div>
+  );
+}
+
+/**
+ * The two gap-column labels, shown once above the list on wide screens
+ * only. Hidden from assistive tech, because each GapNote still carries
+ * its own name - announcing the pair twice would be worse than not at
+ * all.
+ */
+function GapColumnHeaders() {
+  return (
+    <div
+      aria-hidden="true"
+      className="mb-3 hidden grid-cols-2 gap-x-6 border-b border-divider pb-1.5 sm:grid"
+    >
+      {["Why it matters", "How to close it"].map((label) => (
+        <p
+          key={label}
+          className="font-mono text-xs uppercase tracking-[0.06em] text-text-faint"
+        >
+          {label}
+        </p>
+      ))}
     </div>
   );
 }
@@ -598,17 +665,41 @@ function Result({ result, onRetry }: { result: DeepDiveResult; onRetry: () => vo
   const hiddenGapCount = Math.max(0, sortedGaps.length - GAPS_SHOWN_BY_DEFAULT);
   const visibleGaps = allGapsShown ? sortedGaps : sortedGaps.slice(0, GAPS_SHOWN_BY_DEFAULT);
 
+  const glance = glanceLine(strengths, sortedGaps);
+  // High gaps sort first, so the first high gap - when there is one - is
+  // always among those shown before the fold, and the anchor can never
+  // point at something hidden.
+  const firstHighGapIndex = sortedGaps.findIndex((g) => g?.importance === "high");
+  const firstHighGap = firstHighGapIndex === -1 ? null : sortedGaps[firstHighGapIndex];
+  // Both column labels only earn a header row if some gap actually fills
+  // both columns.
+  const showGapColumnHeaders = visibleGaps.some((g) => g?.why_it_matters && g?.how_to_close);
+
   return (
     <div className="max-w-[78ch]">
       {/* --- verdict --- */}
-      {(result.fit_rating || result.summary) && (
+      {(result.fit_rating || result.summary || glance) && (
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:gap-4">
           {result.fit_rating && <FitStamp rating={String(result.fit_rating)} />}
-          {result.summary && (
-            <p className="max-w-[65ch] text-base leading-relaxed text-text-secondary">
-              {result.summary}
-            </p>
-          )}
+          <div className="max-w-[65ch]">
+            {result.summary && (
+              <p className="text-base leading-relaxed text-text-secondary">{result.summary}</p>
+            )}
+            {glance && (
+              <p className="mt-2 font-mono text-xs tabular-nums text-text-subtle">{glance}</p>
+            )}
+            {firstHighGap?.skill && (
+              <p className="mt-1.5 text-sm text-text-subtle">
+                Start with:{" "}
+                <a
+                  href={`#${gapAnchorId(firstHighGapIndex)}`}
+                  className="font-medium text-accent underline decoration-from-font underline-offset-2 hover:text-accent-hover"
+                >
+                  {firstHighGap.skill}
+                </a>
+              </p>
+            )}
+          </div>
         </div>
       )}
 
@@ -639,19 +730,25 @@ function Result({ result, onRetry }: { result: DeepDiveResult; onRetry: () => vo
 
       {sortedGaps.length > 0 && (
         <Section title="Gaps" count={sortedGaps.length}>
+          {showGapColumnHeaders && <GapColumnHeaders />}
           <ul className="flex flex-col gap-4">
             {visibleGaps.map((g, i) => (
               <li
                 key={`${g?.skill ?? "gap"}-${i}`}
-                className="border-t border-divider pt-3 first:border-t-0 first:pt-0"
+                id={gapAnchorId(i)}
+                className="scroll-mt-6 border-t border-divider pt-3 first:border-t-0 first:pt-0"
               >
                 <div className="mb-2 flex flex-wrap items-center gap-2">
                   <h4 className="text-base font-semibold leading-snug text-text">{g?.skill}</h4>
                   {g?.importance && <ImportanceTag importance={String(g.importance)} />}
                 </div>
                 <div className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
-                  {g?.why_it_matters && (
+                  {g?.why_it_matters ? (
                     <GapNote label="Why it matters">{g.why_it_matters}</GapNote>
+                  ) : (
+                    // Keeps "How to close it" under its own header on
+                    // wide screens when this gap has no "why".
+                    <div aria-hidden="true" className="hidden sm:block" />
                   )}
                   {g?.how_to_close && <GapNote label="How to close it">{g.how_to_close}</GapNote>}
                 </div>
@@ -699,7 +796,7 @@ function Result({ result, onRetry }: { result: DeepDiveResult; onRetry: () => vo
             {interview.map((item, i) => (
               <li
                 key={`${item}-${i}`}
-                className="border border-border bg-surface-alt px-2.5 py-1.5 text-sm leading-snug text-text-secondary"
+                className="border border-border bg-surface px-2.5 py-1.5 text-sm leading-snug text-text-secondary"
               >
                 {item}
               </li>
@@ -712,7 +809,9 @@ function Result({ result, onRetry }: { result: DeepDiveResult; onRetry: () => vo
         <Section title="Caveats">
           <ul className="flex flex-col gap-1">
             {caveats.map((item, i) => (
-              <li key={`${item}-${i}`} className="text-sm leading-relaxed text-text-faint">
+              // text-text-subtle, not text-text-faint: faint sits at
+              // 3.95:1 on this surface, under WCAG AA for normal text.
+              <li key={`${item}-${i}`} className="text-sm leading-relaxed text-text-subtle">
                 {item}
               </li>
             ))}
