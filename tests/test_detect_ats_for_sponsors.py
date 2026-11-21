@@ -103,8 +103,36 @@ def test_short_or_common_reduced_slugs_are_gated():
     assert "tec" not in d.slug_candidates("TEC HOLDINGS CONSULTANTS")  # CONSULTANTS not noise
 
 
-def test_upsert_hits_inserts_new_and_fills_null_or_unknown(db_session):
+def test_upsert_hits_inserts_new_and_fills_null_or_unknown(db_session, monkeypatch):
+    from huntloop import company_display_name
     from huntloop.db_models import Company
+
+    # upsert_hits() calls fetch_greenhouse_display_name() for every
+    # greenhouse hit, which is one real GET to Greenhouse's public
+    # board-metadata endpoint. Patch at the HTTP boundary (requests.get
+    # inside huntloop.company_display_name) rather than stubbing
+    # fetch_greenhouse_display_name itself, so that function's own
+    # status/JSON handling still runs - the point is removing the
+    # network, not removing the code under it.
+    requested_urls: list[str] = []
+
+    class _FakeGreenhouseBoardResponse:
+        status_code = 200
+
+        def __init__(self, slug: str):
+            self._slug = slug
+
+        def json(self):
+            # Shape of a real boards-api.greenhouse.io/v1/boards/{slug}
+            # body, trimmed to the one field this code reads.
+            return {"name": self._slug.capitalize(), "content": ""}
+
+    def _fake_get(url, *args, **kwargs):
+        requested_urls.append(url)
+        return _FakeGreenhouseBoardResponse(url.rstrip("/").rsplit("/", 1)[-1])
+
+    monkeypatch.setattr(company_display_name.requests, "get", _fake_get)
+
     db_session.add_all([
         Company(name="brex", ats_platform="unknown", ats_token=None),
         Company(name="palantir", ats_platform="lever", ats_token="palantir"),
@@ -127,6 +155,10 @@ def test_upsert_hits_inserts_new_and_fills_null_or_unknown(db_session):
     # an existing, different, successful platform is left alone
     assert db_session.query(Company).filter_by(name="palantir").one().ats_platform == "lever"
     assert db_session.query(Company).filter_by(name="stripe").one().ats_platform == "greenhouse"
+    # the stubbed boundary really was the one exercised - one board-metadata
+    # lookup per greenhouse hit, and no other host touched
+    assert len(requested_urls) == 4
+    assert all(u.startswith("https://boards-api.greenhouse.io/v1/boards/") for u in requested_urls)
 
 
 def test_name_matches_gate():

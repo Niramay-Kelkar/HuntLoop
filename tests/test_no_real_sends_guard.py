@@ -53,6 +53,50 @@ def test_resolving_a_real_provider_host_is_blocked(host):
     assert "test_resolving_a_real_provider_host_is_blocked" in str(exc_info.value)
 
 
+@pytest.mark.parametrize(
+    "host",
+    [
+        "boards-api.greenhouse.io",
+        "api.lever.co",
+        "api.ashbyhq.com",
+        "api.smartrecruiters.com",
+        "jobs.gem.com",
+        "careers-example.icims.com",
+        "example.wd3.myworkdayjobs.com",
+    ],
+)
+def test_resolving_a_public_ats_board_host_is_blocked(host):
+    """The ATS boards cost nothing to call, which is exactly why a real
+    call to one can hide in a test unnoticed. They are live third-party
+    services all the same, so the guard covers them too - a scraper or
+    discovery test that forgets to mock its HTTP boundary fails loudly
+    here instead of quietly hitting someone else's production board."""
+    with pytest.raises(BlockedProviderCall) as exc_info:
+        socket.getaddrinfo(host, 443)
+
+    assert "test_resolving_a_public_ats_board_host_is_blocked" in str(exc_info.value)
+
+
+def test_an_unmocked_ats_board_request_fails_with_the_guard():
+    """The end-to-end case for the ATS half of the block: a real helper
+    this codebase calls, with nothing mocked, reaching its own
+    requests.get.
+
+    It surfaces as a raise, not as that helper's usual None-on-network-
+    error path, and deliberately so: BlockedProviderCall is a
+    RuntimeError, not a requests.RequestException, so it sails straight
+    through the helper's `except requests.RequestException` and reaches
+    the test. That is the behaviour we want from a guard - a forgotten
+    mock must be impossible to mistake for a real board that happened to
+    be down."""
+    from huntloop.company_display_name import fetch_greenhouse_display_name
+
+    with pytest.raises(BlockedProviderCall) as exc_info:
+        fetch_greenhouse_display_name("anything")
+
+    assert "test_an_unmocked_ats_board_request_fails_with_the_guard" in str(exc_info.value)
+
+
 def test_localhost_resolution_still_works():
     """The block is targeted at live provider hosts only - the local
     database and anything else on localhost must be unaffected."""
