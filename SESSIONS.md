@@ -15896,3 +15896,142 @@ pull a patched minimatch on its own and the override will have no job
 left to do.
 
 **Next:** Nothing outstanding from this work.
+
+---
+
+## 2026-11-21 — Stage label, a test that called a live job board, and a GET /jobs diagnosis
+
+Three unrelated small items. A and B changed code; C changed nothing.
+
+**A. Stage label.** `scripts/run_orchestrator_cron.sh` labelled its
+first stage `1/2` while the other two said `2/3` and `3/3` — a leftover
+from when there were two stages. All four occurrences in the script now
+read `1/3` (the stage banner, the finish line, and both host-port-retry
+messages), checked with `bash -n` only. The README's `logs/cron.log`
+example was updated to match and its "the label is cosmetic" caveat
+removed, and the one live-label quote in CLAUDE.md was corrected. Dated
+SESSIONS.md entries were left alone — they record what the log actually
+said at the time. The script was deliberately not executed: running it
+starts the real scrapers and spends real API credit.
+
+**Noted, not changed:** the script reads `DATABASE_URL` out of `.env`
+with `grep -E '^DATABASE_URL=' | cut -d= -f2- | sed ...` (line 226).
+That is a plain text extraction with no quote handling, so the value in
+the real `.env` must stay **unquoted** — wrapping it in quotes would
+carry them into the `-e DATABASE_URL=` passed to `docker compose run`
+and break stage 1.
+
+**B. A test was calling a live job board.** The networked test flagged
+at the end of the 2026-11-20 entry,
+`tests/test_detect_ats_for_sponsors.py::test_upsert_hits_inserts_new_and_fills_null_or_unknown`,
+made four real GETs to `boards-api.greenhouse.io` on every run —
+`upsert_hits()` calls `fetch_greenhouse_display_name()` once per
+greenhouse hit. It now patches `requests.get` inside
+`huntloop.company_display_name`, i.e. the HTTP boundary itself, rather
+than stubbing `fetch_greenhouse_display_name` — so that function's own
+status-code and JSON handling still runs. The stub returns a trimmed
+real-shaped board-metadata body. Every original assertion is unchanged
+(1 inserted, 2 updated, `unknown` and NULL both filled, an existing
+different platform left alone), plus a new check that exactly four
+board-metadata URLs and no other host were requested.
+
+`tests/conftest.py`'s blocked-host list gained the public ATS boards
+this codebase scrapes: `greenhouse.io`, `lever.co`, `ashbyhq.com`,
+`myworkdayjobs.com`, `icims.com`, `smartrecruiters.com`, `gem.com`
+(suffix matches, so every subdomain in the code is covered —
+`boards-api.`, `job-boards.`, `api.`, `jobs.`, `careers-{slug}.`,
+`{tenant}.{dc}.`). **No host had to be left out** — the full suite
+passes with all seven blocked, so no other test was depending on a live
+board. These cost no money and need no credential, which is exactly why
+a real call to one sat unnoticed; they are still someone else's
+production service, and a test that depends on one fails offline.
+
+Two guard tests added to `tests/test_no_real_sends_guard.py`: a
+parametrized resolution check over all seven hosts, and an end-to-end
+one calling `fetch_greenhouse_display_name()` with nothing mocked.
+Worth knowing: that helper swallows `requests.RequestException` and
+returns None, but `BlockedProviderCall` is a `RuntimeError`, so it goes
+straight through and reaches the test — a forgotten mock cannot be
+mistaken for a board that happened to be down.
+
+**Verified:** full suite in a child process with the email/Knock/
+Tavily/Groq/Gemini/Mistral/Cerebras/Modal credentials stripped —
+**698 passed**, 0 failed (690 baseline + 8 new), the three
+advisory-lock tests among them.
+
+**C. Why an unfiltered `GET /jobs` takes ~30s (diagnosis only).**
+`huntloop.api.routers.jobs.list_jobs` runs two statements. Both were
+run through `EXPLAIN (ANALYZE, BUFFERS)` against the local database
+(`localhost:5432/jobsight`, 218,263 postings) inside a READ ONLY
+transaction, with the frontend's real default params
+(`sort=-score&limit=12&offset=0`).
+
+- **The `COUNT(*)` is not the problem: 211 ms.** It wraps the whole
+  select as a subquery, but Postgres discards the unreferenced output
+  columns, so it collapses to a parallel seq scan plus the companies
+  hash join. No change needed here.
+- **The page query is 17.6 s, and 16.9 s of that is one node:** the
+  `Hash Left Join` feeding the sort. The composite score expression
+  (`huntloop.match_scoring`) reads `resume_skill_matches` through
+  **fourteen separate correlated scalar subqueries** — `json_typeof`
+  and `json_array_length` on `matched_skills`/`missing_skills`, each
+  re-fetching the same row. Every one is an efficient index scan on
+  `uq_resume_skill_matches_job_resume` (~2–12 µs), but it runs
+  218,263 × 14 ≈ **2.9M index lookups, 7.7M buffer hits**, before the
+  limit can apply.
+- **The sort is cheap** — top-N heapsort, 51 kB. **And pgvector is not
+  the bottleneck:** a bare `ORDER BY embedding <=> $resume LIMIT 12`
+  over every row is **398 ms**, about 2% of the total. The seq scan
+  itself is ~380 ms.
+- **Measured counterfactual:** the identical ordering with
+  `resume_skill_matches` read **once** via a single LEFT JOIN runs in
+  **5.3 s** instead of 17.6 s — same rows, same order.
+- **Indexes that exist:** `job_postings` has only `job_postings_pkey`
+  and the unique `job_postings_job_url_key` — nothing on `company_id`,
+  `date_posted`, `department_category`, `employment_type`, and no ANN
+  index on `embedding`. `resume_skill_matches` already has the
+  `(job_posting_id, resume_version_id)` unique index the subqueries
+  use. `companies`, `job_applications`, `job_locations`,
+  `lca_disclosures` and `sponsor_overall_aggregates` are all adequately
+  indexed for their part here.
+
+Options, cheapest first:
+
+1. **Read `resume_skill_matches` once per posting** (a LEFT JOIN or
+   LATERAL inside `_score_and_status_columns` / `match_score_expr`)
+   instead of fourteen correlated subqueries. **17.6 s → 5.3 s,
+   measured**, with byte-identical scores and ordering, no schema
+   change, no index, no behaviour change. The catch is that
+   `huntloop.match_scoring` is shared with
+   `scripts/backfill_skills_matching.py`, so it needs care and test
+   coverage on both callers. Clear best value.
+2. **Narrow the default population and index it** — the list already
+   treats `is_relevant IS TRUE` as the meaningful set everywhere else,
+   and ~3k of the table is blue-collar-denylisted. A default
+   `is_relevant` filter plus a supporting index would cut the scanned
+   rows and, on top of option 1, bring a cold unfiltered request well
+   under the frontend's 20 s `REQUEST_TIMEOUT_MS`. Costs a visible
+   product decision (what the unfiltered list means), not just a query
+   change.
+3. **Precompute and store the score.** Fastest possible, and the
+   wrong trade today: it needs the invalidation mechanism CLAUDE.md
+   explicitly says does not exist — on every scrape, every
+   skills-matching write and every resume activation. Only worth
+   revisiting if 1 and 2 together are not enough.
+
+**The ANN index stays the wrong tool**, and CLAUDE.md's conclusion
+still holds — though for a different reason than its ~100k-row revisit
+threshold anticipated. That threshold has been crossed (218k rows),
+but an ivfflat/hnsw index only accelerates a bare
+`ORDER BY embedding <=> $x LIMIT n`. The default sort is the composite
+expression, not a raw distance, so the index could not be used at all;
+and the vector term is 398 ms of a 17.6 s query regardless.
+
+**Demo impact:** none of this is urgent for the public demo, which
+holds 19,690 postings — about a ninth of local — and already responds
+quickly. Options 1 and 2 would make it faster still and carry no risk
+there; option 3 would add invalidation machinery the demo has no need
+for.
+
+**Next:** option 1 is a well-scoped follow-up with a measured payoff.
+Nothing else outstanding.
