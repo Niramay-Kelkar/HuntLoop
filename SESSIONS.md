@@ -15835,3 +15835,64 @@ names — unrelated to this upgrade. Separately, the Clerk SDK logs a
 own version was not changed here, so it is not from the Next bump.
 
 **Next:** Nothing outstanding from this work.
+
+---
+
+## 2026-11-21 — Clear the minimatch Dependabot alert in the frontend
+
+**Did:** Closed Dependabot alert #29 (GHSA-g3hv-75wg-m249 /
+CVE-2026-118764, "minimatch has potential denial of service via
+globparts amplification", Moderate, dev-only and transitive). Exactly
+one path in `frontend/package-lock.json` was in the vulnerable
+`>=7.0.0 <11.0.1` range: `minimatch@10.2.6`, reached through
+`eslint-config-next@16.4.5` → `typescript-eslint@8.72.1` →
+`@typescript-eslint/typescript-estree@8.72.1`, which declares
+`minimatch: ^10.2.2`. The other five copies in the tree are
+`minimatch@3.1.5` under eslint and three eslint plugins — below the
+7.0.0 floor, so never affected.
+
+The fix is a parent upgrade, not a forced minimatch version:
+`@typescript-eslint/typescript-estree@8.73.0` already declares
+`minimatch: ^11.0.1` upstream, and `eslint-config-next@16.4.5` allows
+`typescript-eslint: ^8.56.0`, so 8.73.0 is inside the range this
+project already permits. Because the package is transitive, the only
+way to pin it without adding a direct dependency is an `overrides`
+entry, so `frontend/package.json` gained exactly one:
+`"overrides": { "typescript-eslint": "8.73.0" }`. That moves the whole
+`@typescript-eslint/*` family to 8.73.0 together (8.73.0 pins its own
+siblings exactly) and pulls `minimatch@11.0.9`. Forcing minimatch 11
+underneath the old 8.72.1 estree was deliberately not done — it would
+have been an untested combination across a major boundary, where this
+is the pairing upstream ships.
+
+No application code changed; the diff is `package.json` (3 lines),
+`package-lock.json`, and this entry. One package appears in the
+lockfile that was not there before, `@isaacs/nonrecursive-glob-match` —
+it is minimatch 11's own internal dependency, part of how that version
+fixes the amplification, not a dependency this project took on.
+
+**Verified:** `npm ls minimatch` shows no version in the vulnerable
+range on any path (`11.0.9` on the former path, `3.1.5` elsewhere).
+`npm audit` went 7 moderate → **0**. Everything else matches the
+baseline exactly: frontend suite 168 passed in 20 files, `tsc --noEmit`
+clean, `npm run build` clean with the same 10 routes, and the single
+pre-existing eslint error in `FeedbackTrigger.tsx`
+(`react/no-unescaped-entities`) still the only lint finding — the lint
+toolchain itself moved a minor version and reported no new rule
+violations. `npm ci --dry-run` resolves cleanly, so CI's `npm ci` step
+is unaffected. Engines check: CI runs Node 22
+(`.github/workflows/ci.yml`), local is Node 25; `typescript-eslint`
+8.73.0 wants `^18.18.0 || ^20.9.0 || >=21.1.0` and `minimatch` 11 wants
+`18 || 20 || >=22` — both satisfied by each. Peers also hold: eslint
+9.39.5 against `^8.57.0 || ^9.0.0 || ^10.0.0`, typescript 5.9.3
+against `>=4.8.4 <6.1.0`.
+
+**Worth knowing before the next upgrade:** the override is an exact
+pin, so it wins over whatever `eslint-config-next` asks for. When
+eslint-config-next is next bumped and wants a `typescript-eslint`
+newer than 8.73.0, npm will quietly hold it at 8.73.0 instead. Delete
+the `overrides` block at that point — by then the parent range will
+pull a patched minimatch on its own and the override will have no job
+left to do.
+
+**Next:** Nothing outstanding from this work.
