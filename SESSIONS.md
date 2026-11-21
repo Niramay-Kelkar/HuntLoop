@@ -15772,3 +15772,66 @@ makes a real unauthenticated HTTP GET to a public ATS board API through
 `upsert_hits` — a live service, though a free one that spends no credit.
 
 **Next:** Nothing outstanding from this work.
+
+---
+
+## 2026-11-20 — Upgrade Next.js to 16.4.5 for the November security release
+
+**Did:** Bumped the frontend from Next.js 16.4.3 to 16.4.5, with
+`eslint-config-next` pinned to the same version. Both are exact pins in
+`frontend/package.json`; nothing else changed. `react`/`react-dom` stayed
+at 19.2.8 — none of the advisories or release notes require a newer
+React. No dependency was added or removed, and `npm audit fix` /
+`npm update` / the `next upgrade --agent=security` interactive flow were
+deliberately not used.
+
+16.4.3 sits above the October fix line (16.4.1) but below the November
+one, so it was missing all seven advisories from the 2026-11-03 release.
+16.4.5 is the minimum version Next.js names for those fixes, and the
+smallest jump that clears them; 16.4.6 exists and is `latest`, but adds
+no further security fix (npm's own affected range ends at 16.4.4).
+
+**Applicability:** most of the advisories do not reach this app.
+`next.config.ts` already sets `images: { unoptimized: true }`, which
+404s `/_next/image` before `sharp` is reached, and nothing imports
+`next/image` — so the SVG rejection bypass and the rest of the image
+optimizer findings are not reachable. The app has no `use cache` /
+Cache Components, no Server Actions, and no Route Handlers at all, so
+the cache-disclosure and cache-poisoning findings do not apply. The
+cross-client response injection and the shared-shell poisoning findings
+are self-hosted-only; production runs on Vercel. The `x-middleware-set-cookie`
+finding targets Edge Route Handlers and Pages Router Edge API routes —
+this app has neither, and `src/proxy.ts` (Clerk) runs on the Node.js
+runtime. The upgrade fixes all of them regardless.
+
+**Verified:** against an unchanged baseline — frontend suite 168 passed
+in 20 files, `tsc --noEmit` clean, `npm run build` clean (same 10
+routes), and the one pre-existing eslint error in
+`FeedbackTrigger.tsx` (`react/no-unescaped-entities`) still the only
+lint finding. `npm audit` went from 8 moderate to 7; the remaining 7
+are a pre-existing `minimatch` chain under `@typescript-eslint` that
+this upgrade did not touch (the lockfile diff contains no
+minimatch/typescript-eslint lines). The security-upgrade reminder that
+had been interrupting every `next dev` and `next build` is gone from
+both.
+
+Smoke tested in a real browser at `http://localhost:3010` against a
+locally run API on port 8010 pointed at the local system Postgres:
+dashboard (217,676 postings / 743 companies), jobs list, a job detail
+page including the Deep-Dive panel in its idle state (not run — no
+Modal call), applications, resumes, and the Clerk sign-in redirect for
+`/admin/feedback` (no credentials entered). Every route returned 200,
+and the only browser console message was from a Chrome extension, not
+the app.
+
+**Also noticed, not changed:** an unfiltered `GET /jobs` now takes ~30s
+against the full local 217k-row table, past the frontend's 20s
+`REQUEST_TIMEOUT_MS`, so the jobs list shows its "Couldn't load jobs"
+state until a filter is applied (a company-filtered query returns in
+~0.8s). That is the no-ANN-index seq-scan trade-off CLAUDE.md already
+documents, at a row count well past the ~100k revisit threshold it
+names — unrelated to this upgrade. Separately, the Clerk SDK logs a
+`createRouteMatcher` deprecation warning on dev-server start; Clerk's
+own version was not changed here, so it is not from the Next bump.
+
+**Next:** Nothing outstanding from this work.
