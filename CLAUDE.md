@@ -1629,7 +1629,7 @@ conventions" and SESSIONS.md for the real current state).
   genuinely new `job_postings` rows, all with `is_relevant` populated
   immediately (confirmed via direct `psql` query, 0 NULLs before and
   after), and finished stage 1 with a real exit code 0 — visible in
-  `logs/cron.log` under the updated `"stage 1/2: scraper orchestrator
+  `logs/cron.log` under the updated `"stage 1/3: scraper orchestrator
   (main.py, via docker compose run)"` label, including the real Docker
   build output. Re-ran `scripts/backfill_relevance.py` immediately after
   and got **0 rows left to classify** again. `pytest`: 72/72 passing,

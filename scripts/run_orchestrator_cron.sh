@@ -256,7 +256,7 @@ PYTHON="$REPO_ROOT/.venv/bin/python"
     echo "WARNING: failed to start the observability profile's pushgateway service - continuing without it. This run's metrics push(es) will fail and be logged as a warning by the app itself, but the actual scrape/backfill work below is unaffected."
   fi
 
-  echo "--- stage 1/2: scraper orchestrator (main.py, via docker compose run) ---"
+  echo "--- stage 1/3: scraper orchestrator (main.py, via docker compose run) ---"
   # A specific, known collision (see CLAUDE.md/SESSIONS.md's 2026-09-27
   # port-collision investigation, and docker-compose.yml's HUNTLOOP_DB_PORT
   # comment): another Compose project on this host - including a second
@@ -274,7 +274,7 @@ PYTHON="$REPO_ROOT/.venv/bin/python"
   docker compose run --rm --build -e DATABASE_URL="$DB_URL_FOR_DOCKER" app python main.py 2>&1 | tee "$STAGE1_OUT"
   scrape_status=${PIPESTATUS[0]}
   if [ "$scrape_status" -ne 0 ] && grep -q "port is already allocated" "$STAGE1_OUT"; then
-    echo "stage 1/2, attempt 1: failed with a host-port allocation collision (exit code $scrape_status) - another Docker Compose project on this host is likely holding db's host port. This is often transient - retrying once after 30s (see HUNTLOOP_DB_PORT in .env.example/README.md if this keeps happening)."
+    echo "stage 1/3, attempt 1: failed with a host-port allocation collision (exit code $scrape_status) - another Docker Compose project on this host is likely holding db's host port. This is often transient - retrying once after 30s (see HUNTLOOP_DB_PORT in .env.example/README.md if this keeps happening)."
     sleep 30
     # Force-remove (not just restart) the db/seed containers that failed
     # their network setup on attempt 1 before retrying - confirmed by
@@ -290,10 +290,10 @@ PYTHON="$REPO_ROOT/.venv/bin/python"
     docker compose rm -f db seed
     docker compose run --rm --build -e DATABASE_URL="$DB_URL_FOR_DOCKER" app python main.py 2>&1 | tee "$STAGE1_OUT"
     scrape_status=${PIPESTATUS[0]}
-    echo "stage 1/2, attempt 2 (retry): finished with exit code $scrape_status"
+    echo "stage 1/3, attempt 2 (retry): finished with exit code $scrape_status"
   fi
   rm -f "$STAGE1_OUT"
-  echo "--- stage 1/2 finished with exit code $scrape_status ---"
+  echo "--- stage 1/3 finished with exit code $scrape_status ---"
 
   echo "--- stage 2/3: skills-matching backfill (scripts/backfill_skills_matching.py) ---"
   "$PYTHON" "$REPO_ROOT/scripts/backfill_skills_matching.py"
