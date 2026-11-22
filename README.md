@@ -449,17 +449,14 @@ crontab -l | grep -v 'run_orchestrator_cron.sh' | crontab -
   of each, e.g.:
   ```
   === HuntLoop scheduled run started 2026-08-22 03:00:01 PDT ===
-  --- stage 1/2: scraper orchestrator (main.py, via docker compose run) ---
-  --- stage 1/2 finished with exit code 0 ---
+  --- stage 1/3: scraper orchestrator (main.py, via docker compose run) ---
+  --- stage 1/3 finished with exit code 0 ---
   --- stage 2/3: skills-matching backfill (scripts/backfill_skills_matching.py) ---
   --- stage 2/3 finished with exit code 0 ---
   --- stage 3/3: department categorization backfill (scripts/backfill_department_category.py) ---
   --- stage 3/3 finished with exit code 0 ---
   === run finished with exit code 0 at 2026-08-22 03:04:12 PDT ===
   ```
-  (The first stage's label still reads `1/2` rather than `1/3` in
-  `scripts/run_orchestrator_cron.sh` — a cosmetic leftover from when
-  there were two stages, not a sign that a stage is missing.)
   A non-zero overall exit code (or an `ERROR: .venv/bin/python not
   found` line, if the venv itself is missing) means at least one stage
   failed. Check this file first — it's the fastest way to answer "did

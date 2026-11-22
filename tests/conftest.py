@@ -165,9 +165,19 @@ SENTINEL_CREDENTIAL_MODULE_ATTRS = (
 
 # Hostnames (matched as suffixes, case-insensitively) that no test may
 # ever resolve, let alone connect to. These are the real paid/live
-# services this project talks to; the local database and anything else
-# on localhost is deliberately NOT in this list.
+# services this project talks to, plus the public ATS job boards it
+# scrapes; the local database and anything else on localhost is
+# deliberately NOT in this list.
+#
+# The ATS hosts cost no money and need no credential, which is exactly
+# why a real call to one can sit unnoticed in a test for a long time
+# (one did - see SESSIONS.md 2026-11-21). They are someone else's
+# production service either way, and a test that silently depends on a
+# live board is a test that fails offline and on a slow network. Every
+# host below is one the spiders, the ATS-detection layer, the discovery
+# scripts or huntloop.company_display_name really call.
 BLOCKED_PROVIDER_HOST_SUFFIXES = (
+    # Paid / credentialed providers.
     "resend.com",
     "knock.app",
     "tavily.com",
@@ -176,6 +186,14 @@ BLOCKED_PROVIDER_HOST_SUFFIXES = (
     "mistral.ai",
     "cerebras.ai",
     "modal.com",
+    # Public ATS job boards (no credential, but still live third parties).
+    "greenhouse.io",        # boards-api., job-boards., api.
+    "lever.co",             # api., jobs.
+    "ashbyhq.com",          # api., jobs.
+    "myworkdayjobs.com",    # {tenant}.{dc}.
+    "icims.com",            # careers-{slug}.
+    "smartrecruiters.com",  # api., careers.
+    "gem.com",              # jobs.
 )
 
 
