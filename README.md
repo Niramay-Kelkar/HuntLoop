@@ -419,6 +419,45 @@ free-tier budget, and simply stops itself cleanly for the day once that
 budget is exhausted — picking back up automatically on the next scheduled
 run. That's expected steady-state behavior, not a failure.
 
+### Nightly Docker housekeeping
+
+Stage 1 passes `--build`, so every scheduled run rebuilds the `app` image.
+That re-tags `huntloop-app:latest`, leaves the previous build **untagged**,
+and adds roughly 2GB of fresh build cache. Unattended that grew until the
+host disk hit 98% full and Docker Desktop crashed (2026-11-24), needing a
+manual ~8GB cleanup — so since 2026-11-26 the wrapper ends with a small,
+best-effort `docker_housekeeping` step.
+
+It runs once, **after every stage has finished and the run's exit code has
+already been decided**, and runs exactly two commands:
+
+- `docker image prune -f` — **dangling (untagged) images only**. Never
+  `-a`/`--all`, so a tagged image is never a candidate.
+- `docker builder prune -f --filter until=72h` — build cache older than the
+  retention window. Never `--all`, so cache still shared with a live image
+  stays.
+
+**Never touched:** any Docker volume (`huntloop_pgdata`,
+`huntloop_prometheus_data`, `huntloop_grafana_data`, `huntloop_caddy_data`),
+any container, any tagged image, the Postgres database, or anything under
+`data/`. No `docker volume …`, no `docker system prune`, no
+`docker container prune`, no `docker rm`/`rmi`, no `--volumes`. Nothing
+already computed (postings, companies, skills matches, embeddings, resume
+data, usage ledgers) lives in the places this prunes.
+
+It is best-effort: each command may fail (Docker not running, a CLI error),
+each failure is logged to `logs/cron.log` and ignored, and **it can never
+change the script's exit status or what the pipeline did**. Two size-summary
+lines (before/after, from `docker system df`) are written to `logs/cron.log`.
+
+| Env var | Default | Effect |
+| --- | --- | --- |
+| `HUNTLOOP_DOCKER_PRUNE` | `1` | Set to `0` to skip the cleanup entirely. |
+| `HUNTLOOP_DOCKER_PRUNE_HOURS` | `72` | Build-cache retention window in hours. Values below `48` are raised to `48`; a non-numeric value falls back to `72`. |
+
+`tests/test_cron_script_prune_safety.py` enforces all of the above as a
+static check on the script's text — it never executes the script.
+
 **Enable it** (runs daily at 3:00 AM local time):
 
 ```bash
