@@ -207,6 +207,74 @@ export PATH="/usr/local/bin:$PATH"
 
 PYTHON="$REPO_ROOT/.venv/bin/python"
 
+# --- nightly Docker housekeeping (best-effort, added 2026-11-26) ----------
+# Every scheduled run rebuilds the `app` image (`--build` above - that is
+# required and stays), which re-tags huntloop-app:latest, leaves the
+# previous build untagged, and adds roughly 2GB of fresh build cache.
+# Unattended that grows without bound: the host disk reached 98% full and
+# Docker Desktop crashed on 2026-11-24, needing a manual ~8GB cleanup.
+#
+# This is called AFTER every pipeline stage and after `status` has already
+# been decided, and it is strictly best-effort: each command is allowed to
+# fail, every failure is logged and ignored, and nothing here can change
+# this script's exit code or what the pipeline did.
+#
+# The two commands below are the only cleanup this script ever performs:
+#   * `docker image prune -f` - DANGLING (untagged) images only. Never
+#     -a/--all, so a tagged image is never even a candidate.
+#   * `docker builder prune -f --filter until=<hours>h` - build cache older
+#     than the retention window. Never --all, so cache still shared with a
+#     live image stays put.
+# Volumes (huntloop_pgdata, huntloop_prometheus_data, huntloop_grafana_data,
+# huntloop_caddy_data), containers, tagged images, the Postgres database and
+# everything under data/ are NEVER touched: no `docker volume ...`, no
+# `docker system prune`, no `docker container prune`, no `docker rm`/`rmi`,
+# and no `--volumes` anywhere.
+#
+# HUNTLOOP_DOCKER_PRUNE=0 disables this entirely; HUNTLOOP_DOCKER_PRUNE_HOURS
+# overrides the retention window (floored at 48h; a non-numeric value falls
+# back to the 72h default). Neither variable's value is ever echoed.
+
+# One line of size totals from `docker system df` - type, size and
+# reclaimable figures only, no image/container/volume names and no
+# environment values. Empty if Docker is unreachable.
+docker_df_summary() {
+  docker system df --format '{{.Type}} {{.Size}} (reclaimable {{.Reclaimable}})' 2>/dev/null \
+    | tr '\n' ';' | sed 's/;$//'
+}
+
+docker_housekeeping() {
+  if [ "${HUNTLOOP_DOCKER_PRUNE:-1}" = "0" ]; then
+    echo "--- docker housekeeping: disabled, nothing pruned ---"
+    return 0
+  fi
+
+  prune_hours="${HUNTLOOP_DOCKER_PRUNE_HOURS:-72}"
+  case "$prune_hours" in
+    ''|*[!0-9]*) prune_hours=72 ;;
+  esac
+  if [ "$prune_hours" -lt 48 ]; then
+    prune_hours=48
+  fi
+
+  df_before="$(docker_df_summary)"
+  [ -n "$df_before" ] || df_before="docker system df unavailable"
+  echo "--- docker housekeeping: before - $df_before ---"
+
+  if ! docker image prune -f; then
+    echo "docker housekeeping: 'docker image prune -f' failed - logged and ignored, this run's outcome is unaffected."
+  fi
+
+  if ! docker builder prune -f --filter "until=${prune_hours}h"; then
+    echo "docker housekeeping: 'docker builder prune' failed - logged and ignored, this run's outcome is unaffected."
+  fi
+
+  df_after="$(docker_df_summary)"
+  [ -n "$df_after" ] || df_after="docker system df unavailable"
+  echo "--- docker housekeeping: after - $df_after ---"
+  return 0
+}
+
 {
   echo "=== HuntLoop scheduled run started $(date '+%Y-%m-%d %H:%M:%S %Z') ==="
 
@@ -322,6 +390,11 @@ PYTHON="$REPO_ROOT/.venv/bin/python"
   if [ "$dept_cat_status" -ne 0 ]; then
     status=$dept_cat_status
   fi
+
+  # Best-effort Docker cleanup. Runs only here: every stage is done and
+  # `status` is already final, so nothing below can alter this run's
+  # outcome (see docker_housekeeping's own comment).
+  docker_housekeeping
 
   echo "=== run finished with exit code $status (scrape=$scrape_status, skills=$skills_status, dept_cat=$dept_cat_status) at $(date '+%Y-%m-%d %H:%M:%S %Z') ==="
   exit "$status"

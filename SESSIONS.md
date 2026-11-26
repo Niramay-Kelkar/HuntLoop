@@ -16155,3 +16155,77 @@ completely. No data, schema or migration step is involved.
 
 **Next:** option 2 from the diagnosis (an index on the filter columns)
 is still available but much less urgent now. Nothing outstanding.
+
+---
+
+## 2026-11-26 — Bound the nightly run's Docker growth
+
+**Did:** Added a small best-effort `docker_housekeeping` step at the end of
+`scripts/run_orchestrator_cron.sh`. Stage 1 passes `--build` (required — the
+`app` image copies the repo at build time, so a scheduled run must reflect
+what's on disk), which each night re-tags `huntloop-app:latest`, leaves the
+previous build untagged, and adds ~2GB of build cache. That accumulation is
+what filled the host disk to 98% and crashed Docker Desktop on 2026-11-24
+(a manual cleanup then freed ~8GB; see that day's recovery check). The new
+function runs once, after all three stages and after `status` is already
+final, and runs exactly two commands: `docker image prune -f` (dangling
+images only, never `-a`/`--all`) and
+`docker builder prune -f --filter until=${prune_hours}h`
+(never `--all`). Configurable via `HUNTLOOP_DOCKER_PRUNE` (default 1, `0`
+disables) and `HUNTLOOP_DOCKER_PRUNE_HOURS` (default 72, floored at 48,
+non-numeric falls back to 72) — neither value is ever echoed. It logs one
+`docker system df` size-summary line before and one after, into the existing
+`logs/cron.log` format. Every command may fail; each failure is logged and
+ignored, and nothing in the function can alter the script's exit code. The
+rest of the script is byte-for-byte unchanged — the diff is a pure insertion
+(the function plus its one call site).
+
+**Read-only impact preview before implementing** (nothing was pruned, and
+neither prune command was run): 13 dangling images, all `<none>:<none>`,
+dated 2026-11-08 → 2026-11-22, two per nightly build; none tagged, and none
+of them is the image behind any of the 6 containers (whose image IDs all
+resolve to tagged images — `huntloop-seed`, `huntloop-api`,
+`pgvector/pgvector:pg18`, `prom/prometheus`, `prom/pushgateway`,
+`grafana/grafana`). Build cache: 49 entries, 14.43GB total, of which
+**13.5GB is `Shared: true`** with live images and will NOT be pruned, and
+927.2MB is private/unshared. `docker system df` reports only **13.58MB**
+reclaimable on images today, because these nightly builds still share almost
+every layer with the current tagged `huntloop-app`/`huntloop-seed`/
+`huntloop-api` — so the image prune's immediate byte saving is small; its
+real value is stopping 13-and-growing untagged image records from
+accumulating until their layers diverge (which is exactly what cost ~10GB by
+2026-11-24). No volume is involved in either command.
+
+**Decided:** Keep the scope to those two commands and nothing else. Every
+destructive variant is explicitly out: no `docker volume prune`/`rm`, no
+`docker system prune`, no `docker container prune`, no `docker rm`/`rmi`, no
+`docker image prune -a`, no `--volumes`, no `builder prune --all`. The
+retention floor is 48h so a future override can't start pruning cache the
+very next build would have reused. Placed the call after `status` is
+computed rather than in a trap, so the ordering guarantee is visible in the
+file and there is no new failure path around the exit code.
+
+**Verified:** `bash -n` clean. `shellcheck` is not installed on this
+machine (reported, not worked around). New
+`tests/test_cron_script_prune_safety.py` (7 tests, text-only — never
+executes the script, never calls docker) asserts no forbidden command
+appears, that exactly the two allowed prunes exist without `--all`/`-a`/
+`--volumes`, that `--build` is still on the compose run line, that the
+retention can never fall below 48h, that neither env var is echoed, and that
+the housekeeping call sits after all three stages and after the exit status
+is decided. Its forbidden-pattern list was itself checked against 8 mutated
+regression lines (all caught) and the 4 real command lines (no false
+positives). Full backend suite: 718 passed (711 + the 7 new), run in a child
+process with the email/Knock/Tavily/Groq/Gemini/Mistral/Cerebras/Modal
+credential variables stripped. No pipeline, no prune command and no cron run
+was executed; no database was contacted.
+
+**Rollback:** reverting this one commit restores the previous behaviour
+completely — the script simply stops pruning. No data, schema or migration
+step is involved, and nothing it removed is needed to run again (a dangling
+image is a superseded build; pruned build cache is re-created by the next
+build).
+
+**Next:** Nothing follow-on required. If Docker data still grows, the next
+lever is the sparse `Docker.raw` file, which only shrinks via a manual
+Docker Desktop disk-image step — deliberately not automated here.
