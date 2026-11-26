@@ -16035,3 +16035,123 @@ for.
 
 **Next:** option 1 is a well-scoped follow-up with a measured payoff.
 Nothing else outstanding.
+
+---
+
+## 2026-11-21 — Make the job list read resume_skill_matches once
+
+Acting on option 1 from this morning's `GET /jobs` diagnosis. An
+unfiltered request took about 30 s locally, past the frontend's 20 s
+timeout. The cause was never the row count, the `COUNT(*)` (211 ms) or
+the pgvector ordering (398 ms): it was that `huntloop.match_scoring`
+builds every skills-derived part of the composite score out of
+**correlated scalar subqueries** against `resume_skill_matches`.
+Rendered into the list query that is 14 subqueries in the score
+expression alone, 8 more in `score_basis`, 2 for the skill lists and
+another 14 when the score is re-rendered in `ORDER BY` — 38 per row,
+evaluated for all 219,409 postings before the page `LIMIT` can apply.
+
+**The change is one new module and nine lines of wiring.**
+`huntloop.api.jobs_list_scoring.JobsListScoring` reads
+`resume_skill_matches` **once**, as a LEFT JOIN on `(job_posting_id,
+resume_version_id)`, and rebuilds the same arithmetic on the joined
+columns. `GET /jobs` uses it; nothing else does. The join cannot fan
+out — `resume_skill_matches` is unique on `(job_posting_id,
+resume_version_id)`, so for one resume version there is at most one
+match row per posting, and a posting with no row yields the NULL
+columns the old subquery already returned, hence the same
+partial-basis fallback.
+
+**`huntloop.match_scoring` was deliberately not touched.** It is
+shared with `scripts/backfill_skills_matching.py`, which uses it to
+decide which postings to spend LLM quota on; the new module *imports*
+its constants and its embedding term rather than copying them, so the
+two cannot drift on what a score means. Only the plumbing differs.
+`GET /jobs/{id}` still calls the shared expressions directly — it
+reads one row, so the subqueries cost nothing there. The degenerate
+cases (no active resume, or an active resume with no embedding yet)
+delegate straight back to `match_scoring`, which emits no subqueries
+at all in those cases, so that SQL is unchanged.
+
+**Equivalence, proved read-only on the real local database.** Old and
+new queries were run inside one `SERIALIZABLE READ ONLY` transaction,
+so the skills-matching backfill — which was running throughout — could
+not make them disagree by writing between the two reads. **23 cases, 0
+mismatches.** Four were swept exhaustively: every one of the 219,409
+postings, comparing `match_score` (float repr, not an approximation),
+`score_basis`, `matched_skills`, `missing_skills`, `application_status`
+and `salary_estimate` — for the active resume, for a second resume
+version (id 7), for no active resume, and for a resume whose embedding
+is absent. The other 19 covered the filters the frontend sends
+(company, department category and `__unspecified__`, employment type
+and `__unspecified__`, `min_score` at 0.0 and 0.5, a canonical
+location, `__unspecified__` location, a multi-value location, a salary
+range, `salary_unspecified`, `tracked`, `sort=-date`, `sort=-salary`,
+and three combinations) by comparing totals, then the full row values
+of the first 50 pages at the default page size in order, then the new
+path's real `LIMIT/OFFSET` pagination at spot offsets against that
+same sequence.
+
+**Ties are not a risk here and the check was explicit.** Both paths
+append `JobPosting.id ASC` after the score, and id is unique, so
+`(score, id)` is a total order — equal scores cannot reorder between
+the two paths or between pages. The fixture test `tie_a`/`tie_b` pins
+this on two postings with byte-identical embeddings and no skills rows.
+
+**Two cases were vacuous locally and are recorded as such:** `tracked`
+and one company+department combination both matched 0 rows (there are
+no `job_applications` rows with a status other than `not_applied` on
+this machine). `tracked` is covered by the fixture tests and by the
+no-write test's real request; the combination was re-run against
+`primehealthcare` + `Healthcare & Clinical` (7,193 rows) and a
+three-filter case (5 rows), both 0 mismatches.
+
+**No writes.** `tests/test_jobs_list_scoring.py` attaches a
+`before_cursor_execute` listener and asserts that nothing any of ten
+real `GET /jobs` requests issues matches
+`INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE|GRANT|REVOKE|COMMENT`.
+The diff touches three files — the new module, the list handler, and
+the new test — and no migration, model, index or write path. Before
+any change, `resume_skill_matches` was dumped with `pg_dump -Fc` to
+`~/huntloop-backups/resume_skill_matches-20261121-183223.dump` (9.1 MB)
+and checksummed. Afterwards, the 130,281 rows that existed at that
+moment are **byte-identical** (md5 `46a2353390ac97b45088c8c25ead503b`
+over all of them, in a fixed order, unchanged), `job_postings` 219,409,
+`companies` 743 and `resume_versions` 5 are all unchanged. The table
+grew by 2,128 rows — all appends above the baseline max id, all for
+resume version 6, all created between 21:32 and 23:01, which is the
+window the already-running daily backfill (pid 55025, since exited on
+its own) was working in. Nothing was started, stopped or modified.
+
+**Timings, real endpoint, real local database** (the pre-change path
+restored in-process by a shim so both sides are measured the same way):
+
+| request | before | after |
+|---|---|---|
+| unfiltered, cold | 12.73 s | **0.93 s** |
+| unfiltered, warm | 7.82 s | **0.78 s** |
+| `?company=advanceauto`, cold | 0.42 s | 0.50 s |
+| `?company=advanceauto`, warm | 0.37 s | 0.36 s |
+
+Unfiltered is roughly 10x faster and now far inside the frontend's
+20 s timeout; the filtered case is unchanged within noise, i.e. no
+regression. The before figure is lower than the ~30 s originally
+diagnosed because the database was warm from the equivalence sweep —
+the shape of the win is the same either way.
+
+**Tests:** 711 passed, 0 failed (698 baseline + 13 new), in a child
+process with the email/Knock/Tavily/Groq/Gemini/Mistral/Cerebras/Modal
+credential variables stripped. The new tests cover equivalence against
+the shared expressions for both resume versions, postings with no match
+row, a thin skills signal, a posting with no embedding, both degenerate
+no-score paths, ties, the fact that the join never duplicates a posting
+that has rows for two resume versions, that the compiled SQL contains
+zero correlated subqueries and exactly one join, and the no-write
+assertion. No existing test was modified. Nothing under `frontend/` was
+touched, so the frontend suite was not run.
+
+**Rollback:** reverting this one commit restores the previous behaviour
+completely. No data, schema or migration step is involved.
+
+**Next:** option 2 from the diagnosis (an index on the filter columns)
+is still available but much less urgent now. Nothing outstanding.

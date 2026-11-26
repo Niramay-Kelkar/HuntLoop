@@ -18,6 +18,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from huntloop.api.dependencies import get_db
+from huntloop.api.jobs_list_scoring import JobsListScoring
 from huntloop.api.schemas.jobs import (
     ApplicationStatusResponse,
     ApplicationStatusUpdate,
@@ -45,7 +46,6 @@ from huntloop.db_models import (
 from huntloop.demo_mode import is_demo_mode
 from huntloop.match_scoring import (
     match_score_expr,
-    match_score_order_by,
     resume_skill_columns,
     score_basis_expr,
 )
@@ -366,8 +366,21 @@ def list_jobs(
     if min_score is not None and resume_embedding is None:
         raise HTTPException(400, "min_score filter requires an active resume with a computed embedding")
 
-    score_expr, basis_expr, matched_col, missing_col, status_expr = _score_and_status_columns(
-        resume_embedding, resume_version_id
+    # The list endpoint reads resume_skill_matches once, through a single
+    # LEFT JOIN, instead of through the correlated scalar subqueries
+    # huntloop.match_scoring emits - ~2.9M per-row lookups before the
+    # page LIMIT could apply, which is what made an unfiltered request
+    # take ~30s. Same score, same ordering; see
+    # huntloop.api.jobs_list_scoring. The shared scoring module and its
+    # other caller (the skills-matching backfill) are untouched, and
+    # GET /jobs/{id} below still uses them directly - it reads one row,
+    # so the subqueries cost nothing there.
+    scoring = JobsListScoring(resume_embedding, resume_version_id)
+    score_expr = scoring.match_score
+    basis_expr = scoring.score_basis
+    matched_col, missing_col = scoring.skill_columns
+    status_expr = func.coalesce(JobApplication.status, ApplicationStatus.NOT_APPLIED.value).label(
+        "application_status"
     )
     salary_expr = _salary_estimate_expr()
 
@@ -388,6 +401,7 @@ def list_jobs(
         .join(Company, JobPosting.company_id == Company.id)
         .outerjoin(JobApplication, JobApplication.job_posting_id == JobPosting.id)
     )
+    query = scoring.apply_join(query)
 
     if tracked:
         query = query.where(JobApplication.status != ApplicationStatus.NOT_APPLIED.value)
@@ -434,15 +448,16 @@ def list_jobs(
     total = db.execute(select(func.count()).select_from(query.subquery())).scalar_one()
 
     # Every sort is descending with NULLs pushed last, then a stable
-    # id tiebreaker. match_score_order_by additionally handles the
+    # id tiebreaker. scoring.order_by additionally handles the
     # no-active-resume case (nothing real to sort by -> deterministic
-    # id order) - see huntloop.match_scoring.
+    # id order) - same contract as huntloop.match_scoring's own
+    # match_score_order_by, which still serves every other caller.
     if sort == "-date":
         order_by = [JobPosting.date_posted.desc().nulls_last()]
     elif sort == "-salary":
         order_by = [salary_expr.desc().nulls_last()]
     else:  # "-score"
-        order_by = match_score_order_by(resume_embedding, resume_version_id, descending=True)
+        order_by = scoring.order_by(descending=True)
     query = query.order_by(*order_by, JobPosting.id.asc())
 
     query = query.limit(limit).offset(offset)
